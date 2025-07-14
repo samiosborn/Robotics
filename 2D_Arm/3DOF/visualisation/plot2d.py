@@ -2,19 +2,22 @@
 import matplotlib.pyplot as plt
 
 # Function to plot robot in 2D
-def plot_2d(joint_positions):
+def plot_2d(joint_positions, ax):
     # Initialise figure and axes with subplots
-    fig, ax = plt.subplots()
+    #fig, ax = plt.subplots()
 
     # Set title
-    ax.set_title("3DOF 2D FK Simulation")
+    #ax.set_title("3DOF 2D FK Simulation")
 
     # Set aspect ratio
-    ax.set_aspect('equal')
+    #ax.set_aspect('equal')
 
     # Show x,y axes at origin
-    ax.axhline(0, color = 'grey', linewidth = 2)
-    ax.axvline(0, color = 'grey', linewidth = 2)
+    #ax.axhline(0, color = 'grey', linewidth = 2)
+    #ax.axvline(0, color = 'grey', linewidth = 2)
+
+    # 
+    ax.clear()
 
     # Set x and y limits for axes
     ax.set_xlim(-1, 1)
