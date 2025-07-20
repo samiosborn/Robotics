@@ -314,15 +314,7 @@ $$
 
 ---
 
-### Intuition
-
-- The Jacobian describes how much each joint change moves the end-effector.
-- The pseudoinverse finds the minimum joint change that best matches the desired movement in task space.
-- Iterating this process is like “nudging” the joint angles towards the target. 
-- This is essentially Newton–Raphson for multivariable functions. 
-
-## Inverse Kinematics via Pseudoinverse (inverse_pseudoinverse.py)
-#### Iterative IK Algorithm
+### Iterative IK Algorithm
 
 1. **Start with an initial estimate and define tolerance**  
    \(\boldsymbol{\theta}_0\) (e.g., all zeros or last known configuration)
@@ -352,7 +344,213 @@ $$
 \boxed{\boldsymbol{\theta}_{k+1} = \boldsymbol{\theta}_k + J^\dagger(\boldsymbol{\theta}_k)\big(\boldsymbol{x}^* - f(\boldsymbol{\theta}_k)\big)}
 $$
 
+### Intuition
+
+- The Jacobian describes how much each joint change moves the end-effector.
+- The pseudoinverse finds the minimum joint change that best matches the desired movement in task space.
+- Iterating this process is like “nudging” the joint angles towards the target. 
+- This is essentially a Jacobian-based Gauss–Newton method. 
+
 ---
 
+## Avoiding Singularities
+
+### Intuition
+Singularities occur in the Jacobian \( J \) matrix when it can't be inverted. This is where one dimension collapses. 
+
+For an example of this, consider a 2DOF 2D Robot arm with joint angles \( \theta_1, \theta_2 \). Suppose the arm is straight line when \( \theta_2 = 0 \). Then, any small change in \( \theta_2 \) will move the end effector in an arc that's tangent is perpendicular to the line. Similarly with a small change to \( \theta_1 \). Thus, changes to both joint angles are parallel in effect and thus the rank of J drops by 1 and it's no longer invertible. 
+
+### Singular Value Decomposition (SVD)
+
+To deal with singularities when inverting \( (J J^{T})^{-1} \), we use Singular Value Decomposition (SVD). 
+
+For any real \(m \times n\) matrix \(J\), there always exist:  
+
+- \(U \in \mathbb{R}^{m \times m}\): an orthogonal matrix  
+- \(V \in \mathbb{R}^{n \times n}\): an orthogonal matrix  
+- \(\Sigma \in \mathbb{R}^{m \times n}\): a diagonal-like matrix with non-negative entries  
+
+such that  
+
+\[
+\boxed{J = U \, \Sigma \, V^\top}
+\]
+
+\(\Sigma = \mathrm{diag}(\sigma_1, \sigma_2, \dots, \sigma_r)\) where:
+
+- \(\sigma_i \ge 0\) are the **singular values** of \(J\)  
+   - They are the square roots of the eigenvalues of \(J^\top J\) (or \(J J^\top\))  
+
+### Singular Values
+
+For \(J\), two important features of \(J^\top J\): 
+
+1. **Symmetric:**  
+\[
+(J^\top J)^\top = J^\top (J^\top)^\top = J^\top J.
+\]
+
+2. **Positive semi-definite:** For any vector \(x \in \mathbb{R}^n\),  
+\[
+x^\top (J^\top J)\, x = (Jx)^\top (Jx) = \|Jx\|^2 \ge 0.
+\]
+
+Recall the definition for an eigenvector \(v\) and eigenvalue \(\lambda\) of \(J^\top J\):  
+
+\[
+J^\top J v = \lambda v.
+\]
+
+Now pre-multiply by \(v^\top\):  
+
+\[
+v^\top (J^\top J) v = \lambda\, v^\top v.
+\]
+
+But \(v^\top (J^\top J) v = \|Jv\|^2 \ge 0\).  
+Also \(v^\top v = \|v\|^2 > 0\) for any nonzero eigenvector.  
+
+Therefore:  
+
+\[
+\lambda \|v\|^2 = \|Jv\|^2 \ge 0 \quad \Rightarrow \quad \lambda \ge 0.
+\]
+
+Hence **all eigenvalues \(\lambda_i\) of \(J^\top J\) are non-negative.**  
+
+The **singular values** \(\sigma_i\) of \(J\) are then defined as  
+
+\[
+\sigma_i = \sqrt{\lambda_i} \ge 0.
+\]
+
+---
+
+### Geometric Understanding
+
+Multiplication by \(J\) maps a unit sphere in \(\mathbb{R}^n\) to an **ellipsoid** in \(\mathbb{R}^m\).  
+The lengths of the ellipsoid’s principal axes are exactly the singular values \(\sigma_i\),  which must be non-negative (no “negative length”).
+
+---
+
+### Identification of Singularities
+
+The Singular Value Decomposition  
+
+\[
+J = U \Sigma V^\top
+\]
+
+satisfies  
+
+\[
+J^\top J = V \Sigma^2 V^\top, 
+\quad 
+J J^\top = U \Sigma^2 U^\top.
+\]
+
+Thus the **non-zero eigenvalues of \(J^\top J\)** (and \(J J^\top\)) are the same,  
+and their square roots are the singular values \(\sigma_i\).
+
+Rank and singularity: 
+- If **all \(\sigma_i > 0\)**, then \(J\) is full rank → invertible (if square).  
+- If **some \(\sigma_i = 0\)**, rank drops → **singularity**.  
+
+Thus, SVD provides a numerical way to detect singularities by inspecting the singular values \(\sigma_i\).  
 
 
+Given the SVD \(J = U \Sigma V^\top\), the Moore–Penrose pseudoinverse is  
+
+\[
+J^\dagger = V \, \Sigma^\dagger U^\top \\
+\Sigma^\dagger = \mathrm{diag}\!\left( \frac{1}{\sigma_i} \;\text{, if } \sigma_i \neq 0,\; 0 \text{ otherwise} \right)
+\]
+
+- For **large \(\sigma_i\)** --> normal inversion  
+- For **\(\sigma_i \to 0\)** --> division blows up → numerical instability near singularity  
+
+Hence SVD pseudoinverse does not avoid singularities — it still explodes when \(\sigma_i \approx 0\)
+
+---
+
+### Damped Least Squares (DLS)
+
+Damped Least Squares introduces a damping term \( \lambda  > 0 \) which avoids singularities. 
+
+In the Moore-Penrose pseudoinverse method, we have:
+$$
+J^\dagger = J^{T} (J J^{T})^{-1}
+$$
+
+In DLS instead we have: 
+$$
+J^\dagger_\lambda = J^{T} (J J^{T} + \lambda^2 I)^{-1}
+$$
+
+Recall from the SVD of the Jacobian \(J\):
+\[
+J = U \Sigma V^\top, 
+\quad \Sigma = \mathrm{diag}(\sigma_1, \sigma_2, \dots)
+\]
+
+the **damped pseudoinverse** is defined by modifying the singular value inversion:
+
+Using the SVD \(J = U \Sigma V^\top\), since \(V\) is orthogonal, we have \( V^\top V = I \)
+
+So it cancels out in the product:
+
+\[
+J J^\top 
+= U \Sigma V^\top \; (U \Sigma V^\top)^\top
+= U \Sigma (V^\top V) \Sigma^\top U^\top
+= U \,\Sigma \Sigma^\top\, U^\top.
+\]
+
+\[
+J J^\top = U \Sigma^2 U^\top
+\]
+
+Since \( U \) is orthogonal:
+\[
+J J^\top + \lambda^2 I = U \left( \Sigma^2 + \lambda^2 I \right) U^\top
+\]
+
+Its inverse is:
+\[
+(J J^\top + \lambda^2 I)^{-1} 
+= U \, \mathrm{diag}\!\left( \frac{1}{\sigma_i^2 + \lambda^2} \right) U^\top.
+\]
+
+Now multiply:
+\[
+\begin{aligned}
+J^\top (J J^\top + \lambda^2 I)^{-1} 
+&= (V \Sigma U^\top)^\top \; U \, \mathrm{diag}\!\left( \tfrac{1}{\sigma_i^2 + \lambda^2} \right) U^\top \\
+&= V \Sigma^\top U^\top U \, \mathrm{diag}\!\left( \tfrac{1}{\sigma_i^2 + \lambda^2} \right) U^\top \\
+&= V \, \mathrm{diag}\!\left( \frac{\sigma_i}{\sigma_i^2 + \lambda^2} \right) U^\top
+\end{aligned}
+\]
+
+\[
+J^\dagger_\lambda 
+= V \, \mathrm{diag}\!\!\left( \frac{\sigma_i}{\sigma_i^2 + \lambda^2} \right) U^\top
+\]
+
+Which modifies the singular value inversion:  
+
+\[
+\frac{1}{\sigma_i} \;\;\longrightarrow\;\; \frac{\sigma_i}{\sigma_i^2 + \lambda^2}
+\]
+
+
+
+- If \(\sigma_i \gg \lambda\), behaves like \(1/\sigma_i\) (normal pseudoinverse)  
+- If \(\sigma_i \to 0\), becomes \(\approx \sigma_i / \lambda^2\) → finite, no blow-up  
+
+This regularisation avoids instability near singularities.
+
+Reminder that this singularity is transient and can normally be overcome. The issue is when near-infinite joint torques are being applied to joint servos in traditional SVD. 
+
+## Inverse Kinematics (inverse.py)
+
+This function executes the IK algorithm until convergence. 

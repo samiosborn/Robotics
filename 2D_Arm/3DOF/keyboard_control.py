@@ -8,7 +8,7 @@ import pygame
 import time
 
 # Track joint angles
-current_joint_angles = np.array(config.INITIAL_JOINT_ANGLES, dtype=float)
+current_joint_angles = np.array(config.JOINT_OFFSETS, dtype=float)
 
 # Button press to angle change
 angle_delta = np.deg2rad(10)
@@ -77,9 +77,9 @@ while running:
         joint_angles = angle_delta * np.array([link_1_multiplier, 
                                                link_2_multiplier, 
                                                link_3_multiplier]), 
-        INITIAL_JOINT_ANGLES = current_joint_angles,
-        LINK_LENGTHS = config.LINK_LENGTHS, 
-        STARTING_POSITION = config.STARTING_POSITION
+        joint_offsets = current_joint_angles,
+        link_lengths = config.LINK_LENGTHS, 
+        base_position = config.BASE_POSITION
     )
 
     # Update joint angles
