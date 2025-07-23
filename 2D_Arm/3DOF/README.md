@@ -554,3 +554,53 @@ Reminder that this singularity is transient and can normally be overcome. The is
 ## Inverse Kinematics (inverse.py)
 
 This function executes the IK algorithm until convergence. 
+
+# Trajectory Planning
+
+Trajectory planning is how we plan to move the end effector pose from one position to another. This problem is divided into two methods: 
+- Task-Space based: This is the Cartesian space where the end effector pose may exist. 
+- Joint-Space based: This concerns changing joint angles within their respective limits. 
+
+## Task-Space Trajectories: 
+
+Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) and end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \)
+
+We can consider the linear interpolation \( l(t) \) with \( t: 0 \to T \) where: 
+$$
+l(t) = 
+\begin{bmatrix}
+x_0 + \frac{t}{T} (x_T - x_0) \\
+y_0 + \frac{t}{T} (y_T - y_0)\\
+\phi_0 + \frac{t}{T} ( \phi_T - \phi_0)
+\end{bmatrix}
+$$
+
+This is simply a straight line in task space. 
+
+Discretise the motion with a time interval step \( dt \), then for every step: 
+1. For step \( k \), compute the pose \( l(t_k) \) at time \( t * dt\)
+2. Use inverse kinematics to return the joint angles \( \boldsymbol{\theta_k} \) required for that pose
+3. Send the joints to those required joint angles
+
+#### Positives
+- End effector moves in a continuous linear path in Cartesian space. 
+- Likely moves in the shortest possible path (a straight line), using less time and energy. 
+- Intuitive for tasks which are straight: welding joints or drawing lines. 
+
+#### Negatives
+- Computationally heavy: requires calculating the IK at each time step. 
+- IK may fail due to singularities or joint limits mid-path. 
+- IK may have multiple solutions causing joint angle jumps. 
+
+### Straight Line Task-Space Trajectory (task_space_trajectory.py)
+
+This program executes the linear task-space trajectory planner. 
+
+At each time step, the program returns the required joint angles for the forward kinematics. 
+
+The function takes in the start and end pose. Furthermore a total time T and time step dt. 
+
+### Trajectory Visualisation (trajectory_visualisation.py)
+
+## Joint-Space Trajectories: 
+
