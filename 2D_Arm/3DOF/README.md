@@ -600,6 +600,12 @@ At each time step, the program returns the required joint angles for the forward
 
 The function takes in the start and end pose. Furthermore a total time T and time step dt. 
 
+### Animate Task-Space Trajectory (animate_task_space_trajectory.py)
+
+This program animates the linear task-space trajectory by running forward kinematics at each time step, and calling the plot function on an interactive basis. 
+
+
+
 ### Trajectory Visualisation (trajectory_visualisation.py)
 
 ## Joint-Space Trajectories: 

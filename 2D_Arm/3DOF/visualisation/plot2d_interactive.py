@@ -2,7 +2,7 @@
 import matplotlib.pyplot as plt
 
 # Function to plot robot in 2D
-def plot_2d(joint_positions, ax):
+def plot_2d(joint_positions, ax, refresh_pause=0.001):
     # Clear axes
     ax.clear()
 
@@ -25,4 +25,7 @@ def plot_2d(joint_positions, ax):
 
     # Refresh plot
     plt.draw()
-    plt.pause(0.001)
+
+    # Pause just to force GUI redraw
+    if refresh_pause > 0:
+        plt.pause(refresh_pause)
