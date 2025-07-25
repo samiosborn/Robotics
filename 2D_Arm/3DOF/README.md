@@ -565,7 +565,7 @@ Trajectory planning is how we plan to move the end effector pose from one positi
 
 Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) and end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \)
 
-We can consider the linear interpolation \( l(t) \) with \( t: 0 \to T \) where: 
+We can consider the linear interpolation in task-space \( l(t) \) with \( t: 0 \to T \) where: 
 $$
 l(t) = 
 \begin{bmatrix}
@@ -592,21 +592,47 @@ Discretise the motion with a time interval step \( dt \), then for every step:
 - IK may fail due to singularities or joint limits mid-path. 
 - IK may have multiple solutions causing joint angle jumps. 
 
-### Straight Line Task-Space Trajectory (task_space_trajectory.py)
+### Linear Task-Space Trajectory (task_space_trajectory.py)
 
 This program executes the linear task-space trajectory planner. 
 
 At each time step, the program returns the required joint angles for the forward kinematics. 
 
-The function takes in the start and end pose. Furthermore a total time T and time step dt. 
+The function takes in the start and end pose, as well as a total time $T$ and time step $dt$ 
 
-### Animate Task-Space Trajectory (animate_task_space_trajectory.py)
+### Animate Trajectory (animate_trajectory.py)
 
-This program animates the linear task-space trajectory by running forward kinematics at each time step, and calling the plot function on an interactive basis. 
-
-
-
-### Trajectory Visualisation (trajectory_visualisation.py)
+This program animates the trajectory given by a series of joint angles, by running forward kinematics at each time step, and calling the plot function on an interactive basis. 
 
 ## Joint-Space Trajectories: 
+
+Joint-Space trajectories interpolate in joint-space, this is the space in which joint values exist. 
+
+Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) which corresponds to start joint angles \( \boldsymbol{\theta_0} = (\theta_{1,0}, \theta_{2,0}, \theta_{3,0} ) \) and end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \) which corresponds to start joint angles \( \boldsymbol{\theta_T} = (\theta_{1,T}, \theta_{2,T}, \theta_{3,T} ) \)
+
+We can consider the linear interpolation in joint-space \( l(t) \) with \( t: 0 \to T \) where: 
+$$
+l(t) = 
+\begin{bmatrix}
+\theta_{1,0} + \frac{t}{T} (\theta_{1,T} - \theta_{1,0}) \\
+\theta_{2,0} + \frac{t}{T} (\theta_{2,T} - \theta_{2,0}) \\
+\theta_{3,0} + \frac{t}{T} (\theta_{3,T} - \theta_{3,0})
+\end{bmatrix}
+$$
+
+Now this trajectory will be smooth in joint-space, however will likely be curved in Cartesian task-space. 
+
+#### Positives
+- Does not require computing the inverse kinematics every step, light to run. 
+- Ensures joint angles stay within possible bounds. 
+- No jumping around like in task-space trajectories (no ambiguity as to the next joint angle input). 
+
+#### Negatives
+- End effector likely will not move in a straight line in task-space. 
+- Trajectory may not be predicatable, and may not have the lowest time and energy cost. 
+- Piecewise linear interpolation has a jump in velocity, which causes extreme acceleration, which is bad for joint motors. 
+
+### Linear Joint-Space Trajectory (linear_joint_space_trajectory.py)
+
+This file executes the piecewise linear joint-space trajectory. 
 

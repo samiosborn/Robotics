@@ -1,4 +1,4 @@
-# task_space_visualisation.py
+# task_space_trajectory.py
 import numpy as np
 from kinematics.inverse import inverse_via_DLS
 

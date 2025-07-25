@@ -1,12 +1,12 @@
-# animate_task_space_trajectory.py
+# animate_trajectory.py
 from kinematics.forward import forward_kinematics
 from visualisation.plot2d_interactive import plot_2d
 import numpy as np
 import matplotlib.pyplot as plt
 import time
 
-# Animate task-space trajectory
-def animate_linear_task_space_trajectory(trajectory_joint_angles, animation_time, joint_offsets, link_lengths, base_position):
+# Animate trajectory (defined in joint angles)
+def animate_angles_trajectory(trajectory_joint_angles, animation_time, joint_offsets, link_lengths, base_position):
     
     # Number of steps
     num_steps = len(trajectory_joint_angles)
