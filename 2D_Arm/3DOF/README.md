@@ -604,21 +604,23 @@ The function takes in the start and end pose, as well as a total time $T$ and ti
 
 This program animates the trajectory given by a series of joint angles, by running forward kinematics at each time step, and calling the plot function on an interactive basis. 
 
-## Joint-Space Trajectories: 
+## Joint-Space Trajectories (joint_space_trajectory.py)
 
 Joint-Space trajectories interpolate in joint-space, this is the space in which joint values exist. 
 
 Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) which corresponds to start joint angles \( \boldsymbol{\theta_0} = (\theta_{1,0}, \theta_{2,0}, \theta_{3,0} ) \) and end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \) which corresponds to start joint angles \( \boldsymbol{\theta_T} = (\theta_{1,T}, \theta_{2,T}, \theta_{3,T} ) \)
 
-We can consider the linear interpolation in joint-space \( l(t) \) with \( t: 0 \to T \) where: 
+We can consider the linear interpolation in joint-space \( \theta(t) \) with \( t: 0 \to T \) where: 
 $$
-l(t) = 
+\theta(t) = 
 \begin{bmatrix}
 \theta_{1,0} + \frac{t}{T} (\theta_{1,T} - \theta_{1,0}) \\
 \theta_{2,0} + \frac{t}{T} (\theta_{2,T} - \theta_{2,0}) \\
 \theta_{3,0} + \frac{t}{T} (\theta_{3,T} - \theta_{3,0})
 \end{bmatrix}
 $$
+
+In this piecewise linear case, we have the boundary conditions satisfied on the joint angles: \( \theta(0) = \theta_0 \) and \( \theta(T) = \theta_T \)
 
 Now this trajectory will be smooth in joint-space, however will likely be curved in Cartesian task-space. 
 
@@ -632,7 +634,36 @@ Now this trajectory will be smooth in joint-space, however will likely be curved
 - Trajectory may not be predicatable, and may not have the lowest time and energy cost. 
 - Piecewise linear interpolation has a jump in velocity, which causes extreme acceleration, which is bad for joint motors. 
 
-### Linear Joint-Space Trajectory (linear_joint_space_trajectory.py)
+### Cubic Joint-Space Trajectory
 
-This file executes the piecewise linear joint-space trajectory. 
+The problem with the piecewise linear joint-space trajectory is the discontinuity in velocity - as the velocity jumps at \( t = 0 \), and also drops to zero at \( t = T \). 
+
+Instead, let's impose boundary conditions for the joint angular velocity: \( \dot{\theta} (0) = 0\) and \( \dot{\theta} (T) = 0 \)
+
+Now 4 boundary conditions creates a polynomial solution with 4 unknowns - so a qubic. 
+
+Let's define an arbitrary qubic: 
+
+\( \theta(t) = a_0 + a_1 t + a_2 t^2 + a_3 t^3 \)
+
+Given \( \theta(0) = \theta_0 \), we have \( a_0 = \theta_0 \) and thus \( \theta(t) = \theta_0 + a_1 t + a_2 t^2 + a_3 t^3 \)
+
+Differentiating: 
+\( \dot{\theta}(t) = a_1 + 2 a_2 t + 3 a_3 t^2\)
+
+Given \( \dot{\theta} (0) = 0 \), then \( a_1 = 0 \) so \( \theta(t) = \theta_0 + a_2 t^2 + a_3 t^3  \)
+
+Restating: \( \dot{\theta}(t) = 2 a_2 t + 3 a_3 t^2\)
+
+Using \( \dot{\theta} (T) = 0 \), \( 0 = 2 a_2 T + 3 a_3 T^2 = T (2 a_2 + 3a_3 T) \)
+
+Since \( T \neq 0\), \( a_3 = \frac{- 2 a_2}{3 T} \)
+
+Restating: \( \theta(t) = \theta_0 + a_2 t^2 + \frac{- 2 a_2}{3 T}  t^3  \)
+
+Given \( \theta(T) = \theta_T \) we have \( \theta_T = \theta_0 + a_2 T^2 + \frac{- 2 a_2}{3 T}  T^3 = \theta_0 + a_2 T^2 + \frac{- 2 a_2}{3}  T^2  \)
+
+Simplified:  \( \theta_T - \theta_0 = a_2  \frac{T^2}{3}  \) thus \( a_2 = \frac{3 (\theta_T - \theta_0 )}{T^2} \)
+
+In conclusion: \( \theta(t) = \theta_0 + \frac{3 (\theta_T - \theta_0 )}{T^2} t^2 - \frac{2 (\theta_T - \theta_0 )}{T^3}  t^3  \)
 

@@ -5,23 +5,30 @@ from kinematics.inverse import inverse_via_DLS
 # Linear Task-space Trajectory
 def linear_task_space_trajectory(start_pose, end_pose, total_time, dt, joint_offsets, link_lengths, base_position):
 
-    # Number of steps
+   # Number of steps
     num_steps = int(total_time / dt) + 1
     
-    # Track of joint angle positions
+    # Time vector
+    times = np.linspace(0, total_time, num_steps)
+
+    # Track of joint angle values
     joint_angles = np.zeros((num_steps, 3))
 
-    # Current pose as initial pose
-    current_pose = start_pose.copy()
+    # Delta joint angles
+    delta_pose = end_pose - start_pose
+
+    # Double check start and end poses are reachable first
+    if inverse_via_DLS(start_pose, joint_offsets, link_lengths, base_position) is None or inverse_via_DLS(end_pose, joint_offsets, link_lengths, base_position) is None:
+        raise ValueError("IK failed for start or end pose – cannot plan trajectory")
 
     # Loop for all steps
-    for i in range(num_steps):
+    for i, t in enumerate(times):
         
         # Fraction of the path
-        s = i / (num_steps - 1)
+        s = t / total_time
 
         # Current pose (straight line)
-        current_pose = start_pose + s *(end_pose - start_pose)  
+        current_pose = start_pose + s * delta_pose 
 
         # Inverse kinematics
         try:
@@ -38,4 +45,4 @@ def linear_task_space_trajectory(start_pose, end_pose, total_time, dt, joint_off
         joint_angles[i] = current_joint_angles
 
     # Return the joint angles
-    return joint_angles
+    return times, joint_angles
