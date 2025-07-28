@@ -156,7 +156,7 @@ And for the orientation,
 \]
 
 Which gives the full Jacobian: 
-\[
+\(
 \small
 J(\boldsymbol{\theta}) = 
 \begin{bmatrix}
@@ -168,7 +168,7 @@ L_1 \cos\theta_1 + L_2 \cos(\theta_1 + \theta_2) + L_3 \cos(\theta_1 + \theta_2 
 & L_3 \cos(\theta_1 + \theta_2 + \theta_3) \\[10pt]
 1 & 1 & 1
 \end{bmatrix}
-\]
+\)
 
 Our function will be able to return the Jacobian matrix given the link lengths and joint angles. 
 
@@ -358,7 +358,9 @@ $$
 ### Intuition
 Singularities occur in the Jacobian \( J \) matrix when it can't be inverted. This is where one dimension collapses. 
 
-For an example of this, consider a 2DOF 2D Robot arm with joint angles \( \theta_1, \theta_2 \). Suppose the arm is straight line when \( \theta_2 = 0 \). Then, any small change in \( \theta_2 \) will move the end effector in an arc that's tangent is perpendicular to the line. Similarly with a small change to \( \theta_1 \). Thus, changes to both joint angles are parallel in effect and thus the rank of J drops by 1 and it's no longer invertible. 
+For an example of this, consider a 2DOF 2D Robot arm with joint angles \( \theta_1, \theta_2 \). Suppose the arm is straight line when \( \theta_2 = 0 \). 
+Then, any small change in \( \theta_2 \) will move the end effector in an arc that's tangent is perpendicular to the line. Similarly with a small change to \( \theta_1 \). 
+Thus, changes to both joint angles are parallel in effect and thus the rank of J drops by 1 and it's no longer invertible. 
 
 ### Singular Value Decomposition (SVD)
 
@@ -549,7 +551,8 @@ Which modifies the singular value inversion:
 
 This regularisation avoids instability near singularities.
 
-Reminder that this singularity is transient and can normally be overcome. The issue is when near-infinite joint torques are being applied to joint servos in traditional SVD. 
+Reminder that this singularity is transient and can normally be overcome. 
+The issue is when near-infinite joint torques are being applied to joint servos in traditional SVD. 
 
 ## Inverse Kinematics (inverse.py)
 
@@ -557,7 +560,8 @@ This function executes the IK algorithm until convergence.
 
 # Trajectory Planning
 
-Trajectory planning is how we plan to move the end effector pose from one position to another. This problem is divided into two methods: 
+Trajectory planning is how we plan to move the end effector pose from one position to another. 
+This problem is divided into two methods: 
 - Task-Space based: This is the Cartesian space where the end effector pose may exist. 
 - Joint-Space based: This concerns changing joint angles within their respective limits. 
 
@@ -566,14 +570,14 @@ Trajectory planning is how we plan to move the end effector pose from one positi
 Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) and end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \)
 
 We can consider the linear interpolation in task-space \( l(t) \) with \( t: 0 \to T \) where: 
-$$
+\(
 l(t) = 
 \begin{bmatrix}
 x_0 + \frac{t}{T} (x_T - x_0) \\
 y_0 + \frac{t}{T} (y_T - y_0)\\
 \phi_0 + \frac{t}{T} ( \phi_T - \phi_0)
 \end{bmatrix}
-$$
+\)
 
 This is simply a straight line in task space. 
 
@@ -608,17 +612,19 @@ This program animates the trajectory given by a series of joint angles, by runni
 
 Joint-Space trajectories interpolate in joint-space, this is the space in which joint values exist. 
 
-Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) which corresponds to start joint angles \( \boldsymbol{\theta_0} = (\theta_{1,0}, \theta_{2,0}, \theta_{3,0} ) \) and end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \) which corresponds to start joint angles \( \boldsymbol{\theta_T} = (\theta_{1,T}, \theta_{2,T}, \theta_{3,T} ) \)
+Suppose we have a start pose \( \boldsymbol{x_0} = (x_0, y_0, \phi_0) \) which corresponds to start joint angles \( \boldsymbol{\theta_0} = (\theta_{1,0}, \theta_{2,0}, \theta_{3,0} ) \) 
+With end pose \( \boldsymbol{x_T} = (x_T, y_T, \phi_T) \) which corresponds to start joint angles \( \boldsymbol{\theta_T} = (\theta_{1,T}, \theta_{2,T}, \theta_{3,T} ) \)
 
 We can consider the linear interpolation in joint-space \( \theta(t) \) with \( t: 0 \to T \) where: 
-$$
+
+\(
 \theta(t) = 
 \begin{bmatrix}
 \theta_{1,0} + \frac{t}{T} (\theta_{1,T} - \theta_{1,0}) \\
 \theta_{2,0} + \frac{t}{T} (\theta_{2,T} - \theta_{2,0}) \\
 \theta_{3,0} + \frac{t}{T} (\theta_{3,T} - \theta_{3,0})
 \end{bmatrix}
-$$
+\)
 
 In this piecewise linear case, we have the boundary conditions satisfied on the joint angles: \( \theta(0) = \theta_0 \) and \( \theta(T) = \theta_T \)
 
@@ -666,4 +672,58 @@ Given \( \theta(T) = \theta_T \) we have \( \theta_T = \theta_0 + a_2 T^2 + \fra
 Simplified:  \( \theta_T - \theta_0 = a_2  \frac{T^2}{3}  \) thus \( a_2 = \frac{3 (\theta_T - \theta_0 )}{T^2} \)
 
 In conclusion: \( \theta(t) = \theta_0 + \frac{3 (\theta_T - \theta_0 )}{T^2} t^2 - \frac{2 (\theta_T - \theta_0 )}{T^3}  t^3  \)
+
+### Quintic Joint-Space Trajectory
+
+The problem with the cubic joint-space trajectory is that while it ensures zero velocity at the start and end, the acceleration still jumps at \( t = 0 \) and \( t = T \).  
+
+Instead, let’s also impose boundary conditions for the joint angular acceleration:  
+\[
+\ddot{\theta}(0) = 0, \quad \ddot{\theta}(T) = 0
+\]
+
+Now 6 boundary conditions create a polynomial solution with 6 unknowns – so a quintic.  
+
+Let’s define an arbitrary quintic:  
+
+\[
+\theta(t) = a_0 + a_1 t + a_2 t^2 + a_3 t^3 + a_4 t^4 + a_5 t^5
+\]
+
+Differentiating:  
+\[
+\dot{\theta}(t) = a_1 + 2 a_2 t + 3 a_3 t^2 + 4 a_4 t^3 + 5 a_5 t^4
+\]
+\[
+\ddot{\theta}(t) = 2 a_2 + 6 a_3 t + 12 a_4 t^2 + 20 a_5 t^3
+\]
+
+Given \( \theta(0) = \theta_0 \), we have \( a_0 = \theta_0 \) 
+Given \( \dot{\theta}(0) = 0 \), then \( a_1 = 0 \)
+Given \( \ddot{\theta}(0) = 0 \), then \( a_2 = 0 \)  
+
+So now:  \( \theta(t) = \theta_0 + a_3 t^3 + a_4 t^4 + a_5 t^5  \)
+
+Using the final boundary conditions at \( t = T \):  
+
+\[
+\theta_T = \theta_0 + a_3 T^3 + a_4 T^4 + a_5 T^5
+\]
+\[
+0 = 3 a_3 T^2 + 4 a_4 T^3 + 5 a_5 T^4
+\]
+\[
+0 = 6 a_3 T + 12 a_4 T^2 + 20 a_5 T^3
+\]
+
+Let \( \Delta\theta = \theta_T - \theta_0 \)
+Solving gives:  
+
+\[
+a_3 = \frac{10 \Delta\theta}{T^3}, \quad a_4 = -\frac{15 \Delta\theta}{T^4}, \quad a_5 = \frac{6 \Delta\theta}{T^5}
+\]
+
+In conclusion:  \( \theta(t) = \theta_0 + \frac{10 (\theta_T - \theta_0)}{T^3} t^3 - \frac{15 (\theta_T - \theta_0)}{T^4} t^4 + \frac{6 (\theta_T - \theta_0)}{T^5} t^5 \)
+
+Or in normalised form:  \( \theta(t) = \theta_0 + \Delta\theta \Big[ 10 \left(\frac{t}{T}\right)^3 - 15 \left(\frac{t}{T}\right)^4 + 6 \left(\frac{t}{T}\right)^5 \Big] \)
 

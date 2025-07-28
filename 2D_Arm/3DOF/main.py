@@ -5,7 +5,7 @@ from kinematics.forward import forward_kinematics, FK_end_effector_pose
 from visualisation.plot2d import plot_2d
 from trajectory.task_space_trajectory import linear_task_space_trajectory
 from trajectory.animate_trajectory import animate_angles_trajectory
-from trajectory.joint_space_trajectory import linear_joint_space_trajectory, cubic_joint_space_trajectory
+from trajectory.joint_space_trajectory import linear_joint_space_trajectory, cubic_joint_space_trajectory, quintic_joint_space_trajectory
 import numpy as np
 
 # Plot a single FK action on a graph
@@ -130,7 +130,7 @@ def animate_linear_joint_space_trajectory():
     )
 
 # Animation of qubic task-space trajectory
-def animate_qubic_joint_space_trajectory():
+def animate_cubic_joint_space_trajectory():
 
     # Set start pose
     start_pose = np.array([0.4, 0.7, np.pi/4])
@@ -155,13 +155,40 @@ def animate_qubic_joint_space_trajectory():
         base_position=config.BASE_POSITION
     )
 
+# Animation of quintic task-space trajectory
+def animate_quintic_joint_space_trajectory():
+
+    # Set start pose
+    start_pose = np.array([0.4, 0.7, np.pi/4])
+
+    # Set end pose
+    end_pose = np.array([0.7, 0.4, -np.pi/4])
+
+    times, trajectory_joint_angles = quintic_joint_space_trajectory(
+        start_pose, 
+        end_pose, 
+        total_time=config.TRAJECTORY_TIME, 
+        dt=config.FK_TIME_DELTA, 
+        joint_offsets=config.JOINT_OFFSETS,
+        link_lengths=config.LINK_LENGTHS,
+        base_position=config.BASE_POSITION
+    )
+
+    animate_angles_trajectory(trajectory_joint_angles, 
+        animation_time=config.ANIMATION_TIME, 
+        joint_offsets=config.JOINT_OFFSETS,
+        link_lengths=config.LINK_LENGTHS,
+        base_position=config.BASE_POSITION
+    )
+
 def main():
     # single_FK_plot() # Test FK only
     # single_IK_SVD() # Test IK via SVD
     # single_IK_DLS() # Test IK via DLS
     # animate_linear_task_space_trajectory() # Linear task-space
-    #animate_linear_joint_space_trajectory() # Linear joint-space
-    animate_qubic_joint_space_trajectory()
+    # animate_linear_joint_space_trajectory() # Linear joint-space
+    # animate_cubic_joint_space_trajectory() # Cubic joint-space
+    animate_quintic_joint_space_trajectory() # Quintic joint-space
 
 if __name__ == "__main__":
     main()
