@@ -16,7 +16,7 @@ TIMEOUT_MS = 1000
 DEFAULT_RESOLUTION = 4096
 
 # Path to default fallback calibration file (used if latest not found)
-CALIBRATION_PATH = "calib_20250520_141015.json"
+CALIBRATION_PATH = "calib_20250803_100849.json"
 
 # Directory to look for automatically saved calibration files
 CALIBRATION_FOLDER = "configs"

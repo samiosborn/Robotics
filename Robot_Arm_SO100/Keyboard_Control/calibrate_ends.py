@@ -5,13 +5,17 @@ import config
 from feetech_bus import FeetechBus
 from datetime import datetime
 
+# Loop for setting calibration and limits JSON
 def main():
+    # Connect to servos
     bus = FeetechBus(config.SERVO_PORT, config.SERVOS)
     bus.connect()
+    # Disable torque to allow free movement 
     bus.disable_torque()
 
     motor_names = list(config.SERVOS.keys())
 
+    # Calibration elements for each servo
     placeholder_calib = {
         "motor_names": motor_names,
         "homing_offset": {str(config.SERVOS[name][0]): 0 for name in motor_names},
@@ -21,6 +25,7 @@ def main():
         "end_pos": [0] * len(motor_names),
     }
 
+    # Apply calibration style
     bus.set_calibration(placeholder_calib)
 
     start_deg_list = []
@@ -28,8 +33,9 @@ def main():
     start_raw_list = []
     end_raw_list = []
 
-    print("[INFO] Starting joint limit calibration. Use your hands to move joints gently.\n")
+    print("[INFO] Starting joint limit calibration. Use your hands to move the joints. \n")
 
+    # Converts servos into movement directions
     direction_labels = {
         "shoulder_pan": ("rotate fully left", "rotate fully right"),
         "shoulder_lift": ("move fully down", "move fully up"),
@@ -39,26 +45,37 @@ def main():
         "gripper": ("fully open", "fully close"),
     }
 
+    # For each servo
     for joint in motor_names:
         # Full joint loop
         while True:
+            # For this joint
             print(f"\n--- {joint.upper()} ---")
+            # Apply labels to directions
             label_min, label_max = direction_labels[joint]
+            # Initialise re-do joint flag
             redo_joint = False
 
             # Start bound
             while True:
+                # Ask for minimum set point
                 print(f"[ACTION] {label_min}.")
+                # Let user proceed with set point, or allow redo or exit
                 user_input = input("Press ENTER to record, 'r' to redo, 'x' to exit: ").strip().lower()
+                # Cancelled input (exit)
                 if user_input == "x":
-                    print("[INFO] Calibration aborted by user.")
+                    print("[INFO] Calibration cancelled by user.")
                     bus.disconnect()
                     return
+                # Redo
                 elif user_input == "r":
+                    # Jump back to top of loop to redo
                     continue
                 else:
                     try:
+                        # Start degree from reading joint
                         start_deg = bus.read_position(joint)
+                        # Current raw encoder value
                         start_raw = bus.packet_handler.read2ByteTxRx(bus.port_handler, config.SERVOS[joint][0], 56)[0]
                         if config.DEBUG:
                             print(f"[DEBUG] {joint} start recorded: {start_deg:.1f}°")
@@ -66,15 +83,16 @@ def main():
                     except Exception as e:
                         print(f"[ERROR] Failed to read joint '{joint}': {e}")
 
-            # End bound
+            # End bound (same loop as above but for end / max)
             while True:
                 print(f"[ACTION] {label_max}.")
                 user_input = input("Press ENTER to record, 'r' to redo, 'b' to go back, 'x' to exit: ").strip().lower()
                 if user_input == "x":
-                    print("[INFO] Calibration aborted by user.")
+                    print("[INFO] Calibration cancelled by user.")
                     bus.disconnect()
                     return
                 elif user_input == "b":
+                    # Redo entire joint (not just max)
                     print("[INFO] Going back to redo entire joint.")
                     redo_joint = True
                     break
@@ -96,6 +114,7 @@ def main():
 
             # Confirm both readings
             while True:
+                # Ask for confirmation
                 confirm = input(f"Confirm calibration for '{joint}'? (y = yes / r = redo / x = exit): ").strip().lower()
                 if confirm == "y":
                     start_deg_list.append(start_deg)
@@ -121,10 +140,12 @@ def main():
             # Move to next joint
             break
 
+    # Save using timestamp 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Ensure subfolder exists
     os.makedirs("configs", exist_ok=True)
 
-    # Save original raw limits file
+    # Save original raw limits file for debugging
     limits_path = os.path.join("configs", f"limits_{timestamp}.json")
     raw_data = {
         "motor_names": motor_names,
@@ -133,12 +154,14 @@ def main():
         "start_pos": start_raw_list,
         "end_pos": end_raw_list,
     }
+    # Write as JSON
     with open(limits_path, "w") as f:
         json.dump(raw_data, f, indent=4)
     print(f"[SAVED] Raw limits file written to: {limits_path}")
 
     # Save runtime calibration
     homing_offset = {
+        # Centre joints correctly when converting degrees to raw
         str(config.SERVOS[m][0]): int((s + e) / 2)
         for m, s, e in zip(motor_names, start_raw_list, end_raw_list)
     }
@@ -152,6 +175,7 @@ def main():
         "end_pos": end_raw_list,
     }
     calib_path = os.path.join("configs", f"calib_{timestamp}.json")
+    # Write as JSON
     with open(calib_path, "w") as f:
         json.dump(calib_data, f, indent=4)
     print(f"[SAVED] Runtime calib file written to: {calib_path}")

@@ -24,14 +24,15 @@ class FeetechBus:
         if not self.port_handler.openPort():
             raise IOError(f"Failed to open port '{self.port}'")
 
-        # Set the communication timeout in milliseconds
+        # Set the communication timeout in ms
         self.port_handler.setPacketTimeoutMillis(config.TIMEOUT_MS)
         self.is_connected = True
 
-        # Print connection success if debug is enabled
+        # Print connection success
         if config.DEBUG:
             print(f"[DEBUG] Connected to {self.port}")
 
+    # Disconnect from servos
     def disconnect(self):
         # Close the serial port if connected
         if self.is_connected and self.port_handler:
@@ -41,6 +42,7 @@ class FeetechBus:
             if config.DEBUG:
                 print(f"[DEBUG] Disconnected from {self.port}")
 
+    # Set calibration
     def set_calibration(self, calib_dict: dict):
         # Save the calibration data to internal state
         self.calibration = calib_dict
@@ -48,6 +50,7 @@ class FeetechBus:
         if config.DEBUG:
             print("[DEBUG] Calibration loaded into motor bus")
 
+    # Disable torque (for calibration)
     def disable_torque(self):
         for motor_name, (motor_id, _) in self.motors.items():
             # Torque Enable = 0
@@ -55,6 +58,7 @@ class FeetechBus:
             if config.DEBUG:
                 print(f"[DEBUG] Torque disabled on motor '{motor_name}'")
 
+    # Enable torque again
     def enable_torque(self):
         for motor_name, (motor_id, _) in self.motors.items():
             # Torque Enable = 1
@@ -62,11 +66,12 @@ class FeetechBus:
             if config.DEBUG:
                 print(f"[DEBUG] Torque enabled on motor '{motor_name}'")
     
+    # Read position of a motor servo
     def read_position(self, motor_name: str) -> float:
         # Get motor ID and model from config
         motor_id, model = self.motors[motor_name]
 
-        # Read Present_Position (address 56) from motor
+        # Read Present_Position (address #56) from motor
         value, result, error = self.packet_handler.read2ByteTxRx(self.port_handler, motor_id, 56)
         if result != scs.COMM_SUCCESS:
             raise IOError(f"Failed to read position from motor '{motor_name}'")
@@ -78,14 +83,15 @@ class FeetechBus:
         drive = self.calibration["drive_mode"][idx]
         resolution = config.DEFAULT_RESOLUTION
 
+        # Adjust raw encoder values to degrees
         adjusted = (raw + offset) / (resolution // 2) * 180.0
         if drive:
             adjusted *= -1
-
         return adjusted
 
+    # Apply servo angles
     def write_position(self, motor_name: str, target_deg: float) -> bool:
-        # Retrieve motor ID and model
+        # Get motor ID and model
         motor_id, model = self.motors[motor_name]
         idx = self.calibration["motor_names"].index(motor_name)
         drive = self.calibration["drive_mode"][idx]
@@ -102,6 +108,7 @@ class FeetechBus:
             min_deg, max_deg = sorted([start, end])
             if drive:
                 min_deg, max_deg = -max_deg, -min_deg
+        # Linear mode (not used)
         elif calib_mode == "LINEAR":
             min_deg, max_deg = 0.0, 100.0
 
@@ -109,12 +116,12 @@ class FeetechBus:
         if not (min_deg <= target_deg <= max_deg):
             if config.DEBUG:
                 print(f"[DEBUG] {motor_name} angle {target_deg:.1f}° exceeds limits ({min_deg:.1f}° to {max_deg:.1f}°) → clamped.")
+            # Clamp servo
             return False
 
         # Convert degrees to raw steps
         if drive:
             target_deg *= -1
-
         steps = int(target_deg / 180.0 * (resolution // 2))
         raw_value = steps - offset
 
@@ -127,5 +134,5 @@ class FeetechBus:
         if config.DEBUG:
             print(f"[DEBUG] Wrote {target_deg:.1f}° to {motor_name} (raw {raw_value})")
 
+        # Write position
         return True
-
