@@ -8,9 +8,9 @@ The script will use forward kinematics (FK) to effect a movement input and deter
 
 An extension to inverse kinematics (IK) will be created to return the required inputs to reach a desired position. 
 
-# Joint Pose
+## Joint Pose
 
-## Denavit-Hartenburg Table
+### Denavit-Hartenburg Table
 First, I will define a Denavit-Hartenburg (DH) parameter matrix for the 3DOF arm. 
 
 The DH matrix (in 3D) has 4 columns for each of the 3 joints: 
@@ -27,7 +27,7 @@ So the non-zero columns in the DH table will be:
 1) Angle of joint relative to the previous link
 3) Distance between joints (arm limb lengths)
 
-## Matrix Transformations
+### Matrix Transformations
 Each joint has a local frame defined as the positive x-axis along the length of the outward limb. 
 
 The idea is to apply a transformation (rotation and translation) at each joint in order from origin to end-effector. 
@@ -52,13 +52,13 @@ Homogeneous Coordinates: When there's a 1 in the bottom column.
 
 We will create a script to create and apply these transformation matrices based on our DH parameters and user inputs. 
 
-## Configurations (config.py)
+### Configurations (config.py)
 Link Lengths: Length in meters for each link, in order from base to end effector. 
 Starting Position: Angle of each joint, in order from base to end effector. 
 For example, 0 for each joint would be lying on the x-axis. 
 Angle Limits: Maximum and minimum angle for each joint. 
 
-## Denavit-Hartenburg (DH) Calculator (dh.py)
+### Denavit-Hartenburg (DH) Calculator (dh.py)
 This file will compute a 2D homogeneous transform for each joint. 
 So, it will compute the 3x3 matrix, composed of the 2x2 rotation matrix and origin translation. 
 This is the planar equivalent of a DH transformation. 
@@ -66,10 +66,10 @@ The rotation matrix will be based on the angle applied to the joint.
 The origin will be translated the length of the outward link in the local x-direction. 
 It will take as inputs the angle of the joint and length of outward link. 
 
-# Forward Kinematics (FK)
+## Forward Kinematics (FK)
 Forward kinematics returns the resulting pose (position and orientation) given input joint angles. This is done directly by a series of transformations at each joint. 
 
-## Forward Kinematics (forward.py)
+### Forward Kinematics (forward.py)
 This will apply the joint angles for each joint, and return the positions for each joint. 
 Starting from the origin, return the position of each joint end, one by one. 
 To adjust for the starting position, the first DH transformation should use the starting position for the origin translation. 
@@ -92,11 +92,11 @@ x \\ y \\ 1
 \end{bmatrix}
 \]
 
-## 2D Visualisation (plot2d.py)
+### 2D Visualisation (plot2d.py)
 This function takes the positions of all the ends of the joints, and plots on a 2D graph. 
 Each joint is connected to the previous by a solid line. 
 
-## Jacobian Calculator (jacobian.py)
+### Jacobian Calculator (jacobian.py)
 The Jacobian is the matrix of partial derivatives.  
 Thus,  
 \[
@@ -172,7 +172,7 @@ L_1 \cos\theta_1 + L_2 \cos(\theta_1 + \theta_2) + L_3 \cos(\theta_1 + \theta_2 
 
 Our function will be able to return the Jacobian matrix given the link lengths and joint angles. 
 
-# Inverse Kinematics (IK)
+## Inverse Kinematics (IK)
 
 Inverse kinematics tries to find the required joint angles for a given desired end-effector pose.
 
@@ -209,7 +209,7 @@ $$
 
 ---
 
-### Starting Point and Iterative Approach
+#### Starting Point and Iterative Approach
 
 Since the forward kinematics \(f\) is nonlinear, there is no simple closed-form inverse. Instead, we iteratively refine a solution for the required joint angles.
 
@@ -224,7 +224,7 @@ $$
 
 ---
 
-### Linearisation with the Jacobian
+#### Linearisation with the Jacobian
 
 At a current joint configuration \(\boldsymbol{\theta}_k\), a small change in joint angles \(\Delta \boldsymbol{\theta}\) produces an approximately linear change in the end-effector pose:
 
@@ -260,7 +260,7 @@ $$
 
 ---
 
-### First-order Taylor expansion
+#### First-order Taylor expansion
 
 Since the forward kinematics \(f\) is nonlinear, we approximate it locally using a **first-order Taylor expansion** around the current estimate \(\boldsymbol{\theta}_k\):
 
@@ -283,7 +283,7 @@ So if we choose \(\Delta \boldsymbol{\theta} = J^{-1}(\boldsymbol{\theta}_k)\, \
 
 ---
 
-### Moore-Penrose Pseudoinverse
+#### Moore-Penrose Pseudoinverse
 
 For most robots, the Jacobian may be non-square, redundant, or sometimes singular, so we cannot always find a true inverse. 
 
@@ -314,37 +314,37 @@ $$
 
 ---
 
-### Iterative IK Algorithm
+#### Iterative IK Algorithm
 
-1. **Start with an initial estimate and define tolerance**  
+1. Start with an initial estimate and define tolerance
    \(\boldsymbol{\theta}_0\) (e.g., all zeros or last known configuration)
    Set \( \varepsilon > 0 \)
 
-2. **Compute the current pose**  
+2. Compute the current pose
    \(\boldsymbol{x}_k = f(\boldsymbol{\theta}_k)\)
 
-3. **Compute the error**  
+3. Compute the error 
    \(\mathbf{e}_k = \boldsymbol{x}^* - \boldsymbol{x}_k\)
 
-4. **Compute the Jacobian**  
+4. Compute the Jacobian
    \(J(\boldsymbol{\theta}_k)\)
 
-5. **Compute the joint update**  
+5. Compute the joint update
    \(\Delta \boldsymbol{\theta} = J^\dagger(\boldsymbol{\theta}_k)\,\mathbf{e}_k = J^{T} (J J^{T})^{-1}  \mathbf{e}_k\)
 
-6. **Update the joint angles**  
+6. Update the joint angles 
    \(\boldsymbol{\theta}_{k+1} = \boldsymbol{\theta}_k + \Delta \boldsymbol{\theta}\) 
 
-7. **Repeat steps 2-6 until convergence**  
+7. Repeat steps 2-6 until convergence
    Stop when \(\|\mathbf{e}_k\| < \varepsilon\)
 
 So the update rule is:
 
 $$
-\boxed{\boldsymbol{\theta}_{k+1} = \boldsymbol{\theta}_k + J^\dagger(\boldsymbol{\theta}_k)\big(\boldsymbol{x}^* - f(\boldsymbol{\theta}_k)\big)}
+\boldsymbol{\theta}_{k+1} = \boldsymbol{\theta}_k + J^\dagger(\boldsymbol{\theta}_k)\big(\boldsymbol{x}^* - f(\boldsymbol{\theta}_k)\big)
 $$
 
-### Intuition
+#### Intuition
 
 - The Jacobian describes how much each joint change moves the end-effector.
 - The pseudoinverse finds the minimum joint change that best matches the desired movement in task space.
@@ -353,16 +353,15 @@ $$
 
 ---
 
-## Avoiding Singularities
+### Avoiding Singularities
 
-### Intuition
 Singularities occur in the Jacobian \( J \) matrix when it can't be inverted. This is where one dimension collapses. 
 
 For an example of this, consider a 2DOF 2D Robot arm with joint angles \( \theta_1, \theta_2 \). Suppose the arm is straight line when \( \theta_2 = 0 \). 
 Then, any small change in \( \theta_2 \) will move the end effector in an arc that's tangent is perpendicular to the line. Similarly with a small change to \( \theta_1 \). 
 Thus, changes to both joint angles are parallel in effect and thus the rank of J drops by 1 and it's no longer invertible. 
 
-### Singular Value Decomposition (SVD)
+#### Singular Value Decomposition (SVD)
 
 To deal with singularities when inverting \( (J J^{T})^{-1} \), we use Singular Value Decomposition (SVD). 
 
@@ -383,16 +382,16 @@ such that
 - \(\sigma_i \ge 0\) are the **singular values** of \(J\)  
    - They are the square roots of the eigenvalues of \(J^\top J\) (or \(J J^\top\))  
 
-### Singular Values
+#### Singular Values
 
 For \(J\), two important features of \(J^\top J\): 
 
-1. **Symmetric:**  
+1. Symmetric:
 \[
 (J^\top J)^\top = J^\top (J^\top)^\top = J^\top J.
 \]
 
-2. **Positive semi-definite:** For any vector \(x \in \mathbb{R}^n\),  
+2. Positive semi-definite:* For any vector \(x \in \mathbb{R}^n\),  
 \[
 x^\top (J^\top J)\, x = (Jx)^\top (Jx) = \|Jx\|^2 \ge 0.
 \]
@@ -418,9 +417,9 @@ Therefore:
 \lambda \|v\|^2 = \|Jv\|^2 \ge 0 \quad \Rightarrow \quad \lambda \ge 0.
 \]
 
-Hence **all eigenvalues \(\lambda_i\) of \(J^\top J\) are non-negative.**  
+Hence all eigenvalues \(\lambda_i\) of \(J^\top J\) are non-negative.
 
-The **singular values** \(\sigma_i\) of \(J\) are then defined as  
+The singular values \(\sigma_i\) of \(J\) are then defined as: 
 
 \[
 \sigma_i = \sqrt{\lambda_i} \ge 0.
@@ -428,14 +427,14 @@ The **singular values** \(\sigma_i\) of \(J\) are then defined as
 
 ---
 
-### Geometric Understanding
+#### Geometric Understanding
 
-Multiplication by \(J\) maps a unit sphere in \(\mathbb{R}^n\) to an **ellipsoid** in \(\mathbb{R}^m\).  
+Multiplication by \(J\) maps a unit sphere in \(\mathbb{R}^n\) to an ellipsoid in \(\mathbb{R}^m\).  
 The lengths of the ellipsoid’s principal axes are exactly the singular values \(\sigma_i\),  which must be non-negative (no “negative length”).
 
 ---
 
-### Identification of Singularities
+#### Identification of Singularities
 
 The Singular Value Decomposition  
 
@@ -451,12 +450,12 @@ J^\top J = V \Sigma^2 V^\top,
 J J^\top = U \Sigma^2 U^\top.
 \]
 
-Thus the **non-zero eigenvalues of \(J^\top J\)** (and \(J J^\top\)) are the same,  
+Thus the non-zero eigenvalues of \(J^\top J\) (and \(J J^\top\)) are the same,  
 and their square roots are the singular values \(\sigma_i\).
 
 Rank and singularity: 
-- If **all \(\sigma_i > 0\)**, then \(J\) is full rank → invertible (if square).  
-- If **some \(\sigma_i = 0\)**, rank drops → **singularity**.  
+- If all \(\sigma_i > 0\), then \(J\) is full rank → invertible (if square).  
+- If some \(\sigma_i = 0\), rank drops → singularity.  
 
 Thus, SVD provides a numerical way to detect singularities by inspecting the singular values \(\sigma_i\).  
 
@@ -468,14 +467,14 @@ J^\dagger = V \, \Sigma^\dagger U^\top \\
 \Sigma^\dagger = \mathrm{diag}\!\left( \frac{1}{\sigma_i} \;\text{, if } \sigma_i \neq 0,\; 0 \text{ otherwise} \right)
 \]
 
-- For **large \(\sigma_i\)** --> normal inversion  
-- For **\(\sigma_i \to 0\)** --> division blows up → numerical instability near singularity  
+- For large \(\sigma_i\) --> normal inversion  
+- For \(\sigma_i \to 0\) --> division blows up → numerical instability near singularity  
 
 Hence SVD pseudoinverse does not avoid singularities — it still explodes when \(\sigma_i \approx 0\)
 
 ---
 
-### Damped Least Squares (DLS)
+#### Damped Least Squares (DLS)
 
 Damped Least Squares introduces a damping term \( \lambda  > 0 \) which avoids singularities. 
 
@@ -495,7 +494,7 @@ J = U \Sigma V^\top,
 \quad \Sigma = \mathrm{diag}(\sigma_1, \sigma_2, \dots)
 \]
 
-the **damped pseudoinverse** is defined by modifying the singular value inversion:
+the damped pseudoinverse is defined by modifying the singular value inversion:
 
 Using the SVD \(J = U \Sigma V^\top\), since \(V\) is orthogonal, we have \( V^\top V = I \)
 
@@ -554,7 +553,7 @@ This regularisation avoids instability near singularities.
 Reminder that this singularity is transient and can normally be overcome. 
 The issue is when near-infinite joint torques are being applied to joint servos in traditional SVD. 
 
-## Inverse Kinematics (inverse.py)
+### Inverse Kinematics (inverse.py)
 
 This function executes the IK algorithm until convergence. 
 
@@ -726,4 +725,132 @@ a_3 = \frac{10 \Delta\theta}{T^3}, \quad a_4 = -\frac{15 \Delta\theta}{T^4}, \qu
 In conclusion:  \( \theta(t) = \theta_0 + \frac{10 (\theta_T - \theta_0)}{T^3} t^3 - \frac{15 (\theta_T - \theta_0)}{T^4} t^4 + \frac{6 (\theta_T - \theta_0)}{T^5} t^5 \)
 
 Or in normalised form:  \( \theta(t) = \theta_0 + \Delta\theta \Big[ 10 \left(\frac{t}{T}\right)^3 - 15 \left(\frac{t}{T}\right)^4 + 6 \left(\frac{t}{T}\right)^5 \Big] \)
+
+# Noise
+
+Noise represents uncertainty in our model and measurements. We generally distinguish between two main types:
+
+## Process Noise
+
+Process noise represents uncertainty in the system dynamics. It's likely our model is not a perfect representation so the noise reflects any unmodelled friction or actuator errors for example. 
+
+If our discrete-time process model is:
+
+\[
+\mathbf{x}_{t+1} = A_t \, \mathbf{x}_t + B_t \, \mathbf{u}_t + \mathbf{w}_t
+\]
+
+Then:
+
+- \( \mathbf{x}_t \in \mathbb{R}^n \) is the state vector at time \(t\)  
+- \( \mathbf{u}_t \) is a control input  
+- \( \mathbf{w}_t \) is the process noise, typically modelled as zero-mean Gaussian:
+
+\[
+\mathbf{w}_t \sim \mathcal{N}(0, Q_t)
+\]
+
+Where:
+
+- \( Q_t \in \mathbb{R}^{n \times n} \) is the process noise covariance matrix
+
+---
+
+## Observation Noise
+
+Observation noise represents uncertainty in the measurements we take from sensors.
+
+If our measurement model is:
+
+\[
+\mathbf{y}_t = H_t \, \mathbf{x}_t + \mathbf{v}_t
+\]
+
+then:
+
+- \( \mathbf{y}_t \in \mathbb{R}^m \) is the measurement vector
+- \( \mathbf{v}_t \) is the observation noise, typically modelled as zero-mean Gaussian:
+
+\[
+\mathbf{v}_t \sim \mathcal{N}(0, R_t)
+\]
+
+where:
+
+- \( R_t \in \mathbb{R}^{m \times m} \) is the observation noise covariance matrix
+- Diagonal entries correspond to the variance of each sensor’s noise
+- Larger entries in \(R_t\) mean we trust the sensor less  
+- Smaller entries in \(R_t\) mean we trust the sensor more
+
+---
+
+## Encoder Ticks and Quantisation
+
+Encoders measure angles in discrete steps called ticks.  
+If an encoder has \( N_{\text{ticks}} \) ticks per revolution, the smallest measurable step is:
+
+\[
+\Delta_{\text{tick}} = \frac{2\pi}{N_{\text{ticks}}}
+\]
+
+A true joint angle \(\theta_{\text{true}}\) is quantised by rounding to the nearest tick:
+
+\[
+\theta_{\text{meas}} = \text{round}\left( \frac{\theta_{\text{true}}}{\Delta_{\text{tick}}} \right) \cdot \Delta_{\text{tick}}
+\]
+
+Quantisation introduces a non-Gaussian measurement error that is bounded within:
+
+\[
+-\frac{\Delta_{\text{tick}}}{2} \leq \theta_{\text{error}} \leq \frac{\Delta_{\text{tick}}}{2}
+\]
+
+---
+
+## Measurement Dropout
+
+Sometimes a sensor fails to report a value - for example, if the signal gets interruped.  
+
+We can model this by a Bernoulli random variable:
+
+\[
+z_t \sim \text{Bernoulli}(p)
+\]
+
+where \(p\) is the probability of dropout.
+
+- If \(z_t = 1\), the measurement is missing (often represented as NaN).  
+- If \(z_t = 0\), the measurement is available.
+
+
+Let \( Y_N \) be a r.v. representing the number of dropouts in \(N\) samples. 
+- \( \mathbb{E} [ Y_N ] = N p \)
+- \( \mathrm{Var} [Y_N] = N p (1-p) \)
+
+
+---
+
+## Bias Drift
+
+Some sensors, like gyros, have a bias, \( b_t \) that slowly wanders over time. We can model this like a Brownian random walk:
+
+\[
+b_{t+1} = b_t + \eta_t
+\]
+
+Where:
+
+\[
+\eta_t \sim \mathcal{N}(0, \sigma_{\text{drift}}^2)
+\]
+
+Here, \(\sigma_{\text{drift}}\) is called the drift process noise standard deviation. 
+
+---
+
+### Sensor Noise (sensors/joint_models.py)
+
+This program simulates a noisy encoder and gyrometer for the angle and angular velocity, respectively, of a servo joint in a 2D 3DOF robot arm. 
+
+For the noisy encoder, the goal is to simulate a measurement reading from a true data source. It takes in a the dropout probability, and observation noise variance. 
 
