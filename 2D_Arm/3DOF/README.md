@@ -850,7 +850,108 @@ Here, \(\sigma_{\text{drift}}\) is called the drift process noise standard devia
 
 ### Sensor Noise (sensors/joint_models.py)
 
+#### Encoder
+
 This program simulates a noisy encoder and gyrometer for the angle and angular velocity, respectively, of a servo joint in a 2D 3DOF robot arm. 
 
 For the noisy encoder, the goal is to simulate a measurement reading from a true data source. It takes in a the dropout probability, and observation noise variance. 
 
+An encoder measures the joint angle in radians. 
+
+A noisy encoder can be expressed mathematically as: 
+\[ 
+y_t = x_t + v_t 
+\]
+
+Where: \( v_t \sim \mathcal{N} (0, \sigma_{enc}^2) \)
+
+#### Gyrometer
+
+A gyrometer measures the angular velocity at the joint angle. This is the time derivative of the encoder measurements.  
+
+A noisy gyrometer typically has bias drift (slowly wandering offset) and Gaussian measurement noise:
+
+\[
+y^{gyro}_t = \dot{\theta}_t + b_t + v^{gyro}_t
+\]
+
+Where the white measurement noise is:
+\[
+v^{gyro}_t \sim \mathcal{N}(0, \sigma_{gyro,t}^2)
+\]
+
+#### Bias random walk model (Brownian motion)
+
+The bias is modelled as a discrete-time random walk:
+\[
+b_{t+1} = b_t + \eta_t, \qquad \eta_t \sim \mathcal{N}(0, q_{b,t})
+\]
+
+The bias variance recursion (per discrete step) is:
+\[
+\mathrm{Var}[b_{t+1}] = \mathrm{Var}[b_t] + q_{b,t}
+\]
+
+This means bias variance grows over time because it accumulates drift.
+
+#### Continuous-time Noise Density
+
+If the sensor noise is in continuous-time density units, with:
+- Encoder step \(\Delta t\)
+- Gyro step \(\Delta t_g\)
+
+Random-walk bias increment variance per step:
+\[
+q_{b,t} = \sigma_{drift, per s}^{2} \, \Delta t_g
+\]
+
+White-noise gyro variance per step:
+\[
+\sigma_{gyro,t}^{2} = \frac{\sigma_{gyro, density}^{2}}{\Delta t_g}
+\]
+
+Where:
+- \(\sigma_{drift, per s}\) is the bias drift standard deviation density in \( \mathrm{rad/s}/\sqrt{\mathrm{s}} \)
+- \(\sigma_{gyro, density}\) is the gyro white-noise density in \( \mathrm{rad/s}/\sqrt{\mathrm{Hz}} \) 
+
+#### Per-sample Specification
+
+But if you already know the per-sample noise values directly, then simply use:
+\[
+q_{b,t} = \sigma_{drift, step}^{2}
+\]
+\[
+\sigma_{gyro,t}^{2} = \sigma_{gyro, step}^{2}
+\]
+
+#### Measurement Error
+
+The total noise relative to the true angular velocity is:
+\[
+e_t = y^{gyro}_t - \dot{\theta}_t = b_t + v_t = b_{t-1} + \eta_t + v_t
+\]
+
+Assume \(v_t\) and \(\eta_t\) are independent of each other and of \(\dot{\theta}_t\).  
+
+Conditional distribution given the previous bias:
+\[
+e_t \mid b_{t-1} \sim \mathcal{N}(b_{t-1}, \sigma_{gyro,t}^{2} + q_{b,t})
+\]
+
+Let \(\mathrm{Var}[b_{t-1}] = \sigma_{b,t-1}^{2}\)
+
+Then the unconditional moments are:
+\[
+\mathbb{E}[e_t] = \mathbb{E}[b_{t-1}]
+\]
+\[
+\mathrm{Var}[e_t] = \sigma_{b,t-1}^{2} + q_{b,t} + \sigma_{gyro,t}^{2}
+\]
+
+#### Multi-rate Sensors
+If the gyro runs \(r\) times faster than the encoder \(( \Delta t_g = \Delta t / r )\), apply the above on the gyro timeline:
+\[
+t_k = k \, \Delta t_g
+\]
+
+Thus we interpolate the ground-truth angular velocity \(\dot{\theta}(t)\) to \(t_k\) before adding bias and noise.
