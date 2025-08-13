@@ -955,3 +955,112 @@ t_k = k \, \Delta t_g
 \]
 
 Thus we interpolate the ground-truth angular velocity \(\dot{\theta}(t)\) to \(t_k\) before adding bias and noise.
+
+## Kalman Filter Algorithm
+
+#### Predict step (from process model)
+
+Using state-space model: 
+\[
+\hat{x}_{t+1|t} = A\,\hat{x}_{t|t}
+\]
+
+Prediction step covariance: 
+\[
+P_{t+1|t} = A P_{t|t} A^\top + Q
+\]
+
+#### Update step (from measurement model)
+
+Kalman Gain: 
+\[
+K_t = P_{t|t-1} H^\top \left( H P_{t|t-1} H^\top + R \right)^{-1}
+\]
+
+Updated estimate: 
+\[
+\hat{x}_{t|t} = \hat{x}_{t|t-1} + K_t \left( y_t - H \hat{x}_{t|t-1} \right)
+\]
+
+Estimate covariance: 
+\[
+P_{t|t} = (I - K_t H) P_{t|t-1}
+\]
+
+---
+
+#### Constant Velocity State Transition
+
+Without gyro bias: 
+\[
+x_t =
+\begin{bmatrix}
+\theta_t \\
+\dot{\theta}_t
+\end{bmatrix},
+\quad
+A =
+\begin{bmatrix}
+1 & \Delta t \\
+0 & 1
+\end{bmatrix}
+\]
+
+With gyro bias: 
+\[
+\tilde{x}_t =
+\begin{bmatrix}
+\theta_t \\
+\dot{\theta}_t \\
+b_t
+\end{bmatrix},
+\quad
+\tilde{A} =
+\begin{bmatrix}
+1 & \Delta t & 0 \\
+0 & 1 & 0 \\
+0 & 0 & 1
+\end{bmatrix}
+\]
+
+---
+
+#### Statistical models
+
+Encoder: 
+\[
+H_{enc} = [\,1 \quad 0\,], \quad
+R_{enc} = [\,\sigma_{enc}^2\,]
+\]
+
+Gyro (no bias): 
+\[
+H_{gyro} = [\,0 \quad 1\,], \quad
+R_{gyro} = [\,\sigma_{gyro}^2\,]
+\]
+
+- Per-step noise from continuous-time densities (gyro step \(\Delta t_g\)):
+\[
+\sigma_{gyro}^{2} = \frac{\sigma_{gyro,\ density}^{2}}{\Delta t_g}
+\]
+
+Gyro (with bias): 
+\[
+H_{gyro} = [\,0 \quad 1 \quad 1\,], \quad
+q_b = \sigma_{drift}^2
+\]
+
+- Per-step noise from continuous-time densities (gyro step \(\Delta t_g\)):
+\[
+q_b = \sigma_{drift,\ density}^{2} \, \Delta t_g
+\]
+
+Process noise covariance: 
+- Without bias: 
+\[
+Q = \mathrm{diag}(q_\theta,\ q_{\dot{\theta}})
+\]
+- With bias: 
+\[
+Q = \mathrm{diag}(q_\theta,\ q_{\dot{\theta}},\ q_b)
+\]
