@@ -6,7 +6,7 @@ The goal is to use this understanding to extend to a 6DOF robot in 3D.
 
 The script will use forward kinematics (FK) to effect a movement input and determine the resulting position. 
 
-An extension to inverse kinematics (IK) will be created to return the required inputs to reach a desired position. 
+An extension to inversae kinematics (IK) will be created to return the required inputs to reach a desired position. 
 
 ## Joint Pose
 
@@ -960,34 +960,40 @@ Thus we interpolate the ground-truth angular velocity \(\dot{\theta}(t)\) to \(t
 
 #### Predict step (from process model)
 
-Using state-space model: 
+State transition model:
 \[
 \hat{x}_{t+1|t} = A\,\hat{x}_{t|t}
 \]
+where:
+- \(A\) is the state transition matrix, maps state from time \(t\) to \(t+1\) assuming no process noise.
 
-Prediction step covariance: 
+Prediction step covariance:
 \[
 P_{t+1|t} = A P_{t|t} A^\top + Q
 \]
+where:
+- \(Q\) is the process noise covariance matrix, models uncertainty added each step due to unmodelled dynamics or disturbances.
+
+---
 
 #### Update step (from measurement model)
 
-Kalman Gain: 
+Kalman Gain:
 \[
 K_t = P_{t|t-1} H^\top \left( H P_{t|t-1} H^\top + R \right)^{-1}
 \]
+where:
+- \(H\) is the measurement matrix, maps state variables into measurement space.
 
-Updated estimate: 
+Updated estimate:
 \[
 \hat{x}_{t|t} = \hat{x}_{t|t-1} + K_t \left( y_t - H \hat{x}_{t|t-1} \right)
 \]
 
-Estimate covariance: 
+Estimate covariance:
 \[
 P_{t|t} = (I - K_t H) P_{t|t-1}
 \]
-
----
 
 #### Constant Velocity State Transition
 
