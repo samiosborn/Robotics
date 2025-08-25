@@ -6,10 +6,29 @@
 // Analogue read from mic board (KY-038)
 const uint8_t MIC_PIN = A0;
 
+// MICROPHONE SENSOR TUNING
+
+// Reference amplitude in ADC counts (i.e. 0 --> 1023)
+const float V_REF_COUNTS = 2.0f;
+
+// Microphone offset (in dB)
+const float DB_OFFSET_DB = 55.0f;
+
+// Convert RMS to dB
+float dBfromRMS(float rms){
+  // Prevent log(0) below
+  if (rms < 1e-3f) rms = 1e-3f;
+  // Scale and add offset
+  return 20.0f * log10f(rms / V_REF_COUNTS) + DB_OFFSET_DB;
+}
+
 // ROLLING BUFFER
 
 // Buffer size
 const size_t bufferSize = 240;
+
+// Sample size <-- MAX value = Buffer size
+const size_t sampleSize = 240;
 
 // Template rolling buffer of last N samples
 template<size_t N>
@@ -85,14 +104,6 @@ struct RingBuffer{
   }
 };
 
-// Create a buffer instance
-RingBuffer<bufferSize> micBuf;
-
-// RMS to dB
-
-
-
-
 // SMOOTHING AND DECAY CONSTANTS
 
 // Exponential Moving Average (EMA) smoothing factor
@@ -154,14 +165,27 @@ float updateLevel(float db_now){
   return SRL_level;
 }
 
-// 4-Digit 7-Segment display
+// Create a buffer instance
+RingBuffer<bufferSize> micBuffer;
 
+// Print interval (25Hz)
+const unsigned long PRINT_INTERVAL_MS = 40; 
+
+// Last print time (in ms)
+static unsigned long last_print_ms = 0;
+
+// 4-Digit 7-Segment display (TBC)
 
 void setup() {
-  // Baudrate of 9600
-  Serial.begin(9600);
+  // Baud rate 
+  Serial.begin(1000000);
 
   // Note: No pinMode needed for analogue inputs
+
+  // Use 1.1V reference
+  analogReference(INTERNAL1V1);
+  // Let the new reference settle
+  delay(5);
 
 }
 
@@ -170,9 +194,32 @@ void loop() {
   int currentMicReading = analogRead(MIC_PIN);
 
   // Push into rolling buffer
-  micBuf.push((uint16_t)currentMicReading);
+  micBuffer.push((uint16_t)currentMicReading);
 
-  // Print to Serial Monitor
-  Serial.println(currentMicReading);
+  // Extract RMS from buffer
+  float currentRMS = micBuffer.RMS(sampleSize);
 
+  // Convert RMS to dB
+  float db = dBfromRMS(currentRMS);
+
+  // Smooth dB level
+  float out = updateLevel(db);
+
+  // Current time
+  unsigned long now = millis();
+  // Print only if sufficient time has elapsed since last print
+  if ((now - last_print_ms) >= PRINT_INTERVAL_MS){
+    // Update last print time to now
+    last_print_ms = now;
+    // Print to Serial Monitor
+    Serial.print(F("Raw value: "));
+    Serial.print(currentMicReading);
+    Serial.print(F(", RMS: "));
+    Serial.print(currentRMS, 2);
+    Serial.print(F(", Live dB: "));
+    Serial.print(db, 1);
+    Serial.print(F(", Smoothed dB: "));
+    Serial.println(out, 1);
+  }
+  
 }
