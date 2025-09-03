@@ -1,4 +1,4 @@
-
+#include <math.h>
 #include <Wire.h>
 
 // --- PINS ---
@@ -26,7 +26,7 @@ const uint8_t REG_PWR_MGMT_1 = 0x6B;
 const uint8_t REG_WHO_AM_I = 0x75;
 
 // ACCEL OUT REGISTER (STARTING WITH X_H)
-const uint8_t REG_ACCEL_OUT_X_H = 0x3B;
+const uint8_t REG_ACCEL_XOUT_H = 0x3B;
 // ACCEL CONFIG REGISTER
 const uint8_t REG_ACCEL_CONFIG = 0x1C;
 
@@ -45,12 +45,12 @@ const float EMA_ALPHA = 0.01;
 // EMA PITCH AND ROLL
 float pitchEMA = NAN, rollEMA = NAN;
 
-// COORDINATE BIAS
+// COORDINATE BIAS (RAW)
 float ax_bias = 0, ay_bias = 0, az_bias = 0;
 
 
 // --- Read N bytes from starting register ---
-bool readBytes(uint8_t startReg, uint8_t* buf, uint8_t len){
+bool readBytes(uint8_t startReg, uint8_t* buffer, uint8_t len){
   // Open I2C write transaction to MPU
   Wire.beginTransmission(MPU_ADDR);
   // Send the starting register address
@@ -63,13 +63,26 @@ bool readBytes(uint8_t startReg, uint8_t* buf, uint8_t len){
   if (got != len) return false;
   // Save the bytes read into the caller's buffer
   for (uint8_t i=0; i<len; ++i){
-    buf[i] = Wire.read();
+    buffer[i] = Wire.read();
   }
   // If everything works, return true
   return true;
 }
 
+
 // --- Read raw accel (16-bit signed per axis) ---
+bool readAccelRaw(int16_t& ax, int16_t& ay, int16_t& az){
+  // Initialise an array of 6
+  uint8_t b[6];
+  // Bail if reading fails
+  if (readBytes(REG_ACCEL_XOUT_H, b, 6) == false) return false;
+  // IMU returns 16-bit values for the 3 axis (in big-endian order)
+  ax = (int16_t)((b[0] << 8) | b[1]);
+  ay = (int16_t)((b[2] << 8) | b[3]);
+  az = (int16_t)((b[4] << 8) | b[5]);
+  // If we got so far, it works
+  return true;
+}
 
 
 // --- Convert raw accel read to g and remove bias ---
