@@ -1,5 +1,6 @@
 #include <math.h>
 #include <Wire.h>
+#include <TM1637Display.h>
 
 // --- PINS ---
 
@@ -36,11 +37,16 @@ const uint8_t REG_ACCEL_CONFIG = 0x1C;
 // 1 G PER ACCEL RAW OUT
 const float ACCEL_LSB_PER_G = 16384.0f;
 
+// DEGREE PER 1 RAD
+const float DEGREE_PER_RAD = 180.0f / PI;
+
 // EXPECTED WHO_AM_I VALUE
 const uint8_t EXPECTED_WHO_AM_I = 0x70;
 
 // EXPONENTIAL MOVING AVERAGE (EMA) ALPHA
-const float EMA_ALPHA = 0.01;
+const float EMA_ALPHA = 0.1;
+
+// --- GLOBAL VARIABLES ---
 
 // EMA PITCH AND ROLL
 float pitchEMA = NAN, rollEMA = NAN;
@@ -48,6 +54,17 @@ float pitchEMA = NAN, rollEMA = NAN;
 // COORDINATE BIAS (RAW)
 float ax_bias = 0, ay_bias = 0, az_bias = 0;
 
+// AXIS SIGNS
+int8_t SX = +1, SY = +1, SZ = +1;
+
+
+// --- DISPLAY ---
+
+// Segment pattern for minus sign (segment G)
+static const uint8_t SEG_MINUS = 0x40;
+
+// Initialise Display
+TM1637Display display(PIN_TM1637_CLK, PIN_TM1637_DIO);
 
 // --- Read N bytes from starting register ---
 bool readBytes(uint8_t startReg, uint8_t* buffer, uint8_t len){
@@ -85,16 +102,115 @@ bool readAccelRaw(int16_t& ax, int16_t& ay, int16_t& az){
 }
 
 
-// --- Convert raw accel read to g and remove bias ---
+// --- Return acceleration in g and remove bias ---
+bool readAccelG(float& ax_g, float& ay_g, float& az_g){
+  // Initialise raw reading variables
+  int16_t ax_r, ay_r, az_r;
+  // Read raw accel & If read doesn't work, return FALSE
+  if (readAccelRaw(ax_r, ay_r, az_r) == false) return false;
+  // Remove bias and convert to g
+  float axg = (float(ax_r) - ax_bias) / ACCEL_LSB_PER_G; 
+  float ayg = (float(ay_r) - ay_bias) / ACCEL_LSB_PER_G; 
+  float azg = (float(az_r) - az_bias) / ACCEL_LSB_PER_G; 
+  // Correct if upside down
+  ax_g = SX * axg;
+  ay_g = SY * ayg;
+  az_g = SZ * azg;
+  // If so far works, return TRUE
+  return true;
+} 
 
 
-// --- Calculate PITCH/ROLL from accel (in radians) ---
+// --- Calculate PITCH/ROLL (in radians) from accel (in g) ---
+void accelToPitchRoll(float ax, float ay, float az, float& pitch_rad, float& roll_rad){
+  // Roll (about x-axis)
+  roll_rad = atan2f(ay, az);
+  // Pitch (about y-axis)
+  pitch_rad = atan2f(-ax, sqrtf(ay*ay + az*az));
+}
 
 
 // --- Convert Radians to Degrees ---
+inline float rad2deg(float r){
+  return r * DEGREE_PER_RAD;
+}
 
 
 // --- Update EMA Smoothing ---
+inline float updateEMA (float ema_prev, float new_reading, float alpha){
+  // For the first time, just output the first reading
+  if (isnan(ema_prev)) return new_reading;
+  // Otherwise, update the average
+  return alpha * new_reading + (1.0f - alpha) * ema_prev;
+}
+
+
+// --- Calibration ---
+void calibrateAccelOffsets(){
+  // Ask user to level IMU
+  Serial.println(F("Level the IMU, you have 3 seconds!"));
+  // Wait 3 seconds
+  delay(3000);
+  // Print starting calibration
+  Serial.println(F("Calibration has started."));
+  
+  // Average over N steps
+  const uint16_t N = 300;
+  // Initialise sum of raw readings
+  long sum_x = 0, sum_y = 0, sum_z = 0;
+  // Loop and sum
+  for (uint16_t i = 0; i < N; ++i){
+    // Initialise raw readings
+    int16_t axr, ayr, azr;
+    // If reading IMU works
+    if (readAccelRaw(axr, ayr, azr)){
+      sum_x += axr, sum_y += ayr, sum_z += azr;
+    }
+    // Short delay before next reading
+    delay(2);
+  }
+
+  // Average readings
+  float m_x = sum_x / (float)N;
+  float m_y = sum_y / (float)N;
+  float m_z = sum_z / (float)N;
+
+  // Set bias as mean raw value for x and y
+  ax_bias = m_x;
+  ay_bias = m_y;
+
+  // If Z points down at rest, flip it
+  SZ = (m_z < 0) ? -1 : +1;
+
+  // Want at +1 g at rest
+  az_bias = m_z - SZ * ACCEL_LSB_PER_G;
+
+  // Report bias set
+  Serial.println(F("Calibration is complete."));
+
+  // Wait 3 seconds
+  delay(3000);
+
+}
+
+
+// --- Display Angle on TM1637 ---
+
+
+// --- DEBUG ---
+void printAccelDebug() {
+  int16_t axr, ayr, azr;
+  if (!readAccelRaw(axr, ayr, azr)) { Serial.println(F("raw fail")); return; }
+  float ax_g = (float(axr) - ax_bias) / ACCEL_LSB_PER_G;
+  float ay_g = (float(ayr) - ay_bias) / ACCEL_LSB_PER_G;
+  float az_g = (float(azr) - az_bias) / ACCEL_LSB_PER_G;
+  float n = sqrtf(ax_g*ax_g + ay_g*ay_g + az_g*az_g);
+  Serial.print(F("RAW ")); Serial.print(axr); Serial.print(' ');
+  Serial.print(ayr); Serial.print(' '); Serial.print(azr);
+  Serial.print(F("  |  g ")); Serial.print(ax_g,3); Serial.print(' ');
+  Serial.print(ay_g,3); Serial.print(' '); Serial.print(az_g,3);
+  Serial.print(F("  | |a|=")); Serial.println(n,3);
+}
 
 void setup() {
 
@@ -149,20 +265,39 @@ void setup() {
   Wire.write(0x00);
   Wire.endTransmission();
 
+  // Calibrate the IMU
+  calibrateAccelOffsets();
 
 }
 
 void loop() {
-  // Read acceleration in X/Y/Z axis
+  // Read acceleration in g (bias removed)
+  float ax_g, ay_g, az_g;
+  readAccelG(ax_g, ay_g, az_g);
 
-  // Scale to units of g
+  // Compute pitch and roll (in radians)
+  float pitch_rad, roll_rad;
+  accelToPitchRoll(ax_g, ay_g, az_g, pitch_rad, roll_rad); 
 
-  // Compute roll (rotation around x-axis)
-
-  // Compute pitch (rotation around y-axis)
+  // Get pitch and roll in degrees
+  float pitch_deg, roll_deg;
+  pitch_deg = rad2deg(pitch_rad);
+  roll_deg = rad2deg(roll_rad);
 
   // Apply Exponential Moving Average (EMA) Smoothing
+  pitchEMA = updateEMA(pitchEMA, pitch_deg, EMA_ALPHA);
+  rollEMA = updateEMA(rollEMA, roll_deg, EMA_ALPHA);
 
   // Print to Serial
+  Serial.print(F("Pitch(deg): "));
+  Serial.print(pitchEMA, 1);
+  Serial.print(F(" & Roll (deg): "));
+  Serial.println(rollEMA, 1);
+
+  // Debug
+  //printAccelDebug();
+
+  // 50Hz
+  delay(20);
 
 }
