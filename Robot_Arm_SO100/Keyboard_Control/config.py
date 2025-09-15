@@ -34,7 +34,12 @@ SERVOS = {
 # Fixed joint movement step size (in degrees)
 STEP_SIZE = 5.0
 
-# Teleop key mapping: key → joint and direction
+# Linear mode boundaries (0–100 scale)
+LINEAR_MIN_DEGREE = 0.0
+LINEAR_MAX_DEGREE = 100.0
+
+# --- KEYBOARD CONTROL ---
+# Teleop key mapping: key to joint and direction
 KEYBOARD_BINDINGS = {
     "q": ("shoulder_pan", +1),
     "a": ("shoulder_pan", -1),
@@ -51,6 +56,30 @@ KEYBOARD_BINDINGS = {
     "z": "quit",
 }
 
-# Linear mode boundaries (0–100 scale)
-LINEAR_MIN_DEGREE = 0.0
-LINEAR_MAX_DEGREE = 100.0
+# --- PS4 CONTROLLER ---
+# DualShock 4 name
+PS4_DEVICE_NAME = "Wireless Controller"
+# Control loop frequency (Hz)
+PS4_LOOP_HZ = 50
+# Stick deadzone
+PS4_DEADZONE = 0.12
+# Max degree change (per second)
+PS4_MAX_DEG_PER_SEC = {
+    "shoulder_pan": 90.0,
+    "shoulder_lift": 90.0,
+    "elbow_flex": 90.0,
+    "wrist_flex": 120.0,
+    "wrist_roll": 180.0,
+    "gripper": 180.0,
+}
+# PS4 Controller key bindings
+PS4_BINDINGS = {
+    "LX": ("shoulder_pan",   +1.0),
+    "LY": ("shoulder_lift",  -1.0),
+    "RY": ("elbow_flex",     -1.0),
+    "RX": ("wrist_flex",     +1.0),
+    "L1": ("wrist_roll",     -0.6),
+    "R1": ("wrist_roll",     +0.6),
+    "L2": ("gripper",        -1.0),
+    "R2": ("gripper",        +1.0),
+}
