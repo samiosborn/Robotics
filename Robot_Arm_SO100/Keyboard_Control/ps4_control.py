@@ -64,7 +64,7 @@ class PS4Teleop:
 
         # Motion mappings and speed limits from config
         self.bindings = config.PS4_BINDINGS
-        self.maxspd   = config.PS4_MAX_DEG_PER_SEC
+        self.maxspd   = config.MAX_DEG_PER_SEC
 
         # Servo bus with calibration
         self.bus = self._create_motor_bus()
