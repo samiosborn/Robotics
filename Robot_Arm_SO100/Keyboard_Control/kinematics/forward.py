@@ -33,7 +33,7 @@ def fk_all_frames(q_rad: List[float]) -> List[np.ndarray]:
     return Ts
 
 # End effector pose as (pos xyz, rpy)
-def fk_pose6(q_rad: List[float]) -> Tuple[np.ndarray, np.ndarray]:
+def fk_pose(q_rad: List[float]) -> Tuple[np.ndarray, np.ndarray]:
     # Extract tool frame
     T = fk_all_frames(q_rad)[-1]
     # Position
