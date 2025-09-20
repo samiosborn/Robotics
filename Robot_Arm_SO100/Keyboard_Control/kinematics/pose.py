@@ -49,3 +49,19 @@ def so3_log(R: np.ndarray) -> np.ndarray:
     W = (R - R.T) / (2.0 * np.sin(th))
     # Convert skew-symmetrix matrix into 3-vector and multiply by theta
     return vee(W) * th
+
+# SO(3) exponential map for a rotation vector w
+def so3_exp(w: np.ndarray) -> np.ndarray:
+    # Angle from norm
+    th = float(np.linalg.norm(w))
+    # Skew symmetrix matrix version
+    W = hat(w)
+    # For tiny angles
+    if th < 1e-8:
+        # Avoids dividing by zero
+        return np.eye(3) + W + 0.5 * (W @ W)
+    # Unnormalised Rodrigues rotation formula
+    A = np.sin(th) / th
+    B = (1.0 - np.cos(th)) / (th * th)
+    # First 2 terms of Taylor series
+    return np.eye(3) + A * W + B * (W @ W)
