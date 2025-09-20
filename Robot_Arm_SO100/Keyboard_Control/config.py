@@ -4,33 +4,36 @@ import json
 import math
 from typing import Dict, Tuple, List
 
+# Degrees of Freedom
+DOF = 6
+
 # Debug flag for print messages
 DEBUG = True
 
+# --- SERVO SETUP ---
 # Serial port name used to connect to Feetech USB-UART converter
 SERVO_PORT = "COM3"
-
 # Baudrate expected by the servos (must match what you configured them with)
 SERVO_BAUDRATE = 1000000
-
 # Timeout for serial packet handling (in milliseconds)
 TIMEOUT_MS = 1000
-
 # Servo resolution (steps per full rotation)
 DEFAULT_RESOLUTION = 4096
 
+# --- SERVO CALIB & LIMITS ---
 # Directory to look for saved calibration files
 CALIBRATION_FOLDER = "configs"
-
 # Path to default fallback calibration file (used if latest not found)
 CALIBRATION_FILENAME = "calib_20250803_100849.json"
-
+# Path to joint calibration file 
+CALIBRATION_PATH = os.path.join(CALIBRATION_FOLDER, CALIBRATION_FILENAME)
 # Path to default fallback joint limits file (used if latest not found)
 LIMITS_FILENAME = "limits_20250803_100849.json"
 # Path to joint limits file
 LIMITS_PATH = os.path.join(CALIBRATION_FOLDER, LIMITS_FILENAME)
 
-# Vector order used everywhere (all FK/Jacobian/IK expect this order)
+# --- SERVO JOINTS ---
+# Joint order as vector
 JOINT_ORDER: List[str] = [
     "shoulder_pan",
     "shoulder_lift",
@@ -39,8 +42,7 @@ JOINT_ORDER: List[str] = [
     "wrist_roll",
     "gripper",
 ]
-
-# Robot arm motors
+# Robot arm motor name
 SERVOS = {
     "shoulder_pan": (1, "sts3215"),
     "shoulder_lift": (2, "sts3215"),
@@ -50,15 +52,15 @@ SERVOS = {
     "gripper": (6, "sts3215"),
 }
 
+# --- MOTOR SPEED ---
 # Fixed joint movement step size (in degrees)
 STEP_SIZE = 5.0
-
 # Linear mode boundaries (0–100 scale)
 LINEAR_MIN_DEGREE = 0.0
 LINEAR_MAX_DEGREE = 100.0
 
 # --- KEYBOARD CONTROL ---
-# Teleop key mapping: key to joint and direction
+# Keyboard key mapping: key to joint and direction
 KEYBOARD_BINDINGS = {
     "q": ("shoulder_pan", +1),
     "a": ("shoulder_pan", -1),
