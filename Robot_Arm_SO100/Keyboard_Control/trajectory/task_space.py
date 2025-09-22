@@ -2,6 +2,7 @@
 import numpy as np
 from typing import List, Tuple, Optional
 import config
+from storage.waypoints import pose_from_waypoint
 from kinematics.inverse import inverse_via_DLS, inverse_via_DLS_position_only
 from kinematics.forward import fk_pose
 from kinematics.pose import rpy_to_R, R_to_rpy, hat, vee, so3_log, so3_exp
@@ -29,16 +30,16 @@ def linear_interp_position_only(p0: np.ndarray, p1: np.ndarray,
     return p
 
 # Build a sequence of target poses along a straight line in SE(3)
-def build_linear_pose_profile(start_pose_rpy: np.ndarray,
-                              end_pose_rpy: np.ndarray,
+def build_linear_pose_profile(start_pose: np.ndarray,
+                              end_pose: np.ndarray,
                               total_time: float,
                               dt: float,
                               use_orientation: bool = True) -> Tuple[np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]:
     # Unpack start and end
-    p0 = np.array(start_pose_rpy[:3], dtype=float)
-    rpy0 = np.array(start_pose_rpy[3:], dtype=float)
-    p1 = np.array(end_pose_rpy[:3], dtype=float)
-    rpy1 = np.array(end_pose_rpy[3:], dtype=float)
+    p0 = np.array(start_pose[:3], dtype=float)
+    rpy0 = np.array(start_pose[3:], dtype=float)
+    p1 = np.array(end_pose[:3], dtype=float)
+    rpy1 = np.array(end_pose[3:], dtype=float)
 
     # Convert RPY to rotation matrices
     R0 = rpy_to_R(rpy0[0], rpy0[1], rpy0[2])
@@ -66,8 +67,8 @@ def build_linear_pose_profile(start_pose_rpy: np.ndarray,
     return times, poses
 
 # Plan a task-space linear trajectory
-def plan_task_space_linear(start_pose_rpy: np.ndarray,
-                           end_pose_rpy: np.ndarray,
+def plan_task_space_linear(start_pose: np.ndarray,
+                           end_pose: np.ndarray,
                            total_time: float = config.DEFAULT_TRAJ_DURATION,
                            dt: float = config.DEFAULT_TRAJ_DT,
                            q_seed_rad: Optional[List[float]] = None,
@@ -77,8 +78,8 @@ def plan_task_space_linear(start_pose_rpy: np.ndarray,
                            max_iters: int = config.IK_MAX_ITERS) -> Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]:
     # Make list of target poses
     times, target_poses = build_linear_pose_profile(
-        np.array(start_pose_rpy, dtype=float),
-        np.array(end_pose_rpy, dtype=float),
+        np.array(start_pose, dtype=float),
+        np.array(end_pose, dtype=float),
         total_time,
         dt,
         use_orientation=use_orientation
@@ -125,18 +126,6 @@ def plan_task_space_linear(start_pose_rpy: np.ndarray,
 
     return times, q_traj, target_poses
 
-# Extract a pose [x,y,z, r,p,y] from a waypoint (dict of joint names and joint angles)
-def pose_from_waypoint(w: dict) -> np.ndarray:
-    # If waypoint has "pose", use it
-    if "pose" in w and w["pose"] is not None:
-        return np.array(w["pose"], dtype=float)
-    # Else, compute pose using FK
-    q_deg_dict = w["q_deg"]
-    q_vec_deg = [q_deg_dict[j] for j in config.JOINT_ORDER]
-    q_rad = np.deg2rad(q_vec_deg)
-    p, rpy = fk_pose(q_rad)
-    return np.hstack([p, rpy])
-
 # Plan linear trajectory between two waypoints 
 def plan_task_space_linear_from_waypoints(wayA: dict,
                                           wayB: dict,
@@ -147,8 +136,8 @@ def plan_task_space_linear_from_waypoints(wayA: dict,
                                           lambda_damp: float = config.IK_DAMPING_LAMBDA,
                                           max_iters: int = config.IK_MAX_ITERS) -> Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]:
     # Extract pose from waypoints
-    poseA = pose_from_waypoint(wayA)
-    poseB = pose_from_waypoint(wayB)
+    poseA = pose_from_waypoint(wayA, prefer_cache = False)
+    poseB = pose_from_waypoint(wayB, prefer_cache = False)
 
     # Use waypoint A's joint angles as the initial IK seed if available
     if "q_deg" in wayA and wayA["q_deg"] is not None:

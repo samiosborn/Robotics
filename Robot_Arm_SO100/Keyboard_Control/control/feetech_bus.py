@@ -1,4 +1,4 @@
-# feetech_bus.py
+# control/feetech_bus.py
 import numpy as np
 import scservo_sdk as scs
 import config

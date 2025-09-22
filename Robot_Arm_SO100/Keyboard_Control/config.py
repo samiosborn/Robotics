@@ -23,14 +23,32 @@ DEFAULT_RESOLUTION = 4096
 # --- SERVO CALIB & LIMITS ---
 # Directory to look for saved calibration files
 CALIBRATION_FOLDER = "configs"
-# Path to default fallback calibration file (used if latest not found)
+# Filename of default calibration file
 CALIBRATION_FILENAME = "calib_20250803_100849.json"
 # Path to joint calibration file 
 CALIBRATION_PATH = os.path.join(CALIBRATION_FOLDER, CALIBRATION_FILENAME)
-# Path to default fallback joint limits file (used if latest not found)
+# Filename of default joint limits file
 LIMITS_FILENAME = "limits_20250803_100849.json"
 # Path to joint limits file
 LIMITS_PATH = os.path.join(CALIBRATION_FOLDER, LIMITS_FILENAME)
+# Filename of waypoints (default)
+WAYPOINTS_FILENAME = "waypoints.json"
+# Path to waypoints file
+WAYPOINTS_PATH = os.path.join(CALIBRATION_FOLDER, WAYPOINTS_FILENAME)
+
+# --- SO-100 DIMENSIONS ---
+SHOULDER_OFFSET_X_M = 0.050  # +x from base pan axis to shoulder-lift axis
+SHOULDER_OFFSET_Z_M = 0.060  # +z from base pan axis to shoulder-lift axis
+# L1_UPPER_ARM_M: shoulder_lift link length (shoulder to elbow)
+L1_UPPER_ARM_M = 0.160
+# L2_FOREARM_M:   elbow_flex link length (elbow to wrist_pitch)
+L2_FOREARM_M = 0.160
+# L3_WRIST_M:     wrist_pitch link length (wrist_pitch to wrist_roll)
+L3_WRIST_M = 0.100
+# TOOL_LENGTH_M:  wrist_roll frame to fingertip/end-effector(EE) reference point
+TOOL_LENGTH_M = 0.120
+# LINK_LENGTHS_M: Tuple
+LINK_LENGTHS_M = (SHOULDER_OFFSET_X_M, SHOULDER_OFFSET_Z_M, L1_UPPER_ARM_M, L2_FOREARM_M, L3_WRIST_M, TOOL_LENGTH_M)
 
 # --- SERVO JOINTS ---
 # Joint order as vector
@@ -76,6 +94,12 @@ KEYBOARD_BINDINGS = {
     "h": ("gripper", -1),
     "z": "quit",
 }
+# Modifier Keys
+KEYBOARD_FAST_MODS = ("shift",)
+KEYBOARD_FINE_MODS = ("ctrl", "alt")
+# Modifier Multiplier
+KEYBOARD_FAST_MULTIPLIER = 3.0
+KEYBOARD_FINE_MULTIPLIER = 0.25
 
 # --- PS4 CONTROLLER ---
 # DualShock 4 name
@@ -86,19 +110,18 @@ PS4_LOOP_HZ = 50
 PS4_DEADZONE = 0.12
 # PS4 Controller key bindings
 PS4_BINDINGS = {
-    "LX": ("shoulder_pan",   +1.0),
-    "LY": ("shoulder_lift",  -1.0),
-    "RY": ("elbow_flex",     -1.0),
-    "RX": ("wrist_flex",     +1.0),
-    "L1": ("wrist_roll",     -0.6),
-    "R1": ("wrist_roll",     +0.6),
-    "L2": ("gripper",        -1.0),
-    "R2": ("gripper",        +1.0),
+    "LX": ("shoulder_pan", +1.0),
+    "LY": ("shoulder_lift", -1.0),
+    "RY": ("elbow_flex", -1.0),
+    "RX": ("wrist_flex", +1.0),
+    "L1": ("wrist_roll", -0.6),
+    "R1": ("wrist_roll", +0.6),
+    "L2": ("gripper", -1.0),
+    "R2": ("gripper", +1.0),
 }
 
 # --- SERVO CALIBRATION ---
-
-# Helper: Load joint limits (deg)
+# Load joint limits (deg)
 def _load_joint_limits_from_json(path: str) -> Dict[str, Tuple[float, float]]:
     # Read JSON
     with open(path, "r") as f:
@@ -113,38 +136,55 @@ def _load_joint_limits_from_json(path: str) -> Dict[str, Tuple[float, float]]:
         lo, hi = (min(a, b), max(a, b))
         limits[name] = (lo, hi)
     return limits
-# Load joint limits (deg)
+# Joint degrees from raw value
+def _deg_from_raw(raw_steps: int, offset_steps: int, drive: int, resolution: int) -> float:
+    # same math as FeetechBus.read_position
+    deg = ( (raw_steps + offset_steps) / (resolution // 2) ) * 180.0
+    return -deg if drive else deg
+# Load limits from calibration
+def _load_limits_from_calibration(calib_path: str) -> Dict[str, Tuple[float, float]]:
+    with open(calib_path, "r", encoding="utf-8") as f:
+        calib = json.load(f)
+    names      = calib["motor_names"]
+    start_pos  = calib["start_pos"]
+    end_pos    = calib["end_pos"]
+    drive_mode = calib["drive_mode"]
+    homing     = calib["homing_offset"]
+    # Limits
+    limits = {}
+    for idx, name in enumerate(names):
+        motor_id = SERVOS[name][0]
+        offset   = int(homing[str(motor_id)])
+        drive    = int(drive_mode[idx])
+        a = _deg_from_raw(int(start_pos[idx]), offset, drive, DEFAULT_RESOLUTION)
+        b = _deg_from_raw(int(end_pos[idx]), offset, drive, DEFAULT_RESOLUTION)
+        lo, hi = (a, b) if a <= b else (b, a)
+        limits[name] = (lo, hi)
+    return limits
+# Load joint limits (deg) with calibration-first policy
 try:
-    JOINT_LIMITS_DEG: Dict[str, Tuple[float, float]] = _load_joint_limits_from_json(LIMITS_PATH)
+    JOINT_LIMITS_DEG: Dict[str, Tuple[float, float]] = _load_limits_from_calibration(CALIBRATION_PATH)
     if DEBUG:
-        print(f"[DEBUG] Loaded joint limits from {LIMITS_PATH}")
+        print(f"[DEBUG] Joint limits derived from {CALIBRATION_PATH}")
 except Exception as ex:
     if DEBUG:
-        print(f"[WARN] Could not load limits JSON: {ex}\n Falling back to conservative defaults.")
-    # Conservative fallback (deg)
-    JOINT_LIMITS_DEG = {
-        "shoulder_pan": (100.0, 290.0),
-        "shoulder_lift": (75.0, 288.0),
-        "elbow_flex": (78.0, 272.0),
-        "wrist_flex": (71.0, 246.0),
-        "wrist_roll": (3.6, 342.5),
-        "gripper": (183.0, 280.0),
-    }
-
-
-# --- SO-100 DIMENSIONS ---
-# BASE_HEIGHT_M: vertical offset from base frame to shoulder_pitch axis
-BASE_HEIGHT_M = 0.070
-# L1_UPPER_ARM_M: shoulder_lift link length (shoulder to elbow)
-L1_UPPER_ARM_M = 0.160
-# L2_FOREARM_M:   elbow_flex link length (elbow to wrist_pitch)
-L2_FOREARM_M = 0.160
-# L3_WRIST_M:     wrist_pitch link length (wrist_pitch to wrist_roll)
-L3_WRIST_M = 0.100
-# TOOL_LENGTH_M:  wrist_roll frame to fingertip/end-effector(EE) reference point
-TOOL_LENGTH_M = 0.120
-# LINK_LENGTHS_M: Tuple
-LINK_LENGTHS_M = (BASE_HEIGHT_M, L1_UPPER_ARM_M, L2_FOREARM_M, L3_WRIST_M, TOOL_LENGTH_M)
+        print(f"[WARN] Could not derive limits from calibration: {ex}\n"
+              f"Falling back to {LIMITS_PATH}")
+    try:
+        JOINT_LIMITS_DEG = _load_joint_limits_from_json(LIMITS_PATH)
+        if DEBUG:
+            print(f"[DEBUG] Loaded joint limits from {LIMITS_PATH}")
+    except Exception as ex2:
+        if DEBUG:
+            print(f"[WARN] Could not load limits JSON: {ex2}\n Falling back to conservative defaults.")
+        JOINT_LIMITS_DEG = {
+            "shoulder_pan": (100.0, 290.0),
+            "shoulder_lift": (75.0, 288.0),
+            "elbow_flex": (78.0, 272.0),
+            "wrist_flex": (71.0, 246.0),
+            "wrist_roll": (3.6, 342.5),
+            "gripper": (183.0, 280.0),
+        }
 
 # --- MODIFIED DENAVIT-HARTENBERG (MDH) TABLE ---
 # Degrees to Radians (helper)
@@ -160,20 +200,33 @@ MDH_THETA_OFFSETS_DEG = {
 }
 # MDH Parameters (a_i, alpha_i, d_i, theta_offset_i) for joints 1 to 6 (in Radians)
 MDH_PARAMS = [
-    # a_i         alpha_i         d_i                 theta_offset_i (radians)
-    (0.000,       +deg(90.0),     BASE_HEIGHT_M,      deg(MDH_THETA_OFFSETS_DEG["shoulder_pan"])),
-    (L1_UPPER_ARM_M,  0.000,      0.000,              deg(MDH_THETA_OFFSETS_DEG["shoulder_lift"])),
-    (L2_FOREARM_M,    0.000,      0.000,              deg(MDH_THETA_OFFSETS_DEG["elbow_flex"])),
-    (L3_WRIST_M,      0.000,      0.000,              deg(MDH_THETA_OFFSETS_DEG["wrist_flex"])),
-    (0.000,           +deg(90.0), 0.000,              deg(MDH_THETA_OFFSETS_DEG["wrist_roll"])),
-    (0.000,            0.000,     0.000,              deg(MDH_THETA_OFFSETS_DEG["gripper"])),
+    # J1: shoulder_pan (about z). Use α=+90° like before; d=0 now.
+    (0.000,       +deg(90.0),  0.000,  deg(MDH_THETA_OFFSETS_DEG["shoulder_pan"])),
+
+    # J2: shoulder_lift (about z in MDH frame; the α on J1 makes this physically a pitch)
+    (L1_UPPER_ARM_M, 0.000,    0.000,  deg(MDH_THETA_OFFSETS_DEG["shoulder_lift"])),
+
+    # J3: elbow_flex
+    (L2_FOREARM_M,   0.000,    0.000,  deg(MDH_THETA_OFFSETS_DEG["elbow_flex"])),
+
+    # J4: wrist_flex (pitch)
+    (L3_WRIST_M,     0.000,    0.000,  deg(MDH_THETA_OFFSETS_DEG["wrist_flex"])),
+
+    # J5: wrist_roll (roll about z)
+    (0.000,          0.000,    0.000,  deg(MDH_THETA_OFFSETS_DEG["wrist_roll"])),
 ]
+# Put both shoulder inserts BEFORE joint index 1 (i.e., between J1 and J2)
+MDH_FIXED_INSERTS = [
+    (1, ("tx", SHOULDER_OFFSET_X_M)),
+    (1, ("tz", SHOULDER_OFFSET_Z_M)),
+]
+
 
 # Tool transform
 # Rotate tool about its local X/Y/Z (deg)
 TOOL_RPY_DEG = (0.0, 0.0, 0.0)
 # Offset along tool axis (assume X-axis)
-TOOL_POS_M   = (TOOL_LENGTH_M, 0.0, 0.0)
+TOOL_POS_M = (TOOL_LENGTH_M, 0.0, 0.0)
 
 # --- INVERSE KINEMATICS (IK) ---
 # DLS damping
@@ -185,7 +238,7 @@ IK_ANG_TOL_RAD = deg(0.5)
 # Weight for rotational error
 IK_ROT_WEIGHT = 1.0
 # IK no. of max iterations
-IK_MAX_ITERS = 200
+IK_MAX_ITERS = 5000
 
 # --- FORWARD KINEMATICS ---
 # Max degree change (per second)
@@ -215,3 +268,9 @@ def is_within_limits_deg(q_deg_vec: List[float]) -> bool:
         if not (lo <= q <= hi):
             return False
     return True
+# Helper: Clamp to joint limits
+def clamp_to_limits_deg(q_deg_vec: List[float]) -> List[float]:
+    clamped = []
+    for q, (lo, hi) in zip(q_deg_vec, limits_for_vector_order()):
+        clamped.append(min(max(q, lo), hi))
+    return clamped

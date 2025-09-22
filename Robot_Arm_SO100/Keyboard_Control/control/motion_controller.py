@@ -1,10 +1,10 @@
-# motion_controller.py
+# control/motion_controller.py
 import os
 import json
 import time
 from typing import Callable, Dict, Tuple, Optional
 import config
-from feetech_bus import FeetechBus
+from control.feetech_bus import FeetechBus
 
 # Command per step (joint, delta_deg)
 Command = Tuple[str, float]
@@ -22,7 +22,7 @@ class MotionController:
     # Create motor bus
     def _create_motor_bus(self) -> FeetechBus:
         # Absolute path to the calibration file
-        full_path = os.path.join(config.CALIBRATION_FOLDER, config.CALIBRATION_PATH)
+        full_path = os.path.abspath(config.CALIBRATION_PATH)
         # Ensure calibration file exists
         if not os.path.exists(full_path):
             raise FileNotFoundError(f"Calibration file not found at '{full_path}'")

@@ -1,18 +1,17 @@
 # storage/waypoints.py
-
 import os
 import json
 import time
-from typing import Dict
+from typing import Dict, List
 import numpy as np
 import config
 from kinematics.forward import fk_pose
 
 # Default storage path for saved waypoints
-WAYPOINTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs"))
-WAYPOINTS_PATH = os.path.join(WAYPOINTS_DIR, "waypoints.json")
+WAYPOINTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", config.CALIBRATION_FOLDER))
+WAYPOINTS_PATH = os.path.join(WAYPOINTS_DIR, config.WAYPOINTS_FILENAME)
 
-# Ensure the folder and file exist
+# Ensure the default waypoints folder & file exist
 def _ensure_store():
     os.makedirs(WAYPOINTS_DIR, exist_ok=True)
     if not os.path.exists(WAYPOINTS_PATH):
@@ -54,10 +53,10 @@ def save_single_waypoint(name: str, waypoint: Dict) -> None:
     save_waypoints(blob)
 
 # Get pose [x,y,z,r,p,y] from a waypoint dict
-def pose_from_waypoint(w: Dict) -> np.ndarray:
-    if "pose" in w and w["pose"] is not None:
+def pose_from_waypoint(w: dict, prefer_cache: bool = True) -> np.ndarray:
+    if prefer_cache and "pose" in w and w["pose"] is not None:
         return np.array(w["pose"], dtype=float)
-    # If missing, compute from q_deg and return the pose vector
+    # Recompute pose
     q_deg = w["q_deg"]
     q_vec_deg = [q_deg[j] for j in config.JOINT_ORDER]
     q_rad = np.deg2rad(q_vec_deg)
@@ -96,3 +95,75 @@ def capture_and_save_waypoint(name: str,
     w = build_waypoint_from_qdeg(q_deg, cache_pose=cache_pose)
     save_single_waypoint(name, w)
     return w
+
+# Get waypoint from it's name
+def get_waypoint(name: str) -> Dict:
+    blob = load_waypoints()
+    try:
+        return blob[name]
+    except KeyError as e:
+        raise KeyError(f"Waypoint '{name}' not found in {WAYPOINTS_PATH}") from e
+
+# Get waypoint's pose from it's name
+def get_waypoint_pose(name: str, prefer_cache: bool = True) -> np.ndarray:
+    # Get waypoint
+    w = get_waypoint(name)
+    return pose_from_waypoint(w, prefer_cache)
+
+# List all waypoints by name
+def list_waypoint_names() -> List[str]:
+    return sorted(load_waypoints().keys())
+
+# Delete waypoints by name
+def delete_waypoint(name: str) -> bool:
+    blob = load_waypoints()
+    existed = name in blob
+    if existed:
+        del blob[name]
+        save_waypoints(blob)
+    return existed
+
+# Rename waypoint (with overwrite)
+def rename_waypoint(old: str, new: str, overwrite: bool = False) -> None:
+    blob = load_waypoints()
+    if old not in blob:
+        raise KeyError(f"Waypoint '{old}' not found.")
+    if (new in blob) and not overwrite:
+        raise ValueError(f"Waypoint '{new}' already exists. Use overwrite=True to replace.")
+    blob[new] = blob.pop(old)
+    save_waypoints(blob)
+
+# Clear all saved waypoints
+def clear_waypoints() -> None:
+    # Makes sure waypoints folder/file exist
+    _ensure_store()
+    # Overwrite file with empty JSON
+    save_waypoints({})
+    if config.DEBUG:
+        print(f"[INFO] Cleared all waypoints in {WAYPOINTS_PATH}")
+
+# Prune pose cache
+def prune_pose_cache(names: List[str] | None = None) -> None:
+    # Set pose=None for selected (or all) waypoints to force recompute later
+    blob = load_waypoints()
+    target_names = names or list(blob.keys())
+    for n in target_names:
+        if n in blob:
+            blob[n]["pose"] = None
+    save_waypoints(blob)
+
+# Refresh pose for all waypoints
+def refresh_all_poses(names: List[str] | None = None) -> None:
+    blob = load_waypoints()
+    target_names = names or list(blob.keys())
+    for n in target_names:
+        w = blob.get(n)
+        if not w or "q_deg" not in w or w["q_deg"] is None:
+            continue
+        # Compute pose
+        q_vec_deg = [w["q_deg"][j] for j in config.JOINT_ORDER]
+        q_rad = np.deg2rad(q_vec_deg)
+        p, rpy = fk_pose(q_rad)
+        w["pose"] = [float(p[0]), float(p[1]), float(p[2]),
+                     float(rpy[0]), float(rpy[1]), float(rpy[2])]
+    save_waypoints(blob)

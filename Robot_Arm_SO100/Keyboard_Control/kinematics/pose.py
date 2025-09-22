@@ -1,4 +1,4 @@
-# pose.py
+# kinematics/pose.py
 import numpy as np
 
 # RPY to rotation matrix (ZYX order: yaw, then pitch, then roll)

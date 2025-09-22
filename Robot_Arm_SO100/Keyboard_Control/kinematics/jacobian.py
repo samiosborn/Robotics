@@ -1,4 +1,4 @@
-# jacobian.py
+# kinematics/jacobian.py
 import numpy as np
 from typing import List
 from .forward import fk_all_frames
