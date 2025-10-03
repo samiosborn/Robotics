@@ -12,7 +12,7 @@ DEBUG = True
 
 # --- SERVO SETUP ---
 # Serial port name used to connect to Feetech USB-UART converter
-SERVO_PORT = "COM3"
+SERVO_PORT = "/dev/cu.usbmodem58FA0959261" # on MAC OS. Or "COM3" for Windows
 # Baudrate expected by the servos (must match what you configured them with)
 SERVO_BAUDRATE = 1000000
 # Timeout for serial packet handling (in milliseconds)
