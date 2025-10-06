@@ -1,10 +1,11 @@
 # src/models/train_cnn_numpy.py
 import numpy as np
 from typing import Dict, Tuple
+from src.layers.functional_numpy import out_dim_hw
 from src.models.cnn_numpy import forward_numpy
 from src.layers.functional_numpy_backward import (
-    bce_loss, bce_sigmoid_backward, linear_backward, 
-    relu_backward, maxpool3d_backward, 
+    bce_with_logits_loss, bce_with_logits_backward, 
+    linear_backward, relu_backward, maxpool3d_backward,
     conv3d_backward, flatten3d_backward
 )
 
@@ -13,7 +14,47 @@ Array = np.ndarray
 Params = Dict[str, Array]
 Grads  = Dict[str, Array]
 
-# Initialise params
+# He initialisation for convolution layers (with RELU)
+def he_init_conv(rng: np.random.Generator, shape: Tuple[int, ...]):
+    # Shape = (C_out, C_in, k, k)
+    fan_in = shape[1] * shape[2] * shape[3]
+    # Standard deviation
+    std = np.sqrt(2.0 / fan_in)
+    # Gaussian init
+    return rng.normal(0.0, std, size = shape).astype(np.float64)
+
+# Xavier initialisation for linear head
+def xavier_init_linear(rng: np.random.Generator, out_dim: int, in_dim: int):
+    # Standard deviation
+    std = np.sqrt(2.0 / (in_dim + out_dim))
+    # Gaussian init
+    return rng.normal(0.0, std, size = (out_dim, in_dim)).astype(np.float64)
+
+# Initialise parameters
+def init_params(
+    rng: np.random.Generator,
+    C_in: int, H: int, W: int,
+    k: int = 3, C1: int = 8, C2: int = 8,
+    stride: int = 1, padding: int = 1,
+    pool_size: int = 2, pool_stride: int = 2) -> Params:
+    # Block 1
+    Hc1, Wc1 = out_dim_hw(H, W, k, stride, padding)
+    Hp1, Wp1 = out_dim_hw(Hc1, Wc1, pool_size, pool_stride, 0)
+    # Block 2
+    Hc2, Wc2 = out_dim_hw(Hp1, Wp1, k, stride, padding)
+    Hp2, Wp2 = out_dim_hw(Hc2, Wc2, pool_size, pool_stride, 0)
+    in_dim = C2 * Hp2 * Wp2
+    # Learned params
+    return {
+        "conv1_w": he_init_conv(rng, (C1, C_in, k, k)),
+        "conv1_b": np.zeros((C1,), dtype=np.float64),
+        "conv2_w": he_init_conv(rng, (C2, C1, k, k)),
+        "conv2_b": np.zeros((C2,), dtype=np.float64),
+        "lin_w": xavier_init_linear(rng, 1, in_dim),
+        "lin_b": np.zeros((1,), dtype=np.float64),
+    }
+
+# Per-batch grad accumulator with zero arrays matching param shapes
 def zero_like_params(params: Params) -> Grads:
     return {
         "conv1_w": np.zeros_like(params["conv1_w"]),
@@ -36,8 +77,8 @@ def sgd_update(params: Params, grads: Grads, lr: float, weight_decay: float = 0.
     params["conv1_b"] -= lr * grads["conv1_b"]
     params["conv2_w"] -= lr * grads["conv2_w"]
     params["conv2_b"] -= lr * grads["conv2_b"]
-    params["lin_w"]   -= lr * grads["lin_w"]
-    params["lin_b"]   -= lr * grads["lin_b"]
+    params["lin_w"] -= lr * grads["lin_w"]
+    params["lin_b"] -= lr * grads["lin_b"]
 
 # Backward (with cache)
 def backward_from_cache(cache: dict, y: np.ndarray):
@@ -55,8 +96,8 @@ def backward_from_cache(cache: dict, y: np.ndarray):
     v, z, p = cache["v"], cache["z"], cache["p"]
     C2, Hp2, Wp2 = cache["C2Hp2Wp2"] 
     # Head
-    dLdz = bce_sigmoid_backward(p, y)
-    dv, dW_lin, dB_lin = linear_backward(v, lin_w, lin_b, dLdz)
+    dLdz = bce_with_logits_backward(cache["z"], y)
+    dv, dW_lin, dB_lin = linear_backward(cache["v"], lin_w, lin_b, dLdz)
     # Unflatten
     dP2 = flatten3d_backward(dv, C2, Hp2, Wp2)
     # Block 2
@@ -75,7 +116,7 @@ def backward_from_cache(cache: dict, y: np.ndarray):
     }
     return grads
 
-# Mini batch generation
+# Mini batch data loader
 def batch_iter(X: Array, y: Array, batch_size: int, shuffle: bool = True):
     N = X.shape[0]
     idx = np.arange(N)
@@ -85,7 +126,7 @@ def batch_iter(X: Array, y: Array, batch_size: int, shuffle: bool = True):
         b = idx[s:s+batch_size]
         yield X[b], y[b]
 
-# Train step
+# Train one epoch
 def train_one_epoch(
     params: Params,
     X: Array, y: Array,
@@ -94,7 +135,7 @@ def train_one_epoch(
     lr: float, batch_size: int = 8, weight_decay: float = 0.0) -> Tuple[float, float]:
     # Initialise
     N = X.shape[0]
-    running_loss = 0.0
+    total_loss = 0.0
     running_correct = 0
     # SGD on mini batch
     for xb, yb in batch_iter(X, y, batch_size, shuffle=True):
@@ -110,13 +151,13 @@ def train_one_epoch(
                 x_n,
                 params["conv1_w"], params["conv1_b"],
                 params["conv2_w"], params["conv2_b"],
-                params["lin_w"],   params["lin_b"],
+                params["lin_w"], params["lin_b"],
                 padding, stride, pool_size, pool_stride, True)
             # Loss
-            L = bce_loss(p, y_n)
+            L = bce_with_logits_loss(cache["z"], y_n)
             # Increment loss for batch
             batch_loss += L
-            # accuracy stat
+            # Accuracy stat
             pred = 1.0 if p[0] >= 0.5 else 0.0
             running_correct += int(pred == y_n[0])
             # Backpropagation
@@ -130,15 +171,14 @@ def train_one_epoch(
         # Update step
         sgd_update(params, acc_grads, lr=lr, weight_decay=weight_decay)
         # Accumulate loss
-        running_loss += batch_loss / xb.shape[0]
+        total_loss += batch_loss
     # Statistics
-    avg_loss = running_loss / max(1, int(np.ceil(N / batch_size)))
+    avg_loss = total_loss / N
     avg_acc  = running_correct / N
     return float(avg_loss), float(avg_acc)
 
 # Fit loop
-def fit(
-    params: Params,
+def fit(params: Params,
     X: Array, y: Array,
     padding: int, stride: int, pool_size: int, pool_stride: int,
     lr: float, weight_decay: float,

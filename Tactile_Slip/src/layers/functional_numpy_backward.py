@@ -8,16 +8,37 @@ def bce_loss(p: np.ndarray, y: np.ndarray):
     p = np.clip(p, eps, 1 - eps)
     return -(y*np.log(p) + (1-y)*np.log(1-p))
 
-# Derivative of BCE loss L w.r.t. input to sigmoid z (dL/dz)
+# BCE loss (L) from logits input to sigmoid z
+def bce_with_logits_loss(z: np.ndarray, y: np.ndarray):
+    a = np.maximum(z, 0.0)
+    return float(a - z*y + np.log1p(np.exp(-np.abs(z))))
+
+# Derivative of BCE loss L w.r.t. logits input to sigmoid z (dL/dz) from BCE loss
 def bce_sigmoid_backward(p: np.ndarray, y: np.ndarray):
     return (p - y)
 
+# Derivative of BCE loss L w.r.t. logits input to sigmoid z (dL/dz) from logits
+def bce_with_logits_backward(z: np.ndarray, y: np.ndarray):
+    # dL/dz = sigmoid(z) - y
+    p = 1.0 / (1.0 + np.exp(-z))
+    return (p - y)
+
 # Derivatives from linear function (z = W @ x + b)
-def linear_backward(x: np.ndarray, W: np.ndarray, dLdz: np.ndarray):
-    dLdb = dLdz
-    dLdW = dLdz[:, None] * x[None, :]
-    dLdx = W.T @ dLdz
-    return dLdx, dLdW, dLdb
+def linear_backward(x: np.ndarray, W: np.ndarray, b: np.ndarray, dLdz: np.ndarray):
+    # Single example
+    if x.ndim == 1:
+        dLdb = dLdz
+        dLdW = dLdz[:, None] * x[None, :]
+        dLdx = W.T @ dLdz
+        return dLdx, dLdW, dLdb
+    else:
+        # dLdb = sum_b dLdz[b]
+        dLdb = dLdz.sum(axis=0)
+        # dLdW = sum_b dLdz[b]^T x[b] == dLdz^T @ x
+        dLdW = dLdz.T @ x
+        # dLdx = dLdz @ W
+        dLdx = dLdz @ W
+        return dLdx, dLdW, dLdb
 
 # Derivative of ReLU
 def relu_backward(x: np.ndarray, dLdx: np.ndarray):
