@@ -4,13 +4,13 @@ import numpy as np
 DOF = 3
 
 # Calculate the Jacobian matrix
-def jacobian(link_lengths, link_angles):
+def jacobian(link_lengths: np.ndarray, joint_angles: np.ndarray, joint_offsets: np.ndarray):
     # Initialise the matrix with zeros
-    J = np.zeros((DOF,DOF))
+    J = np.zeros((DOF,DOF), dtype=float)
 
     # Constants
     l1, l2, l3 = link_lengths
-    t1, t2, t3 = link_angles
+    t1, t2, t3 = joint_angles
     s1 = np.sin(t1)
     s12 = np.sin(t1+t2)
     s123 = np.sin(t1+t2+t3)

@@ -1,4 +1,4 @@
-# inverse.py
+# kinematics/inverse.py
 import numpy as np
 from .forward import FK_end_effector_pose
 from .jacobian import jacobian
