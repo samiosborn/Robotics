@@ -1,6 +1,7 @@
 # dynamics/spatial_transforms.py
 import numpy as np
 import config
+from .spatial_inertia import PlanarLinkInertia
 
 # Convert 3-vector into skew-symmetric matrix (3x3) - so that skew3(a) @ b = a x b
 def skew3(v):
@@ -137,14 +138,43 @@ def world_poses_from_X(X_up: list[np.ndarray], parent: np.ndarray, base_position
         T_world[i] = (T_base @ T) if parent[i] == -1 else (T_world[parent[i]] @ T)
     return T_world
 
-# Return 3D pose transformations for each link from joint angles
+# Return world pose transformations for each link from joint angles
 def world_poses_from_q(q: np.ndarray, joint_offsets: np.ndarray, 
                        link_lengths:  np.ndarray, base_position: np.ndarray):
     # Assertions
     if joint_offsets is None: joint_offsets = config.JOINT_OFFSETS
-    if link_lengths  is None: link_lengths  = config.LINK_LENGTHS
+    if link_lengths is None: link_lengths = config.LINK_LENGTHS
     if base_position is None: base_position = config.BASE_POSITION
     # Build spatial transform
     X_up, _, parent = build_chain_transforms(q, joint_offsets, link_lengths)
     # Return world poses from spatial transform
     return world_poses_from_X(X_up, parent, base_position)
+
+# World positions and COMs
+def world_positions_coms(q: np.ndarray, joint_offsets: np.ndarray, 
+                         link_lengths: np.ndarray, base_position: np.ndarray, links: list[PlanarLinkInertia]):
+    # Assertions
+    if joint_offsets is None: joint_offsets = config.JOINT_OFFSETS
+    if link_lengths is None: link_lengths = config.LINK_LENGTHS
+    if base_position is None: base_position = config.BASE_POSITION
+    # World poses
+    T_list = world_poses_from_q(q, joint_offsets, link_lengths, base_position)
+    # Number of links/joints
+    n = len(T_list)
+    assert len(links) == n, "links list length must match number of joints"
+    # World positions of joint axes (link origin)
+    r_joint = np.zeros((n, 3), dtype=float)
+    # World position of link COMs
+    r_com = np.zeros((n, 3), dtype=float)
+    # Loop over each joint
+    for i, T in enumerate(T_list): 
+        # Rotation
+        R = T[:3, :3]
+        # Position
+        p = T[:3, 3]
+        r_joint[i] = p
+        # COM in local frame
+        com_local = np.array([links[i].com_xy[0], links[i].com_xy[1], 0.0], dtype=float)
+        # COM in world
+        r_com[i] = p + R @ com_local
+    return r_joint, r_com
