@@ -137,8 +137,9 @@ def train_one_epoch(
     N = X.shape[0]
     total_loss = 0.0
     running_correct = 0
+    running_loss = 0.0
     # SGD on mini batch
-    for xb, yb in batch_iter(X, y, batch_size, shuffle=True):
+    for batch_idx, (xb, yb) in enumerate(batch_iter(X, y, batch_size, shuffle=True), start=1):
         # Accumulate grads across the batch
         acc_grads = zero_like_params(params)
         batch_loss = 0.0
@@ -172,6 +173,10 @@ def train_one_epoch(
         sgd_update(params, acc_grads, lr=lr, weight_decay=weight_decay)
         # Accumulate loss
         total_loss += batch_loss
+        # Track avg-per-batch for display
+        running_loss += (batch_loss / xb.shape[0])
+        if batch_idx % 20 == 0:
+            print(f"batch {batch_idx}: running_loss ~ {running_loss / batch_idx:.4f}")
     # Statistics
     avg_loss = total_loss / N
     avg_acc  = running_correct / N

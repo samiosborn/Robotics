@@ -2,7 +2,7 @@
 import numpy as np
 from src.layers.functional_numpy import pad2d, pad3d
 
-# Binary cross entropy (BCE) loss function (L)
+# Binary cross entropy (BCE) loss function (L) given probability p
 def bce_loss(p: np.ndarray, y: np.ndarray):
     eps = 1e-12
     p = np.clip(p, eps, 1 - eps)
@@ -10,8 +10,10 @@ def bce_loss(p: np.ndarray, y: np.ndarray):
 
 # BCE loss (L) from logits input to sigmoid z
 def bce_with_logits_loss(z: np.ndarray, y: np.ndarray):
+    # softplus(z) = log(1 + exp(-|z|)) + max(z, 0)
     a = np.maximum(z, 0.0)
-    return float(a - z*y + np.log1p(np.exp(-np.abs(z))))
+    sp = np.log1p(np.exp(-np.abs(z))) + a
+    return float((sp - y * z))
 
 # Derivative of BCE loss L w.r.t. logits input to sigmoid z (dL/dz) from BCE loss
 def bce_sigmoid_backward(p: np.ndarray, y: np.ndarray):
@@ -20,7 +22,8 @@ def bce_sigmoid_backward(p: np.ndarray, y: np.ndarray):
 # Derivative of BCE loss L w.r.t. logits input to sigmoid z (dL/dz) from logits
 def bce_with_logits_backward(z: np.ndarray, y: np.ndarray):
     # dL/dz = sigmoid(z) - y
-    p = 1.0 / (1.0 + np.exp(-z))
+    # Stable sigmoid via tanh: sigma(z) = 0.5 * (1 + tanh(z/2))
+    p = 0.5 * (1.0 + np.tanh(0.5 * z))
     return (p - y)
 
 # Derivatives from linear function (z = W @ x + b)
