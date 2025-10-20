@@ -165,24 +165,45 @@ def create_label_for_sequence(seq: Array, out_hw: Tuple[int, int], scale: float,
     return X, y
 
 # Build dataset across a split
-def build_dataset(base_dir: str, split: str = "train", out_hw: Tuple[int, int] = (96, 96),
-                  scale: float = 10.0, step: int = 1, channels: str = "pcd"):
+def build_dataset(base_dir: str,
+                  split: str = "train",
+                  out_hw: Tuple[int, int] = (96, 96),
+                  scale: float = 10.0,
+                  step: int = 1,
+                  channels: str = "pcd",
+                  return_groups: bool = False):
     # Load sequences
     seqs = load_split(base_dir, split)
-    Xs, ys = [], []
-    for seq in seqs:
+     # gids are Group IDs: per-example group index (sequence id) if want to use sequence-level splits later
+    Xs, ys, gids = [], [], [] 
+    for si, seq in enumerate(seqs):
         try:
             Xi, yi = create_label_for_sequence(seq, out_hw, scale, step, channels)
             if Xi.shape[0] > 0:
-                Xs.append(Xi); ys.append(yi)
+                Xs.append(Xi)
+                ys.append(yi)
+                if return_groups:
+                    gids.append(np.full((Xi.shape[0],), si, dtype=np.int64))
         except Exception:
             # Skip sequences that fail preprocessing
             pass
+
+    C = 3 if channels == "pcd" else 2
+    H, W = out_hw
+
     if not Xs:
-        # Return empty arrays with the right shapes
-        C = 3 if channels == "pcd" else 2
-        return np.zeros((0, C, out_hw[0], out_hw[1])), np.zeros((0,), dtype=np.float64)
-    # Concatenate
+        # Return empty arrays
+        X = np.zeros((0, C, H, W), dtype=np.float64)
+        y = np.zeros((0,), dtype=np.float64)
+        if return_groups:
+            g = np.zeros((0,), dtype=np.int64)
+            return X, y, g
+        return X, y
+
     X = np.concatenate(Xs, axis=0)
     y = np.concatenate(ys, axis=0)
+    if return_groups:
+        # Safe even if some sequences were skipped
+        g = np.concatenate(gids, axis=0) if len(gids) > 0 else np.zeros((X.shape[0],), dtype=np.int64)
+        return X, y, g
     return X, y
