@@ -1,4 +1,4 @@
-# plot2d_interactive.py
+# src/visualisation/plot2d_interactive.py
 import matplotlib.pyplot as plt
 
 # Function to plot robot in 2D

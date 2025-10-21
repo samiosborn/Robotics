@@ -1,4 +1,4 @@
-# dh.py
+# src/kinematics/dh.py
 import numpy as np
 
 # 2D

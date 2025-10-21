@@ -1,7 +1,7 @@
-# kinematics/inverse.py
+# src/kinematics/inverse.py
 import numpy as np
-from .forward import FK_end_effector_pose
-from .jacobian import jacobian
+from src.kinematics.forward import FK_end_effector_pose
+from src.kinematics.jacobian import jacobian
 
 # Dimensions
 dim = 2

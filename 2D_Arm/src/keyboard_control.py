@@ -1,11 +1,11 @@
-# keyboard_control.py
-import config
-from kinematics.forward import forward_kinematics
-from visualisation.plot2d_interactive import plot_2d
+# src/keyboard_control.py
 import matplotlib.pyplot as plt
 import numpy as np
 import pygame
 import time
+import config
+from src.kinematics.forward import forward_kinematics
+from src.visualisation.plot2d_interactive import plot_2d
 
 # Track joint angles
 current_joint_angles = np.array(config.JOINT_OFFSETS, dtype=float)

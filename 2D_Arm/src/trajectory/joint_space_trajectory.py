@@ -1,6 +1,6 @@
-# joint_space_trajectory.py
+# src/trajectory/joint_space_trajectory.py
 import numpy as np
-from kinematics.inverse import inverse_via_DLS
+from src.kinematics.inverse import inverse_via_DLS
 
 # Linear Joint-space Trajectory
 def linear_joint_space_trajectory(start_pose, end_pose, total_time, dt, joint_offsets, link_lengths, base_position):

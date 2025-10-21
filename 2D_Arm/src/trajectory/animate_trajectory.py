@@ -1,9 +1,9 @@
-# animate_trajectory.py
-from kinematics.forward import forward_kinematics
-from visualisation.plot2d_interactive import plot_2d
+# src/trajectory/animate_trajectory.py
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+from src.kinematics.forward import forward_kinematics
+from src.visualisation.plot2d_interactive import plot_2d
 
 # Animate trajectory (defined in joint angles)
 def animate_angles_trajectory(trajectory_joint_angles, animation_time, joint_offsets, link_lengths, base_position):

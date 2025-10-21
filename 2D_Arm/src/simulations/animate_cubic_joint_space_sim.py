@@ -1,12 +1,8 @@
-# simulations/animate_cubic_joint_space_sim.py
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# src/simulations/animate_cubic_joint_space_sim.py
 import numpy as np
 import config
-from trajectory.joint_space_trajectory import cubic_joint_space_trajectory
-from trajectory.animate_trajectory import animate_angles_trajectory
+from src.trajectory.joint_space_trajectory import cubic_joint_space_trajectory
+from src.trajectory.animate_trajectory import animate_angles_trajectory
 
 # Animate cubic joint-space trajectory
 def animate_cubic_joint_space():

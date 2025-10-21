@@ -1,7 +1,7 @@
-# dynamics/spatial_transforms.py
+# src/dynamics/spatial_transforms.py
 import numpy as np
 import config
-from .spatial_inertia import PlanarLinkInertia
+from src.dynamics.spatial_inertia import PlanarLinkInertia
 
 # Convert 3-vector into skew-symmetric matrix (3x3) - so that skew3(a) @ b = a x b
 def skew3(v):

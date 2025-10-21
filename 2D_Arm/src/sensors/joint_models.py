@@ -1,6 +1,6 @@
-# sensors/joint_models.py
+# src/sensors/joint_models.py
 import numpy as np
-from estimation.kf_matrix import bias_density_to_qb, gyro_density_to_var
+from src.estimation.kf_matrix import bias_density_to_qb, gyro_density_to_var
 
 # Simulate Noisy Encoder (single step)
 def simulate_encoder(theta_true, p_dropout, n_ticks, sigma_enc, rng):

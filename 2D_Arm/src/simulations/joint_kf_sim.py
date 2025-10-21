@@ -1,18 +1,13 @@
-# simulations/joint_kf_sim.py
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# src/simulations/joint_kf_sim.py
 import numpy as np
 import matplotlib.pyplot as plt
-
 import config
-from estimation.kf_algo import kf_predict,kf_update
-from estimation.kf_matrix import (
+from src.estimation.kf_algo import kf_predict,kf_update
+from src.estimation.kf_matrix import (
     state_transition_cv, measurement_model_encoder, measurement_model_gyro, 
     init_prior, bias_density_to_qb, gyro_density_to_var
 )
-from sensors.joint_models import simulate_encoder, simulate_gyro
+from src.sensors.joint_models import simulate_encoder, simulate_gyro
 
 # MODEL FLAG
 include_bias = True

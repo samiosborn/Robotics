@@ -1,13 +1,9 @@
-# simulations/single_ik_dls_sim.py
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# src/simulations/single_ik_dls_sim.py
 import numpy as np
 import config
-from kinematics.inverse import inverse_via_DLS
-from kinematics.forward import FK_end_effector_pose
-from visualisation.plot2d import plot_2d
+from src.kinematics.inverse import inverse_via_DLS
+from src.kinematics.forward import FK_end_effector_pose
+from src.visualisation.plot2d import plot_2d
 
 # Inverse kinematics example from goal pose with DLS
 def single_IK_DLS():

@@ -1,4 +1,4 @@
-# jacobian.py
+# src/kinematics/jacobian.py
 import numpy as np
 
 DOF = 3

@@ -1,6 +1,6 @@
-# kinematics/forward.py
+# src/kinematics/forward.py
 import numpy as np
-from .dh import dh_transform
+from src.kinematics.dh import dh_transform
 
 # Dimensions
 dim = 2

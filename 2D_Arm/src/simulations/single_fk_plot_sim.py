@@ -1,8 +1,8 @@
-# simulations/single_fk_plot_sim.py
+# src/simulations/single_fk_plot_sim.py
 import numpy as np
 import config
-from kinematics.forward import forward_kinematics
-from visualisation.plot2d import plot_2d
+from src.kinematics.forward import forward_kinematics
+from src.visualisation.plot2d import plot_2d
 
 # Plot a single FK action on a graph
 def single_FK_plot():

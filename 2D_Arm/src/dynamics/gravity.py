@@ -1,6 +1,6 @@
-# dynamics/gravity.py
+# src/dynamics/gravity.py
 import numpy as np
 import config
-from .spatial_transforms import world_positions_coms
-from .spatial_inertia import PlanarLinkInertia
+from src.dynamics.spatial_transforms import world_positions_coms
+from src.dynamics.spatial_inertia import PlanarLinkInertia
 

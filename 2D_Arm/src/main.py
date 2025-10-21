@@ -1,12 +1,12 @@
-# main.py 
-import config
-from kinematics.inverse import inverse_via_SVD, inverse_via_DLS
-from kinematics.forward import forward_kinematics, FK_end_effector_pose
-from visualisation.plot2d import plot_2d
-from trajectory.task_space_trajectory import linear_task_space_trajectory
-from trajectory.animate_trajectory import animate_angles_trajectory
-from trajectory.joint_space_trajectory import linear_joint_space_trajectory, cubic_joint_space_trajectory, quintic_joint_space_trajectory
+# src/main.py 
 import numpy as np
+import config
+from src.kinematics.inverse import inverse_via_SVD, inverse_via_DLS
+from src.kinematics.forward import forward_kinematics, FK_end_effector_pose
+from src.visualisation.plot2d import plot_2d
+from src.trajectory.task_space_trajectory import linear_task_space_trajectory
+from src.trajectory.animate_trajectory import animate_angles_trajectory
+from src.trajectory.joint_space_trajectory import linear_joint_space_trajectory, cubic_joint_space_trajectory, quintic_joint_space_trajectory
 
 # Plot a single FK action on a graph
 def single_FK_plot():

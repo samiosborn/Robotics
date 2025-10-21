@@ -1,12 +1,8 @@
-# simulations/animate_linear_joint_space_sim.py
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+# src/simulations/animate_linear_joint_space_sim.py
 import numpy as np
 import config
-from trajectory.joint_space_trajectory import linear_joint_space_trajectory
-from trajectory.animate_trajectory import animate_angles_trajectory
+from src.trajectory.joint_space_trajectory import linear_joint_space_trajectory
+from src.trajectory.animate_trajectory import animate_angles_trajectory
 
 # Animate linear joint-space trajectory
 def animate_linear_joint_space():
