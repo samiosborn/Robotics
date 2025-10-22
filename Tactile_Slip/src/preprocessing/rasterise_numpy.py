@@ -3,6 +3,7 @@ import os, glob
 import numpy as np
 from typing import Tuple, List, Optional
 from scipy.io import loadmat
+from scipy.ndimage import median_filter
 
 Array = np.ndarray
 
@@ -26,7 +27,7 @@ def load_mat_table(path: str):
 # Load split of data
 def load_split(base_dir: str, split: str = "train"):
     # Sort paths in data split (e.g. train folder)
-    paths = sorted(glob.glob(os.path.join(base_dir, split, "**", "*.mat"), recursive = True))
+    paths = sorted(glob.glob(os.path.join(base_dir, split, "**", "*.mat"), recursive=True))
     # For all paths, load .mat file and return together
     return [load_mat_table(p) for p in paths]
 
@@ -40,10 +41,10 @@ def normalise_coordinate_sequence(seq: Array):
     xs = seq[:, 0::2]
     ys = seq[:, 1::2]
     # Center
-    xs = xs - xs.mean(axis = 0, keepdims = True)
-    ys = ys - ys.mean(axis = 0, keepdims = True)
+    xs = xs - xs.mean(axis=0, keepdims=True)
+    ys = ys - ys.mean(axis=0, keepdims=True)
     # Normalise
-    std = np.std(np.concatenate([xs, ys], axis = 1))
+    std = np.std(np.concatenate([xs, ys], axis=1))
     std = std if std > 1e-8 else 1.0
     xs /= std
     ys /= std
@@ -63,7 +64,7 @@ def bilinear_splat(points_xy: Array, out_hw: Tuple[int, int], scale: float, cent
     u = points_xy[:, 0] * scale + cx
     v = points_xy[:, 1] * scale + cy
     # Pre allocate image
-    img = np.zeros((H, W), dtype = np.float64)
+    img = np.zeros((H, W), dtype=np.float64)
     # Convert to int (pixel positions)
     i0 = np.floor(u).astype(int)
     j0 = np.floor(v).astype(int)
@@ -75,48 +76,39 @@ def bilinear_splat(points_xy: Array, out_hw: Tuple[int, int], scale: float, cent
         # Index
         i, j = i0[k], j0[k]
         # If outside
-        if j < 0 or j >= H or i < 0 or i >= W: 
+        if j < 0 or j >= H or i < 0 or i >= W:
             continue
         # Alias
         a, b = alpha[k], beta[k]
         # Add (check boundary first)
-        img[j, i] += (1-a)*(1-b)
-        if i+1 < W: img[j, i+1] += a*(1-b)
-        if j+1 < H: img[j+1, i] += (1-a)*b
-        if (i+1) < W and (j+1) < H: img[j+1, i+1] += a*b
-
+        img[j, i] += (1 - a) * (1 - b)
+        if i + 1 < W: img[j, i + 1] += a * (1 - b)
+        if j + 1 < H: img[j + 1, i] += (1 - a) * b
+        if (i + 1) < W and (j + 1) < H: img[j + 1, i + 1] += a * b
     return img
 
+# Compute per-frame mean pin speeds (for global threshold estimation)
+def compute_pin_speeds(seq_norm: Array) -> np.ndarray:
+    dx = np.diff(seq_norm[:, 0::2], axis=0)
+    dy = np.diff(seq_norm[:, 1::2], axis=0)
+    v = np.sqrt(dx * dx + dy * dy).mean(axis=1)
+    return v
+
 # Label data for supervised training examples
-def create_label_for_sequence(seq: Array, out_hw: Tuple[int, int], scale: float, 
-                                step: int, channels: str = "pcd", 
-                                slip_thresh: Optional[float] = None):
-    # Normalise coordinates in sequence (xy)
+def create_label_for_sequence(seq: Array,
+                              out_hw: Tuple[int, int],
+                              scale: float,
+                              step: int,
+                              slip_thresh: float,
+                              channels: str = "pcd"):
+    # Normalise coordinates in sequence (x, y)
     seq_norm, M = normalise_coordinate_sequence(seq)
     # Dimensions
     T = seq_norm.shape[0]
     H, W = out_hw
     # Center point
-    center = (W/2.0, H/2.0)
-    
-    # Estimage slip threshold
-    if slip_thresh is None and T>1:
-        # Mean pin speed
-        v = []
-        # Loop over points
-        for t in range(1, T):
-            # Change in directions
-            dx = seq_norm[t, 0::2] - seq_norm[t-1, 0::2]
-            dy = seq_norm[t, 1::2] - seq_norm[t-1, 1::2]
-            # Distance moved (L2 norm)
-            v.append(np.mean(np.sqrt(dx*dx + dy*dy)))
-        # Median
-        med = np.median(v)
-        # Median absolute deviation
-        mad = np.median(np.abs(v - med))
-        # Define robust slip threshold
-        slip_thresh = med + 3.0*mad
-    
+    center = (W / 2.0, H / 2.0)
+
     # Initialise
     X_list, y_list = [], []
     # Loop over list
@@ -124,7 +116,7 @@ def create_label_for_sequence(seq: Array, out_hw: Tuple[int, int], scale: float,
         # Current sequence
         curr_xy = np.stack([seq_norm[t, 0::2], seq_norm[t, 1::2]], axis=1)
         # Previous sequence (shifted 1 back)
-        prev_xy = np.stack([seq_norm[t-1, 0::2], seq_norm[t-1, 1::2]], axis=1)
+        prev_xy = np.stack([seq_norm[t - 1, 0::2], seq_norm[t - 1, 1::2]], axis=1)
         # Current image
         im_curr = bilinear_splat(curr_xy, out_hw, scale, center)
         # Previous image
@@ -135,21 +127,18 @@ def create_label_for_sequence(seq: Array, out_hw: Tuple[int, int], scale: float,
             # Size (3, H, W)
             Xc = np.stack([im_prev, im_curr, diff], axis=0)
         # Else: Channel - "pc"=prev,curr
-        else: 
+        else:
             Xc = np.stack([im_prev, im_curr], axis=0)
-        
+
         # Pin displacement
         dx = curr_xy[:, 0] - prev_xy[:, 0]
         dy = curr_xy[:, 1] - prev_xy[:, 1]
         # L2 norm average
-        vmean = float(np.mean(np.sqrt(dx*dx + dy*dy)))
+        vmean = float(np.mean(np.sqrt(dx * dx + dy * dy)))
         # Label from mean pin displacement
-        if slip_thresh is not None and vmean >= slip_thresh:
-            y = 1.0
-        else: 
-            y = 0.0
-        # Append
-        X_list.append(Xc); y_list.append(y)
+        y = 1.0 if vmean >= slip_thresh else 0.0
+        X_list.append(Xc)
+        y_list.append(y)
 
     # Create X and y
     if not X_list:
@@ -157,11 +146,13 @@ def create_label_for_sequence(seq: Array, out_hw: Tuple[int, int], scale: float,
     X = np.stack(X_list, axis=0).astype(np.float64)
     y = np.array(y_list, dtype=np.float64)
 
+    # Apply short temporal median filter to smooth noisy single-frame spikes
+    y = median_filter(y, size=5)
+
     # Dataset-level normalisation
     m = X.mean()
     s = X.std() + 1e-8
     X = (X - m) / s
-
     return X, y
 
 # Build dataset across a split
@@ -174,19 +165,49 @@ def build_dataset(base_dir: str,
                   return_groups: bool = False):
     # Load sequences
     seqs = load_split(base_dir, split)
-     # gids are Group IDs: per-example group index (sequence id) if want to use sequence-level splits later
-    Xs, ys, gids = [], [], [] 
+
+    # Collect all speeds from sequences to derive a global threshold (median + 3*mad)
+    all_speeds = []
+    for seq in seqs:
+        try:
+            seq_norm, _ = normalise_coordinate_sequence(seq)
+            v = compute_pin_speeds(seq_norm)
+            if v.size > 0:
+                all_speeds.append(v)
+        except Exception:
+            pass
+    if all_speeds:
+        all_speeds_concat = np.concatenate(all_speeds)
+        med_global = np.median(all_speeds_concat)
+        mad_global = np.median(np.abs(all_speeds_concat - med_global))
+        slip_thresh_global = med_global + 3.0 * mad_global
+        print(f"[INFO] Global slip threshold (computed over {len(seqs)} sequences): {slip_thresh_global:.5f}")
+    else:
+        # If there are no usable sequences, return empty arrays as before
+        C = 3 if channels == "pcd" else 2
+        H, W = out_hw
+        X = np.zeros((0, C, H, W), dtype=np.float64)
+        y = np.zeros((0,), dtype=np.float64)
+        if return_groups:
+            g = np.zeros((0,), dtype=np.int64)
+            print("[WARN] No sequences found while computing global threshold.")
+            return X, y, g
+        print("[WARN] No sequences found while computing global threshold.")
+        return X, y
+
+    # gids are Group IDs: per-example group index (sequence id) if want to use sequence-level splits later
+    Xs, ys, gids = [], [], []
     for si, seq in enumerate(seqs):
         try:
-            Xi, yi = create_label_for_sequence(seq, out_hw, scale, step, channels)
+            Xi, yi = create_label_for_sequence(seq, tuple(out_hw), scale, step, slip_thresh_global, channels)
             if Xi.shape[0] > 0:
                 Xs.append(Xi)
                 ys.append(yi)
                 if return_groups:
                     gids.append(np.full((Xi.shape[0],), si, dtype=np.int64))
-        except Exception:
-            # Skip sequences that fail preprocessing
-            pass
+        except Exception as e:
+            print(f"[WARN] Skipping sequence {si}: {e}")
+            continue
 
     C = 3 if channels == "pcd" else 2
     H, W = out_hw

@@ -1,6 +1,9 @@
 # src/models/train_cnn_numpy.py
 import numpy as np
 from typing import Dict, Tuple
+import argparse
+import json
+from src.utils.experiment_numpy import load_config
 from src.layers.functional_numpy import out_dim_hw
 from src.models.cnn_numpy import forward_numpy
 from src.layers.functional_numpy_backward import (
@@ -132,7 +135,8 @@ def train_one_epoch(
     X: Array, y: Array,
     padding: int, stride: int,
     pool_size: int, pool_stride: int,
-    lr: float, batch_size: int = 8, weight_decay: float = 0.0) -> Tuple[float, float]:
+    lr: float, batch_size: int = 8, weight_decay: float = 0.0, 
+    pos_weight: float = 1.0) -> Tuple[float, float]:
     # Initialise
     N = X.shape[0]
     total_loss = 0.0
@@ -155,7 +159,7 @@ def train_one_epoch(
                 params["lin_w"], params["lin_b"],
                 padding, stride, pool_size, pool_stride, True)
             # Loss
-            L = bce_with_logits_loss(cache["z"], y_n)
+            L = bce_with_logits_loss(cache["z"], y_n, pos_weight=pos_weight)
             # Increment loss for batch
             batch_loss += L
             # Accuracy stat
@@ -176,7 +180,7 @@ def train_one_epoch(
         # Track avg-per-batch for display
         running_loss += (batch_loss / xb.shape[0])
         if batch_idx % 20 == 0:
-            print(f"batch {batch_idx}: running_loss ~ {running_loss / batch_idx:.4f}")
+            print(f"batch {batch_idx}: running loss ~ {running_loss / batch_idx:.4f}")
     # Statistics
     avg_loss = total_loss / N
     avg_acc  = running_correct / N
@@ -187,13 +191,13 @@ def fit(params: Params,
     X: Array, y: Array,
     padding: int, stride: int, pool_size: int, pool_stride: int,
     lr: float, weight_decay: float,
-    batch_size: int, epochs: int, verbose: bool = False) -> Params:
+    batch_size: int, epochs: int, 
+    pos_weight: float = 1.0, verbose: bool = False) -> Params:
     # Run for several epochs
     for epoch in range(1, epochs+1):
         loss, acc = train_one_epoch(
             params, X, y, padding, stride, pool_size, pool_stride,
-            lr=lr, batch_size=batch_size, weight_decay=weight_decay
-        )
+            lr=lr, batch_size=batch_size, weight_decay=weight_decay, pos_weight=pos_weight)
         if verbose:
             print(f"Epoch number {epoch:02d}, loss: {loss:.4f}, accuracy: {acc:.3f}")
     return params

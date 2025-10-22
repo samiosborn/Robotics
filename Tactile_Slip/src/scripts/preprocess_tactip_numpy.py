@@ -3,7 +3,7 @@ import argparse
 import json
 import numpy as np
 from pathlib import Path
-from src.preprocessing.rasterise_numpy import load_mat_table, create_label_for_sequence
+from src.preprocessing.rasterise_numpy import load_mat_table, create_label_for_sequence, normalise_coordinate_sequence, compute_pin_speeds
 from src.utils.experiment_numpy import load_config, resolve_data_dir, list_mat_paths
 
 # Save NPZ files
@@ -16,8 +16,29 @@ def save_npz(path: Path, X, y, g=None):
     pos = float(y.mean()) if y.size else 0.0
     print(f"saved -> {path}  (X={X.shape}, pos={pos:.3f})")
 
-# Build dataset from paths
-def build_from_paths(paths, out_hw, scale, step, channels):
+# Compute a global slip threshold over a list of .mat paths
+def compute_global_threshold(paths):
+    all_v = []
+    for p in paths:
+        try:
+            seq = load_mat_table(p)
+            seqn, _ = normalise_coordinate_sequence(seq)
+            v = compute_pin_speeds(seqn)
+            all_v.append(v)
+        except Exception:
+            pass
+    if not all_v:
+        print("[WARN] no valid sequences found for threshold computation")
+        return None
+    v_all = np.concatenate(all_v)
+    med = np.median(v_all)
+    mad = np.median(np.abs(v_all - med))
+    thr = med + 3.0 * mad
+    print(f"[INFO] global slip threshold = {thr:.6f}  (median={med:.6f}, mad={mad:.6f})")
+    return thr
+
+# Build dataset from paths using a fixed slip threshold
+def build_from_paths(paths, out_hw, scale, step, channels, slip_thresh):
     Xs, ys = [], []
     for p in paths:
         try:
@@ -27,7 +48,8 @@ def build_from_paths(paths, out_hw, scale, step, channels):
                 out_hw=tuple(out_hw),
                 scale=scale,
                 step=step,
-                channels=channels
+                channels=channels,
+                slip_thresh=slip_thresh
             )
             if Xi.shape[0] > 0:
                 Xs.append(Xi); ys.append(yi)
@@ -75,10 +97,13 @@ def main():
     )
     print(f"split -> train-sub sequences: {len(tr_paths)}, val sequences: {len(val_paths)}")
 
-    # Rasterise each split
-    Xtr, ytr = build_from_paths(tr_paths, cfg["out_hw"], cfg["scale"], cfg["step"], cfg["channels"])
-    Xva, yva = build_from_paths(val_paths, cfg["out_hw"], cfg["scale"], cfg["step"], cfg["channels"])
-    Xte, yte = build_from_paths(test_paths, cfg["out_hw"], cfg["scale"], cfg["step"], cfg["channels"])
+    # Compute one global slip threshold from the training subset
+    slip_thresh = compute_global_threshold(tr_paths)
+
+    # Rasterise each split using the same threshold
+    Xtr, ytr = build_from_paths(tr_paths, cfg["out_hw"], cfg["scale"], cfg["step"], cfg["channels"], slip_thresh)
+    Xva, yva = build_from_paths(val_paths, cfg["out_hw"], cfg["scale"], cfg["step"], cfg["channels"], slip_thresh)
+    Xte, yte = build_from_paths(test_paths, cfg["out_hw"], cfg["scale"], cfg["step"], cfg["channels"], slip_thresh)
     print(f"raw shapes -> train-sub: {Xtr.shape}, val: {Xva.shape}, test: {Xte.shape}")
 
     # Normalise VAL and TEST using TRAIN-SUB statistics

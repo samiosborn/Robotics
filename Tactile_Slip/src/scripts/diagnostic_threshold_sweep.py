@@ -1,11 +1,10 @@
-# src/scrips/diagnostic_threshold_sweep.py
-import numpy as np, json, argparse
-from pathlib import Path
+# src/scripts/diagnostic_threshold_sweep.py
+import numpy as np, argparse
 from src.models.metrics_numpy import binary_metrics_from_logits
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--z", type=str, required=True)   # npy of logits on test
-ap.add_argument("--y", type=str, required=True)   # npy of labels on test
+ap.add_argument("--z", type=str, required=True)
+ap.add_argument("--y", type=str, required=True)
 args = ap.parse_args()
 
 z = np.load(args.z); y = np.load(args.y)

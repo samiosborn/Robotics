@@ -21,20 +21,27 @@ def list_mat_paths(base_dir: str, split: str):
     return sorted(glob.glob(pat, recursive=True))
 
 # Split by unique group IDs so that all samples from the same sequence stay in the same split
-def sequence_level_split(X: np.ndarray, y: np.ndarray, g: np.ndarray, val_frac: float = 0.1, seed: int = 0):
-    
+def sequence_level_split(X, y, g, val_frac=0.1, seed=0):
+    # Split (X,y) into train-sub/val by groups 'g' so that no group appears in both
     rng = np.random.default_rng(seed)
-    groups = np.unique(g)
-    rng.shuffle(groups)
+    # g: 1D array of length N with group IDs (e.g., sequence index per example)
+    g = np.asarray(g).reshape(-1)
+    assert X.shape[0] == y.shape[0] == g.shape[0], "Mismatched lengths for X, y, g"
 
-    n_val = max(1, int(round(len(groups) * val_frac)))
-    val_groups = set(groups[:n_val])
-    tr_groups  = set(groups[n_val:])
+    # unique groups -> shuffle -> split
+    uniq = np.unique(g)
+    rng.shuffle(uniq)
+    n_val = int(round(len(uniq) * float(val_frac)))
+    g_val = set(uniq[:n_val])
+    g_tr  = set(uniq[n_val:])
 
-    tr_mask  = np.isin(g, list(tr_groups))
-    val_mask = np.isin(g, list(val_groups))
+    # boolean masks
+    m_val = np.array([gg in g_val for gg in g], dtype=bool)
+    m_tr  = ~m_val
 
-    return X[tr_mask], y[tr_mask], X[val_mask], y[val_mask]
+    Xtr, ytr = X[m_tr], y[m_tr]
+    Xval, yval = X[m_val], y[m_val]
+    return Xtr, ytr, Xval, yval
 
 # Logging banner
 def banner(msg: str):

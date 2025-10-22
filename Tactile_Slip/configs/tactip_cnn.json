@@ -22,9 +22,11 @@
 
   "lr": 0.05,
   "weight_decay": 0.0001,
-  "batch_size": 16,
+  "batch_size": 64,
   "epochs": 2,
 
   "val_frac": 0.10,
-  "seed": 0
+  "seed": 0,
+
+  "pos_weight": 20.0
 }

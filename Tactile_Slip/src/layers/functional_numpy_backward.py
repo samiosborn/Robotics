@@ -8,12 +8,14 @@ def bce_loss(p: np.ndarray, y: np.ndarray):
     p = np.clip(p, eps, 1 - eps)
     return -(y*np.log(p) + (1-y)*np.log(1-p))
 
-# BCE loss (L) from logits input to sigmoid z
-def bce_with_logits_loss(z: np.ndarray, y: np.ndarray):
-    # softplus(z) = log(1 + exp(-|z|)) + max(z, 0)
+# BCE loss (L) from logits input to sigmoid z (weighted)
+def bce_with_logits_loss(z: np.ndarray, y: np.ndarray, pos_weight: float = 1.0):
     a = np.maximum(z, 0.0)
     sp = np.log1p(np.exp(-np.abs(z))) + a
-    return float((sp - y * z))
+    # standard BCE: L = sp - y*z
+    # weighted BCE: L = (1-y)*sp + y*pos_weight*(sp - z)
+    loss = (1 - y) * sp + y * pos_weight * (sp - z)
+    return float(loss)
 
 # Derivative of BCE loss L w.r.t. logits input to sigmoid z (dL/dz) from BCE loss
 def bce_sigmoid_backward(p: np.ndarray, y: np.ndarray):
