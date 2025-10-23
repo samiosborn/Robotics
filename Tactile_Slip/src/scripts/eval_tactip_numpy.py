@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 from src.models.io_params import load_params
 from src.models.cnn_numpy import forward_numpy
-from src.models.train_cnn_numpy import batch_iter
+from src.utils.experiment_numpy import load_config, sequential_batch_iter
 from src.models.metrics_numpy import binary_metrics_from_logits, best_threshold
 from src.utils.experiment_numpy import load_config
 
@@ -20,7 +20,7 @@ def collect_logits(params, X, y, padding, stride, pool_size, pool_stride, batch_
     processed = 0
     total = X.shape[0]
 
-    for xb, yb in batch_iter(X, y, batch_size, shuffle=False):
+    for xb, yb in sequential_batch_iter(X, y, batch_size, shuffle=False):
         # Forward pass each item
         for n in range(xb.shape[0]):
             p, cache = forward_numpy(
@@ -28,8 +28,7 @@ def collect_logits(params, X, y, padding, stride, pool_size, pool_stride, batch_
                 params["conv1_w"], params["conv1_b"],
                 params["conv2_w"], params["conv2_b"],
                 params["lin_w"],   params["lin_b"],
-                padding, stride, pool_size, pool_stride, True
-            )
+                padding, stride, pool_size, pool_stride, True)
             zs.append(float(cache["z"][0]))
             ys.append(float(yb[n]))
         # Progress print

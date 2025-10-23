@@ -4,6 +4,8 @@ from pathlib import Path
 import json
 import numpy as np
 
+Array = np.ndarray
+
 # Load configuration
 def load_config(path: str):
     with open(path, "r", encoding="utf-8") as f:
@@ -42,6 +44,36 @@ def sequence_level_split(X, y, g, val_frac=0.1, seed=0):
     Xtr, ytr = X[m_tr], y[m_tr]
     Xval, yval = X[m_val], y[m_val]
     return Xtr, ytr, Xval, yval
+
+# Sequential mini-batch iterator (for evaluation)
+def sequential_batch_iter(X: Array, y: Array, batch_size: int, shuffle: bool = True):
+    N = X.shape[0]
+    idx = np.arange(N)
+    if shuffle:
+        np.random.shuffle(idx)
+    for s in range(0, N, batch_size):
+        b = idx[s:s+batch_size]
+        yield X[b], y[b]
+
+# Balanced mini-batch iterator (for training)
+def balanced_batch_iter(X: Array, y: Array, batch_size: int, num_batches: int, shuffle: bool = True):
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
+    if shuffle:
+        np.random.shuffle(pos_idx)
+        np.random.shuffle(neg_idx)
+    half = batch_size // 2
+    for _ in range(num_batches):
+        if pos_idx.size == 0 or neg_idx.size == 0:
+            # fallback to sequential if a class is missing
+            for xb, yb in sequential_batch_iter(X, y, batch_size, shuffle):
+                yield xb, yb
+            return
+        pos_sel = np.random.choice(pos_idx, size=half, replace=True)
+        neg_sel = np.random.choice(neg_idx, size=half, replace=True)
+        bidx = np.concatenate([pos_sel, neg_sel])
+        np.random.shuffle(bidx)
+        yield X[bidx], y[bidx]
 
 # Logging banner
 def banner(msg: str):

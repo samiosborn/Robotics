@@ -1,16 +1,13 @@
 # src/models/train_cnn_numpy.py
 import numpy as np
 from typing import Dict, Tuple
-import argparse
-import json
-from src.utils.experiment_numpy import load_config
-from src.layers.functional_numpy import out_dim_hw
 from src.models.cnn_numpy import forward_numpy
+from src.utils.experiment_numpy import balanced_batch_iter, sequential_batch_iter
+from src.layers.functional_numpy import out_dim_hw
 from src.layers.functional_numpy_backward import (
     bce_with_logits_loss, bce_with_logits_backward, 
     linear_backward, relu_backward, maxpool3d_backward,
-    conv3d_backward, flatten3d_backward
-)
+    conv3d_backward, flatten3d_backward)
 
 # Pre-allocate
 Array = np.ndarray
@@ -119,15 +116,33 @@ def backward_from_cache(cache: dict, y: np.ndarray):
     }
     return grads
 
-# Mini batch data loader
+# Mini batch data loader (balanced)
 def batch_iter(X: Array, y: Array, batch_size: int, shuffle: bool = True):
-    N = X.shape[0]
-    idx = np.arange(N)
+    # Indices for each class
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
     if shuffle:
-        np.random.shuffle(idx)
-    for s in range(0, N, batch_size):
-        b = idx[s:s+batch_size]
-        yield X[b], y[b]
+        np.random.shuffle(pos_idx)
+        np.random.shuffle(neg_idx)
+    
+    # Balanced split
+    half_bs = batch_size // 2
+    n_batches = max(len(pos_idx), len(neg_idx)) // half_bs
+
+    for i in range(n_batches):
+        # sample half positive, half negative
+        pos_sel = pos_idx[i * half_bs : (i + 1) * half_bs]
+        neg_sel = neg_idx[i * half_bs : (i + 1) * half_bs]
+
+        # if run out of one class, re-sample with replacement
+        if len(pos_sel) < half_bs:
+            pos_sel = np.random.choice(pos_idx, size=half_bs, replace=True)
+        if len(neg_sel) < half_bs:
+            neg_sel = np.random.choice(neg_idx, size=half_bs, replace=True)
+
+        batch_idx = np.concatenate([pos_sel, neg_sel])
+        np.random.shuffle(batch_idx)
+        yield X[batch_idx], y[batch_idx]
 
 # Train one epoch
 def train_one_epoch(
@@ -136,9 +151,16 @@ def train_one_epoch(
     padding: int, stride: int,
     pool_size: int, pool_stride: int,
     lr: float, batch_size: int = 8, weight_decay: float = 0.0, 
-    pos_weight: float = 1.0) -> Tuple[float, float]:
+    pos_weight: float = 1.0, balanced: bool = True) -> Tuple[float, float]:
+    # choose iterator
+    if balanced:
+        num_batches = int(np.ceil(X.shape[0] / batch_size))
+        iterator = balanced_batch_iter(X, y, batch_size, num_batches=num_batches, shuffle=True)
+    else:
+        iterator = sequential_batch_iter(X, y, batch_size, shuffle=False)
     # Initialise
     N = X.shape[0]
+    total_seen = 0
     total_loss = 0.0
     running_correct = 0
     running_loss = 0.0
@@ -166,24 +188,32 @@ def train_one_epoch(
             pred = 1.0 if p[0] >= 0.5 else 0.0
             running_correct += int(pred == y_n[0])
             # Backpropagation
-            grads_n = backward_from_cache(cache, y_n)
-            # Accumulate grads
-            for k in ("conv1_w","conv1_b","conv2_w","conv2_b","lin_w","lin_b"):
-                acc_grads[k] += grads_n[k]
+            if lr > 0.0:
+                grads_n = backward_from_cache(cache, y_n)
+                # Accumulate grads
+                for k in ("conv1_w","conv1_b","conv2_w","conv2_b","lin_w","lin_b"):
+                    acc_grads[k] += grads_n[k]
         # Average grads across the batch
-        for k in ("conv1_w","conv1_b","conv2_w","conv2_b","lin_w","lin_b"):
-            acc_grads[k] /= xb.shape[0]
-        # Update step
-        sgd_update(params, acc_grads, lr=lr, weight_decay=weight_decay)
+        if lr > 0.0:
+            for k in ("conv1_w","conv1_b","conv2_w","conv2_b","lin_w","lin_b"):
+                acc_grads[k] /= xb.shape[0]
+            # Update step
+            sgd_update(params, acc_grads, lr=lr, weight_decay=weight_decay)
         # Accumulate loss
         total_loss += batch_loss
+        # Accumulate seen
+        total_seen += xb.shape[0]
         # Track avg-per-batch for display
         running_loss += (batch_loss / xb.shape[0])
         if batch_idx % 20 == 0:
             print(f"batch {batch_idx}: running loss ~ {running_loss / batch_idx:.4f}")
+        # Debug for balanced batches
+        if batch_idx == 1:
+            slip_ratio = yb.mean()
+            print(f"[DEBUG] batch: {batch_idx} slip ratio = {slip_ratio:.2f}") 
     # Statistics
-    avg_loss = total_loss / N
-    avg_acc  = running_correct / N
+    avg_loss = total_loss / max(total_seen, 1)
+    avg_acc  = running_correct / max(total_seen, 1)
     return float(avg_loss), float(avg_acc)
 
 # Fit loop
@@ -196,8 +226,8 @@ def fit(params: Params,
     # Run for several epochs
     for epoch in range(1, epochs+1):
         loss, acc = train_one_epoch(
-            params, X, y, padding, stride, pool_size, pool_stride,
-            lr=lr, batch_size=batch_size, weight_decay=weight_decay, pos_weight=pos_weight)
+            params, X, y, padding, stride, pool_size, pool_stride, lr=lr, 
+            batch_size=batch_size, weight_decay=weight_decay, pos_weight=pos_weight, balanced=True)
         if verbose:
             print(f"Epoch number {epoch:02d}, loss: {loss:.4f}, accuracy: {acc:.3f}")
     return params

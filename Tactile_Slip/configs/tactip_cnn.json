@@ -20,7 +20,7 @@
   "C2": 6,
   "k": 3,
 
-  "lr": 0.05,
+  "lr": 0.025,
   "weight_decay": 0.0001,
   "batch_size": 64,
   "epochs": 2,
@@ -28,5 +28,5 @@
   "val_frac": 0.10,
   "seed": 0,
 
-  "pos_weight": 20.0
+  "pos_weight": 10.0
 }
