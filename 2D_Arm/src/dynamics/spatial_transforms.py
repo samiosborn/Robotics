@@ -1,20 +1,7 @@
 # src/dynamics/spatial_transforms.py
 import numpy as np
 import config
-from src.dynamics.spatial_inertia import PlanarLinkInertia
-
-# Convert 3-vector into skew-symmetric matrix (3x3) - so that skew3(a) @ b = a x b
-def skew3(v):
-   x, y, z = v
-   return np.array([
-      [0, -z, y],
-      [z, 0, -x],
-      [-y, x, 0]
-   ])
-
-# Convert skew-symmetric matrix (3x3) into 3-vector
-def vec3_from_skew(S):
-    return np.array([-S[1,2], S[0,2], -S[0,1]], dtype=float)
+from src.dynamics.spatial_math import skew3, vec3_from_skew
 
 # Rotation matrix (3x3) around z-axis by angle theta
 def rotate3z(theta: float): 
@@ -26,6 +13,30 @@ def rotate3z(theta: float):
         [s, c, 0.0],
         [0.0, 0.0, 1.0]
     ])
+
+# Rotation matrix (3x3) from Euler angles (yaw, pitch, roll)
+def rotation_matrix_from_euler(yaw=0.0, pitch=0.0, roll=0.0):
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cr, sr = np.cos(roll), np.sin(roll)
+
+    # Rotation matrix R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    Rz = np.array([
+        [cy, -sy, 0],
+        [sy,  cy, 0],
+        [0,   0,  1]
+    ])
+    Ry = np.array([
+        [cp, 0, sp],
+        [0,  1, 0],
+        [-sp, 0, cp]
+    ])
+    Rx = np.array([
+        [1, 0, 0],
+        [0, cr, -sr],
+        [0, sr,  cr]
+    ])
+    return Rz @ Ry @ Rx
 
 # Rotation matrix (6x6) around z-axis by angle theta for spatial motion
 def rotate6z(theta: float):
@@ -152,7 +163,7 @@ def world_poses_from_q(q: np.ndarray, joint_offsets: np.ndarray,
 
 # World positions and COMs
 def world_positions_coms(q: np.ndarray, joint_offsets: np.ndarray, 
-                         link_lengths: np.ndarray, base_position: np.ndarray, links: list[PlanarLinkInertia]):
+                         link_lengths: np.ndarray, base_position: np.ndarray, links):
     # Assertions
     if joint_offsets is None: joint_offsets = config.JOINT_OFFSETS
     if link_lengths is None: link_lengths = config.LINK_LENGTHS

@@ -4,7 +4,7 @@ import numpy as np
 DOF = 3
 
 # Calculate the Jacobian matrix
-def jacobian(link_lengths: np.ndarray, joint_angles: np.ndarray, joint_offsets: np.ndarray):
+def jacobian(link_lengths: np.ndarray, joint_angles: np.ndarray):
     # Initialise the matrix with zeros
     J = np.zeros((DOF,DOF), dtype=float)
 

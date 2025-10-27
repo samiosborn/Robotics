@@ -40,7 +40,7 @@ def inverse_via_SVD(target_pose, joint_offsets, link_lengths, base_position, the
         error = target_pose - current_pose
 
         # Calculate Jacobian
-        J = jacobian(link_lengths=link_lengths, link_angles=theta_current)
+        J = jacobian(link_lengths=link_lengths, joint_angles=theta_current)
 
         # Calculate pseudoinverse
         J_inv = np.linalg.pinv(J)
@@ -75,7 +75,7 @@ def inverse_via_DLS(target_pose, joint_offsets, link_lengths, base_position, the
         error = target_pose - current_pose
 
         # Calculate Jacobian
-        J = jacobian(link_lengths=link_lengths, link_angles=theta_current)
+        J = jacobian(link_lengths=link_lengths, joint_angles=theta_current)
         J_T = np.transpose(J)
 
         # Calculate pseudoinverse with damping term

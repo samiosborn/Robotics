@@ -1,7 +1,7 @@
 # src.dynamics/spatial_inertia.py
 from dataclasses import dataclass
 import numpy as np
-from src.dynamics.spatial_transforms import skew3
+from src.dynamics.spatial_math import skew3
 
 @dataclass
 class PlanarLinkInertia:

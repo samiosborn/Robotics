@@ -28,7 +28,7 @@ def animate_angles_trajectory(trajectory_joint_angles, animation_time, joint_off
             continue
 
         # Forward kinematics
-        joint_positions = forward_kinematics(joint_angles, joint_offsets, link_lengths, base_position)
+        joint_positions, _, _ = forward_kinematics(joint_angles, joint_offsets, link_lengths, base_position)
 
         # Update 2D plot (interactive)
         plot_2d(joint_positions, ax)
