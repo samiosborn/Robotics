@@ -1,5 +1,69 @@
+# .gitignore
+
+# OS-Specific Files
 .DS_Store
-".DS_Store" 
+Thumbs.db
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.pkl
+*.egg-info/
+*.egg
+*.log
+
+# Jupyter / Notebooks
+.ipynb_checkpoints/
+*.ipynb_save
+.notebook_autosave/
+
+# Environment / Build
+.env
+.venv
+venv/
+env/
+*.env
+*.venv
+anaconda_projects/
+*.conda
+*.yaml
+*.yml
+
+# Editor / IDE
 .vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# Temporary / Cache
+__MACOSX/
+.cache/
+.temp/
+*.tmp
+*.bak
+*.swp
+
+# Data / Model Files
+*.h5
+*.hdf5
+*.npz
+*.npy
+*.csv
+*.mat
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.tfrecord
+datasets/
+data/
+logs/
+checkpoints/
+results/
+outputs/
+
+# OS / Repo Meta
+*.~*
+*.bak
