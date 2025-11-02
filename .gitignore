@@ -19,6 +19,9 @@ __pycache__/
 *.ipynb_save
 .notebook_autosave/
 
+# LaTeX
+.synctex.gz
+
 # Environment / Build
 .env
 .venv
