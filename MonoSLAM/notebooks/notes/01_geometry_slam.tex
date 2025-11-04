@@ -18,9 +18,9 @@
 \begin{document}
 \maketitle
 
-% =====================================================
+% ====
 \section{Coordinate Frames}
-% =====================================================
+% ====
 
 A coordinate frame consists of an origin and a set of three orthogonal unit axes.
 
@@ -33,9 +33,9 @@ The camera or body frame moves with the robot and expresses points relative to t
 \subsection*{Landmark Frame (L)}
 A local frame used for describing static scene landmarks.
 
-% =====================================================
+% ====
 \section{Transformations and Lie Groups}
-% =====================================================
+% ====
 
 \subsection*{Rigid Transformations}
 We denote \(T_{AB}\) as the transformation from frame \(B\) to \(A\).
@@ -68,9 +68,9 @@ SE(3) \leftrightarrow \mathfrak{se}(3)
 \]
 The lowercase symbols denote the Lie algebras (tangent spaces at the identity), while uppercase symbols denote the Lie groups (manifolds of transformations).
 
-% =====================================================
+% ====
 \section{The Special Orthogonal Group \(SO(3)\) }
-% =====================================================
+% ====
 
 \subsection*{Definition}
 \[
@@ -134,9 +134,9 @@ R_{32}-R_{23}\\R_{13}-R_{31}\\R_{21}-R_{12}
 \end{bmatrix}
 \]
 
-% =====================================================
+% ====
 \section{Quaternion Representation of Rotation}
-% =====================================================
+% ====
 
 A unit quaternion \(q = [q_w, q_x, q_y, q_z]^T\) encodes rotation as:
 \[
@@ -179,9 +179,9 @@ q_x \\ q_y \\ q_z
 \end{bmatrix}, \quad \sin(\tfrac{\theta}{2}) \neq 0
 \]
 
-% =====================================================
+% ====
 \section{The Special Euclidean Group \(SE(3)\)}
-% =====================================================
+% ====
 
 \subsection*{Definition}
 The group of rigid-body motions in 3D:
@@ -212,9 +212,9 @@ R^T & -R^T t \\ 0 & 1
 \end{bmatrix}
 \]
 
-% =====================================================
+% ====
 \section{The Lie Algebra \(\mathfrak{se}(3)\) and Exponential Map}
-% =====================================================
+% ====
 
 \subsection*{Elements and Hat Operator}
 An element of \(\mathfrak{se}(3)\) is a 6D twist:
@@ -253,12 +253,28 @@ I + \frac{1 - \cos\theta}{\theta^2}\phi^\wedge +
 \qquad \theta = \|\phi\|
 \]
 
-\subsection*{Small-Angle Approximations}
-For \(\theta \to 0\):
+\subsection*{Pose Updates on \(SE(3)\)}
+
+Small motion increments in 3D space are represented in the Lie algebra \(\mathfrak{se}(3)\) and applied to a current pose \(T \in SE(3)\) via the exponential map.
+
+Given a perturbation \(\xi = [\rho^T,\, \phi^T]^T \in \mathbb{R}^6\), the pose update is written as:
 \[
-R \approx I + \phi^\wedge, \qquad
-J \approx I + \tfrac{1}{2}\phi^\wedge
+T \leftarrow \exp(\xi^\wedge)\, T
 \]
+This update composes a small transformation on the manifold while preserving the \(SE(3)\) group structure.
+
+The rotational and translational components evolve as:
+\[
+R \leftarrow \exp(\phi^\wedge) R, \qquad
+t \leftarrow \exp(\phi^\wedge)t + J(\phi)\rho
+\]
+
+For small angles (\(\theta \to 0\)), the first-order approximations hold:
+\[
+R \approx (I + \phi^\wedge)R, \qquad
+t \approx t + \rho + \tfrac{1}{2}\phi^\wedge\rho
+\]
+or equivalently,
 \[
 \exp(\xi^\wedge) \approx
 \begin{bmatrix}
@@ -266,5 +282,5 @@ I + \phi^\wedge & \rho + \tfrac{1}{2}\phi^\wedge\rho \\ 0 & 1
 \end{bmatrix}
 \]
 
-% =====================================================
+% ====
 \end{document}
