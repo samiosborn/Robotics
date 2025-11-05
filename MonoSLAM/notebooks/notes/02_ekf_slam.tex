@@ -1,0 +1,202 @@
+% 02_ekf_slam.tex
+\documentclass[11pt,a4paper]{article}
+\input{preamble.tex}
+
+\title{Extended Kalman Filter for SLAM}
+\author{Sami Osborn}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ====
+\section{Mathematical Foundations of EKF-SLAM}
+% ====
+
+Simultaneous Localisation and Mapping (SLAM) seeks to estimate both a robot’s pose and the positions of environmental landmarks.
+The Extended Kalman Filter (EKF) provides a probabilistic framework for doing this in real time, by maintaining a joint Gaussian distribution over all unknowns and updating it recursively as new observations arrive.
+
+At its core, the EKF combines:
+\begin{itemize}
+    \item A \textbf{motion model} describing how the robot’s state evolves.
+    \item A \textbf{measurement model} describing how landmarks appear in the camera or sensor frame.
+\end{itemize}
+
+The following builds up the mathematics of EKF-SLAM from its probabilistic foundations.
+
+% ====
+\section{Probabilistic Model}
+% ====
+
+Let the robot’s pose at time \(t\) be \(x_t \in SE(3)\), and the map consist of \(N\) static landmarks \(m_i \in \mathbb{R}^3\), collected in a global state vector:
+\[
+X_t = \begin{bmatrix} x_t \\ m_1 \\ m_2 \\ \vdots \\ m_N \end{bmatrix}
+\]
+
+The system dynamics and measurement processes are modelled as:
+\[
+x_t = f(x_{t-1}, u_t) + w_t, \qquad w_t \sim \mathcal{N}(0, Q_t)
+\]
+\[
+z_t = h(x_t, M) + v_t, \qquad v_t \sim \mathcal{N}(0, R_t)
+\]
+where \(u_t\) is the control input, \(w_t\) the process noise, and \(v_t\) the measurement noise.
+
+The goal is to recursively estimate the posterior:
+\[
+p(X_t \mid z_{1:t}, u_{1:t})
+\]
+which expresses our belief about the joint robot–map state given all past observations and controls.
+
+% ====
+\section{Gaussian Assumption and Linearisation}
+% ====
+
+The EKF assumes that the posterior is approximately Gaussian:
+\[
+p(X_t \mid z_{1:t}) \approx \mathcal{N}(\hat{X}_t, P_t)
+\]
+where:
+\[
+\hat{X}_t = \mathbb{E}[X_t \mid z_{1:t}], \quad P_t = \mathrm{Var}[X_t \mid z_{1:t}]
+\]
+
+Because both \(f(\cdot)\) and \(h(\cdot)\) are nonlinear, we linearise them about the current estimate using first-order Taylor expansion.
+
+For the motion model:
+\[
+f(x_{t-1}, u_t) \approx f(\hat{x}_{t-1}, u_t) + F_t (x_{t-1} - \hat{x}_{t-1})
+\]
+where \(F_t = \frac{\partial f}{\partial x} \big|_{\hat{x}_{t-1}, u_t}\) is the Jacobian of the transition function.
+
+For the observation model:
+\[
+h(x_t, M) \approx h(\hat{x}_t, \hat{M}) + H_t (X_t - \hat{X}_t)
+\]
+where \(H_t = \frac{\partial h}{\partial X} \big|_{\hat{X}_t}\) is the measurement Jacobian.
+
+These Jacobians propagate uncertainty through nonlinear transformations in the filter.
+
+% ====
+\section{Recursive Estimation}
+% ====
+
+The EKF proceeds in two stages: prediction and update.
+
+\subsection*{Prediction Step}
+
+From the system model:
+\[
+\hat{X}_t^- = f(\hat{X}_{t-1}, u_t)
+\]
+\[
+P_t^- = F_t P_{t-1} F_t^\top + Q_t
+\]
+where \((\hat{X}_t^-, P_t^-)\) denote the predicted mean and covariance before the new observation.
+
+\subsection*{Measurement Update}
+
+Given a new observation \(z_t\), the predicted measurement is:
+\[
+\hat{z}_t = h(\hat{X}_t^-)
+\]
+
+The innovation (residual) is:
+\[
+r_t = z_t - \hat{z}_t
+\]
+
+The Kalman gain weights how much we trust the new measurement:
+\[
+K_t = P_t^- H_t^\top (H_t P_t^- H_t^\top + R_t)^{-1}
+\]
+
+The posterior mean and covariance become:
+\[
+\hat{X}_t = \hat{X}_t^- + K_t r_t
+\]
+\[
+P_t = (I - K_t H_t) P_t^-
+\]
+
+The gain \(K_t\) automatically balances prediction confidence versus measurement reliability:
+large \(R_t\) (noisy sensors) reduces \(K_t\), whereas large \(P_t^-\) (uncertain prediction) increases it.
+
+% ====
+\section{EKF-SLAM State Structure}
+% ====
+
+In SLAM, the state vector couples the robot pose and all landmarks.
+Hence \(P_t\) is a large joint covariance matrix:
+\[
+P_t =
+\begin{bmatrix}
+P_{xx} & P_{xm} \\
+P_{mx} & P_{mm}
+\end{bmatrix}
+\]
+where:
+\begin{itemize}
+    \item \(P_{xx}\): uncertainty of robot pose.
+    \item \(P_{mm}\): uncertainty of landmark positions.
+    \item \(P_{xm}\): cross-correlation between pose and landmarks.
+\end{itemize}
+
+When the robot moves, the motion model affects only \(P_{xx}\) and its correlations with landmarks.
+When it observes features, the measurement model couples the corresponding landmark states with the current pose through the Jacobian \(H_t\).
+
+This joint structure allows information from one observation to reduce uncertainty across all correlated landmarks.
+
+% ====
+\section{Measurement Model and Projection Jacobian}
+% ====
+
+For visual SLAM, each measurement is the image-plane projection of a 3D world landmark \(p_W\).
+
+Transforming from world to camera coordinates:
+\[
+p_C = R_{CW} (p_W - t_{CW})
+\]
+
+Under the pinhole projection model:
+\[
+z_{\text{pred}} = h(p_C) =
+\begin{bmatrix}
+f_x \frac{X_c}{Z_c} + c_x \\
+f_y \frac{Y_c}{Z_c} + c_y
+\end{bmatrix}
+\]
+
+The Jacobian of this projection with respect to the 3D point is:
+\[
+\frac{\partial (u, v)}{\partial (X_c, Y_c, Z_c)} =
+\begin{bmatrix}
+\frac{f_x}{Z_c} & 0 & -f_x \frac{X_c}{Z_c^2} \\
+0 & \frac{f_y}{Z_c} & -f_y \frac{Y_c}{Z_c^2}
+\end{bmatrix}
+\]
+
+This \(2\times3\) matrix captures how small displacements in 3D camera space affect pixel coordinates.
+Its \(1/Z_c\) scaling shows that uncertainty grows with depth, so nearby features provide stronger geometric constraints than distant ones.
+
+The full measurement Jacobian used in the EKF update combines this with derivatives of the camera pose:
+\[
+H_t = \frac{\partial h}{\partial X_t} =
+\frac{\partial h}{\partial p_C} \frac{\partial p_C}{\partial X_t}
+\]
+
+% ====
+\section{Geometric and Statistical Interpretation}
+% ====
+
+The EKF’s mathematics tightly links projective geometry and probabilistic inference:
+
+\begin{itemize}
+    \item The \textbf{camera model} defines how 3D structure is mapped into 2D pixel space.
+    \item The \textbf{Jacobian} translates infinitesimal 3D motion into image changes, determining how uncertainty propagates.
+    \item The \textbf{Kalman gain} enforces optimal fusion under Gaussian assumptions, adjusting belief in each measurement based on its projected information content.
+\end{itemize}
+
+Thus, EKF-SLAM can be viewed as performing recursive conditioning of a joint Gaussian over robot and landmark states, constrained by projective geometry.
+
+\end{document}
