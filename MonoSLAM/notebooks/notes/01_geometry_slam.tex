@@ -1,19 +1,9 @@
+% 01_geometry_slam.tex
 \documentclass[11pt,a4paper]{article}
 
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath, amssymb, amsfonts, bm}
-\usepackage{graphicx}
-\usepackage{physics}
-\usepackage{hyperref}
-\usepackage{enumitem}
-\usepackage{titlesec}
-
+\input{preamble.tex}
 \title{SLAM Geometry Notes}
-\author{Sami Osborn}
 \date{}
-
-\setlength{\parindent}{0pt}
-\setlength{\parskip}{6pt}
 
 \begin{document}
 \maketitle
@@ -245,13 +235,31 @@ R(\phi) & J(\phi)\rho \\
 \]
 where \(J(\phi)\) is the \textbf{left Jacobian} of \(SO(3)\).
 
-\subsection*{Jacobian Definition and Closed Form}
+\subsection*{Jacobian Definition}
+
+The left Jacobian of \( SO(3) \), denoted \( J(\phi) \), relates small perturbations in the rotation vector space \( \mathbb{R}^3 \) to displacements on the manifold. It is defined by the infinite series expansion
+
 \[
-J(\phi) = \sum_{n=0}^\infty \frac{1}{(n+1)!}(\phi^\wedge)^n =
-I + \frac{1 - \cos\theta}{\theta^2}\phi^\wedge +
-\frac{\theta - \sin\theta}{\theta^3}(\phi^\wedge)^2,
-\qquad \theta = \|\phi\|
+J(\phi) = \sum_{n=0}^\infty \frac{1}{(n+1)!}(\phi^\wedge)^n
 \]
+
+which has a closed-form expression that depends on the rotation angle \( \theta = \|\phi\| \):
+
+\[
+J(\phi) =
+I + \frac{1 - \cos\theta}{\theta^2}\phi^\wedge +
+\frac{\theta - \sin\theta}{\theta^3}(\phi^\wedge)^2
+\]
+
+This exact form is valid for any finite rotation and follows from the Taylor expansion of the exponential map on \( SO(3) \).
+
+When the rotation vector \( \phi \) is small (\( \|\phi\| \to 0 \)), higher-order terms in the series can be neglected. Using the small-angle approximations \( \sin\theta \approx \theta \) and \( \cos\theta \approx 1 - \tfrac{\theta^2}{2} \), the Jacobian reduces to a first-order form
+
+\[
+J(\phi) \approx I + \tfrac{1}{2}\phi^\wedge
+\]
+
+which is often used in linearised pose updates such as those in EKF-SLAM and bundle adjustment.
 
 \subsection*{Pose Updates on \(SE(3)\)}
 
@@ -281,6 +289,122 @@ or equivalently,
 I + \phi^\wedge & \rho + \tfrac{1}{2}\phi^\wedge\rho \\ 0 & 1
 \end{bmatrix}
 \]
+
+% ====
+\section{Pinhole Camera Projection Model}
+% ====
+
+The pinhole camera model describes how a 3D point in the camera frame projects onto the 2D image plane.
+It idealises the imaging process as light rays passing through a single optical centre before intersecting the image plane, so that the geometry of projection is fully determined by the camera intrinsics.
+
+% ====
+\subsection*{Image Frame Coordinate System}
+% ====
+
+In computer vision, the image coordinate system is defined with the origin at the top-left corner of the image.
+The horizontal \(u\)-axis increases rightwards, and the \(v\)-axis vertical axis increases downwards. Similar to the convention in Numpy.
+
+% ====
+\subsection*{From 3D to 2D Pixels}
+% ====
+
+A point in the camera coordinate frame is expressed as
+\[
+p_C =
+\begin{bmatrix}
+X_c \\ Y_c \\ Z_c
+\end{bmatrix}
+\]
+In the pinhole model, this 3D point is projected onto the image plane through perspective division:
+\[
+x = \frac{X_c}{Z_c}, \qquad y = \frac{Y_c}{Z_c}
+\]
+where $(x, y)$ are the normalised image coordinates in the plane $Z = 1$.
+
+These coordinates represent where image plane intersects the line of sight from the camera centre through the point $p_C$.
+
+The effect of division by $Z_c$ captures the inverse-depth scaling of perspective: as the depth increases, the image location moves closer to the principal point on the image frame, and features appear smaller.
+
+The mapping from the normalised image plane to the discrete pixel grid is defined by the camera intrinsic matrix \(K\):
+\[
+K =
+\begin{bmatrix}
+f_x & 0 & c_x \\
+0 & f_y & c_y \\
+0 & 0 & 1
+\end{bmatrix}
+\]
+
+Here:
+\begin{itemize}[nosep]
+    \item \(f_x, f_y\) are the focal lengths in pixel units. They represent the distance between the optical plane and the image plane.
+    \item \((c_x, c_y)\) is the principal point, the pixel coordinate on the image plane, which intersects with the optical axis (the line perpendicular to the center of the optical plane).
+\end{itemize}
+
+Typically, the focal length \(f_{\text{mm}}\) is measured in millimetres, however we scale to pixel units:
+\[
+f_x = \frac{f_{\text{mm}}}{s_x}, \qquad f_y = \frac{f_{\text{mm}}}{s_y}
+\]
+where \(s_x, s_y\) are the pixel sizes along each sensor axis (mm/pixel).
+Thus, \(f_x, f_y\) describe how many pixels correspond to the optical focal distance.
+Larger focal lengths correspond to narrower fields of view (zoomed-in views), while smaller focal lengths capture a wider angular extent of the scene.
+
+The full projection from camera coordinates to pixel coordinates is therefore:
+\[
+\tilde{z} =
+\begin{bmatrix}
+u \\ v \\ 1
+\end{bmatrix}
+= \frac{1}{Z_c}
+\begin{bmatrix}
+f_x X_c + c_x Z_c \\
+f_y Y_c + c_y Z_c \\
+Z_c
+\end{bmatrix}
+\]
+since,
+\[
+\frac{u - c_x}{f_x} = \frac{X_c}{Z_c}, \qquad
+\frac{v - c_y}{f_y} = \frac{Y_c}{Z_c}
+\]
+or equivalently,
+\[
+u = f_x \frac{X_c}{Z_c} + c_x, \qquad
+v = f_y \frac{Y_c}{Z_c} + c_y
+\]
+
+This mapping defines the measurement function:
+\[
+h(x) =
+\begin{bmatrix}
+u \\ v
+\end{bmatrix}
+\]
+which links a 3D landmark position in the camera frame, to its observed pixel coordinates on the image frame.
+Here \(x\) denotes the SLAM state vector, which contains the landmark(s) and camera pose parameters.
+
+% ====
+\subsection*{Field of View}
+% ====
+
+The depth \(Z_c\) directly controls the strength of the perspective effect:
+
+\begin{itemize}[nosep]
+    \item As \(Z_c\) increases, the image motion becomes small, making distant landmarks more stable but less detailed.
+    \item As \(Z_c \to 0\), points approach the optical centre and the projection becomes singular (\(1/Z_c\) diverges), so such close points cannot be imaged properly.
+\end{itemize}
+
+For numerical stability, a lower bound \(Z_c > \epsilon\) (e.g. a few centimetres) is enforced during optimisation or filtering.
+
+The focal lengths \(f_x, f_y\) not only scale the projection but also determine the camera's angular field of view (FOV):
+\[
+\text{FOV}_x = 2 \tan^{-1}\!\left( \frac{w}{2 f_x} \right), \qquad
+\text{FOV}_y = 2 \tan^{-1}\!\left( \frac{h}{2 f_y} \right)
+\]
+where \(w, h\) are the image width and height in pixels.
+
+A short focal length yields a wide field of view (such as in wide-angle lenses), while a large focal length yields a narrow FOV (telephoto lens).
+Hence focal length and FOV are inversely related. Together with the principal point \((c_x, c_y)\), these parameters fully define how the continuous 3D camera rays map to discrete image pixels.
 
 % ====
 \end{document}
