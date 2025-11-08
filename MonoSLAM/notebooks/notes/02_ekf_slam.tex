@@ -120,16 +120,19 @@ Given a new observation \(z_t\), the predicted measurement is:
 \[
 \hat{z}_t = h(\hat{X}_t^-)
 \]
+where \(h\) is the measurement function which maps the state to sensor readings.
 
 The innovation (residual) is:
 \[
 r_t = z_t - \hat{z}_t
 \]
+where \(z_t\) is the actual measurement received from the sensor.
 
 The Kalman gain weights how much we trust the new measurement:
 \[
 K_t = P_t^- H_t^\top (H_t P_t^- H_t^\top + R_t)^{-1}
 \]
+where \(H_t\) is the Jacobian of the measurement function \(h\) evaluated at \(\hat{X}_t^-\), and \(R_t\) is the measurement noise covariance.
 
 The posterior mean and covariance become:
 \[
