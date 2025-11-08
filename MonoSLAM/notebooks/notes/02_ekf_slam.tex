@@ -75,7 +75,27 @@ h(x_t, M) \approx h(\hat{x}_t, \hat{M}) + H_t (X_t - \hat{X}_t)
 \]
 where \(H_t = \frac{\partial h}{\partial X} \big|_{\hat{X}_t}\) is the measurement Jacobian.
 
-These Jacobians propagate uncertainty through nonlinear transformations in the filter.
+% ====
+\subsection*{Jacobian Matrices}
+% ====
+
+The Jacobian is a matrix of first-order partial derivatives that describes how a vector-valued function changes with respect to its input variables.
+For a nonlinear function
+\[
+f: \mathbb{R}^n \to \mathbb{R}^m, \quad y = f(x)
+\]
+the Jacobian \(J_f(x)\) is defined as:
+\[
+J_f(x) =
+\begin{bmatrix}
+\frac{\partial f_1}{\partial x_1} & \cdots & \frac{\partial f_1}{\partial x_n} \\
+\vdots & \ddots & \vdots \\
+\frac{\partial f_m}{\partial x_1} & \cdots & \frac{\partial f_m}{\partial x_n}
+\end{bmatrix}
+\]
+
+Each element \(\frac{\partial f_i}{\partial x_j}\) expresses how the \(i\)-th output changes with respect to the \(j\)-th input.
+In the EKF, this matrix locally linearises nonlinear functions so that Gaussian uncertainty can be propagated through them.
 
 % ====
 \section{Recursive Estimation}
