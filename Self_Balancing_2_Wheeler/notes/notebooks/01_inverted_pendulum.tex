@@ -1,0 +1,129 @@
+% 01_inverted_pendulum.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{physics}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Inverted Pendulum Model for a Self-Balancing Robot}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Physical Model}
+
+Consider a two-wheel self-balancing robot. 
+The body is modelled as a rigid rod of mass \(m\) and centre-of-mass at distance \(l\) above the wheel axle. 
+Let
+\[
+\theta(t)
+\]
+denote the tilt angle of the body, measured from the upright position, with \(\theta>0\) meaning the robot is falling forwards.
+
+We approximate the robot as an inverted pendulum pivoting at the wheel axle. For now, we ignore wheel translation and treat the axle as a fixed pivot. 
+This is a simplification but sufficient for understanding the balance controller.
+
+\section{Equations of Motion}
+
+Using a small-angle approximation (\(\sin \theta \approx \theta\), \(\cos \theta \approx 1\)) the rotational dynamics about the axle are
+\[
+I \ddot{\theta} = m g l \, \theta + \tau
+\]
+where
+\begin{itemize}
+  \item \(I\) is the moment of inertia of the body about the axle
+  \item \(g\) is gravitational acceleration
+  \item \(\tau\) is the control torque applied by the motors about the axle
+\end{itemize}
+
+Rewriting,
+\[
+\ddot{\theta} = \frac{m g l}{I}\,\theta + \frac{1}{I}\,\tau
+\]
+
+This is an unstable linear system: if \(\tau = 0\) and \(\theta \neq 0\), the solution diverges exponentially.
+
+\section{State Definition}
+
+For balance control, a minimal state is
+\[
+x(t) = \begin{bmatrix} \theta(t) \\ \dot{\theta}(t) \end{bmatrix}
+\]
+Then the continuous-time dynamics can be written as
+\[
+\dot{x}(t) =
+\begin{bmatrix}
+\dot{\theta}(t) \\
+\ddot{\theta}(t)
+\end{bmatrix}
+=
+\begin{bmatrix}
+\dot{\theta}(t) \\
+\frac{m g l}{I}\,\theta(t) + \frac{1}{I}\,\tau(t)
+\end{bmatrix}
+\]
+
+Thus, the state is fully determined by tilt angle and angular velocity. Higher derivatives are determined by these and the input torque.
+
+\section{Complementary Filter}
+
+The IMU provides:
+\begin{itemize}
+  \item Accelerometer: measures specific force, from which we can estimate tilt angle via the direction of gravity.
+  \item Gyroscope: measures angular velocity \(\dot{\theta}\)
+\end{itemize}
+
+Let
+\[
+\theta_{\text{acc}}(t)
+\]
+be the tilt estimate from the accelerometer and
+\[
+\dot{\theta}_{\text{gyro}}(t)
+\]
+be the angular velocity from the gyroscope.
+
+A simple discrete-time complementary filter with sample period \(\Delta t\) is
+\[
+\theta_{k}^{\text{est}} = \alpha \left( \theta_{k-1}^{\text{est}} + \dot{\theta}_{k}^{\text{gyro}} \Delta t \right)
++ (1-\alpha)\,\theta_{k}^{\text{acc}}
+\]
+with \(0 < \alpha < 1\)
+
+Here:
+\begin{itemize}
+  \item The gyroscope term \(\theta_{k-1}^{\text{est}} + \dot{\theta}_{k}^{\text{gyro}} \Delta t\) is a high-pass path (good at short-term changes, but drifts).
+  \item The accelerometer term \(\theta_{k}^{\text{acc}}\) is a low-pass path (no long-term drift, but noisy under acceleration).
+\end{itemize}
+
+\section{PID Balance Control}
+
+Define the error
+\[
+e(t) = \theta_{\text{ref}} - \theta_{\text{est}}(t)
+\]
+where \(\theta_{\text{ref}} = 0\) is upright.
+
+A continuous-time PID controller is
+\[
+u(t) = K_P e(t) + K_I \int_0^t e(\tau)\,d\tau + K_D \frac{d e(t)}{dt}
+\]
+
+In discrete time with time step \(\Delta t\) and samples indexed by \(k\),
+\begin{align*}
+e_k &= \theta_{\text{ref}} - \theta_{\text{est},k}, \\
+I_k &= I_{k-1} + e_k \Delta t, \\
+D_k &= \frac{e_k - e_{k-1}}{\Delta t}
+\end{align*}
+and the control command is
+\[
+u_k = K_P e_k + K_I I_k + K_D D_k
+\]
+
+In our robot, \(u_k\) will be mapped to a motor command (e.g. PWM duty cycle or velocity setpoint).
+
+\end{document}
