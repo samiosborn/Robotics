@@ -6,6 +6,11 @@
 \usepackage{bm}
 \usepackage{graphicx}
 \usepackage{geometry}
+
+\author{Sami Osborn}
+
+\setlength{\parindent}{0pt}
+
 \geometry{margin=1in}
 
 \title{Inverted Pendulum Model for a Self-Balancing Robot}
@@ -18,20 +23,15 @@
 
 Consider a two-wheel self-balancing robot. 
 The body is modelled as a rigid rod of mass \(m\) and centre-of-mass at distance \(l\) above the wheel axle. 
-Let
-\[
-\theta(t)
-\]
-denote the tilt angle of the body, measured from the upright position, with \(\theta>0\) meaning the robot is falling forwards.
+Let \( \theta(t) \) denote the tilt angle of the body, measured from the upright position, with \(\theta>0\) meaning the robot is falling forwards.
 
 We approximate the robot as an inverted pendulum pivoting at the wheel axle. For now, we ignore wheel translation and treat the axle as a fixed pivot. 
 This is a simplification but sufficient for understanding the balance controller.
 
 \section{Equations of Motion}
-
-Using a small-angle approximation (\(\sin \theta \approx \theta\), \(\cos \theta \approx 1\)) the rotational dynamics about the axle are
+By balancing the rotation forces around the axle, we have
 \[
-I \ddot{\theta} = m g l \, \theta + \tau
+I \ddot{\theta} = m g l \sin(\theta) + \tau
 \]
 where
 \begin{itemize}
@@ -40,12 +40,17 @@ where
   \item \(\tau\) is the control torque applied by the motors about the axle
 \end{itemize}
 
+Using a small-angle approximation (\(\sin \theta \approx \theta\), the rotational dynamics about the axle are
+\[
+I \ddot{\theta} = m g l \theta + \tau
+\]
+
 Rewriting,
 \[
 \ddot{\theta} = \frac{m g l}{I}\,\theta + \frac{1}{I}\,\tau
 \]
 
-This is an unstable linear system: if \(\tau = 0\) and \(\theta \neq 0\), the solution diverges exponentially.
+Clearly, this is an unstable linear system if \(\tau = 0\) and \(\theta \neq 0\).
 
 \section{State Definition}
 
@@ -53,7 +58,7 @@ For balance control, a minimal state is
 \[
 x(t) = \begin{bmatrix} \theta(t) \\ \dot{\theta}(t) \end{bmatrix}
 \]
-Then the continuous-time dynamics can be written as
+Then, the continuous-time dynamics can be written as
 \[
 \dot{x}(t) =
 \begin{bmatrix}
@@ -67,27 +72,26 @@ Then the continuous-time dynamics can be written as
 \end{bmatrix}
 \]
 
-Thus, the state is fully determined by tilt angle and angular velocity. Higher derivatives are determined by these and the input torque.
+Thus, the state is fully determined by tilt angle and angular velocity - no second-order derivatives are required. 
 
 \section{Complementary Filter}
 
 The IMU provides:
 \begin{itemize}
   \item Accelerometer: measures specific force, from which we can estimate tilt angle via the direction of gravity.
-  \item Gyroscope: measures angular velocity \(\dot{\theta}\)
+  \item Gyroscope: measures angular velocity. 
 \end{itemize}
 
-Let
+Let the tilt estimate from the accelerometer be: 
 \[
 \theta_{\text{acc}}(t)
 \]
-be the tilt estimate from the accelerometer and
+For the angular velocity from the gyroscope: 
 \[
 \dot{\theta}_{\text{gyro}}(t)
 \]
-be the angular velocity from the gyroscope.
 
-A simple discrete-time complementary filter with sample period \(\Delta t\) is
+We consider a discrete-time complementary filter for the tilt estimate, with sample period \( \Delta t \) as
 \[
 \theta_{k}^{\text{est}} = \alpha \left( \theta_{k-1}^{\text{est}} + \dot{\theta}_{k}^{\text{gyro}} \Delta t \right)
 + (1-\alpha)\,\theta_{k}^{\text{acc}}
@@ -96,8 +100,8 @@ with \(0 < \alpha < 1\)
 
 Here:
 \begin{itemize}
-  \item The gyroscope term \(\theta_{k-1}^{\text{est}} + \dot{\theta}_{k}^{\text{gyro}} \Delta t\) is a high-pass path (good at short-term changes, but drifts).
-  \item The accelerometer term \(\theta_{k}^{\text{acc}}\) is a low-pass path (no long-term drift, but noisy under acceleration).
+  \item The gyroscope term \( ( \theta_{k-1}^{\text{est}} + \dot{\theta}_{k}^{\text{gyro}} \Delta t ) \) is a high-pass path i.e. good at short-term changes, but drifts due to bias.
+  \item The accelerometer term \(\theta_{k}^{\text{acc}}\) is a low-pass path i.e. no long-term drift, but noisy under linear acceleration.
 \end{itemize}
 
 \section{PID Balance Control}
@@ -108,18 +112,26 @@ e(t) = \theta_{\text{ref}} - \theta_{\text{est}}(t)
 \]
 where \(\theta_{\text{ref}} = 0\) is upright.
 
-A continuous-time PID controller is
+
+A continuous-time PID controller is defined as
 \[
 u(t) = K_P e(t) + K_I \int_0^t e(\tau)\,d\tau + K_D \frac{d e(t)}{dt}
 \]
+where
+\begin{itemize}
+  \item \(K_P\) is the proportional gain.
+  \item \(K_I\) is the integral gain.
+  \item \(K_D\) is the derivative gain.
+\end{itemize}
 
 In discrete time with time step \(\Delta t\) and samples indexed by \(k\),
 \begin{align*}
-e_k &= \theta_{\text{ref}} - \theta_{\text{est},k}, \\
-I_k &= I_{k-1} + e_k \Delta t, \\
+e_k &= \theta_{\text{ref}} - \theta_{\text{est},k} \\
+I_k &= I_{k-1} + e_k \Delta t \\
 D_k &= \frac{e_k - e_{k-1}}{\Delta t}
 \end{align*}
-and the control command is
+
+The control command is: 
 \[
 u_k = K_P e_k + K_I I_k + K_D D_k
 \]
