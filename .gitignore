@@ -1,8 +1,7 @@
-# .gitignore
-
 # OS-Specific Files
 .DS_Store
 Thumbs.db
+__MACOSX/
 
 # Python
 __pycache__/
@@ -19,8 +18,22 @@ __pycache__/
 *.ipynb_save
 .notebook_autosave/
 
-# LaTeX
-.synctex.gz
+# LaTeX Build Artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
+*.pdfsync
+*.nav
+*.snm
+*.vrb
+*.lof
+*.lot
 
 # Environment / Build
 .env
@@ -41,7 +54,6 @@ anaconda_projects/
 *.sublime-project
 
 # Temporary / Cache
-__MACOSX/
 .cache/
 .temp/
 *.tmp
@@ -67,6 +79,5 @@ checkpoints/
 results/
 outputs/
 
-# OS / Repo Meta
-*.~*
-*.bak
+# Misc
+*~
