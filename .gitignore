@@ -44,8 +44,6 @@ env/
 *.venv
 anaconda_projects/
 *.conda
-*.yaml
-*.yml
 
 # Editor / IDE
 .vscode/
