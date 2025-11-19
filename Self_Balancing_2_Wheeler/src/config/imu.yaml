@@ -1,0 +1,69 @@
+# src/config/imu.yaml
+
+# -- Registers and I2C Settings ---
+# I2C bus index on Raspberry Pi
+i2c_bus: 1
+# Device I2C address for ICM-20948
+i2c_address: 0x68
+# Bank selector register (BANK_SEL)
+reg_bank_sel: 0x7F
+# Bank containing accel/gyro output registers
+sensor_values_bank: 0
+# Bank containing configuration registers
+sensor_config_bank: 2
+
+# --- Sensor Output Register Map (Bank 0) ---
+# Accelerometer output registers: signed 16-bit angular-rate value split into: High byte (H) & Low byte (L)
+accel_registers:
+  x_h: 0x2D
+  x_l: 0x2E
+  y_h: 0x2F
+  y_l: 0x30
+  z_h: 0x31
+  z_l: 0x32
+# Gyroscope output registers: signed 16-bit angular-rate value split into: High byte (H) & Low byte (L)
+gyro_registers:
+  x_h: 0x33
+  x_l: 0x34
+  y_h: 0x35
+  y_l: 0x36
+  z_h: 0x37
+  z_l: 0x38
+
+# --- Sensor Configuration ---
+# Desired low-pass filter cutoff for both gyro + accel
+dlpf_cutoff_hz: 41
+# Desired IMU sampling rate. Used later for SMPLRT_DIV
+sample_rate_hz: 200
+
+# --- Gyroscope Configuration (Bank 2) ---
+# Register address for GYRO_CONFIG_1
+gyro_cfg_address: 0x01
+# Gyro configuration bitfields
+gyro_configs:
+  # Full-scale range: 1 is +/-500 dps (degrees per second) 
+  fs_sel: 1
+  # Digital low-pass filter selection. # DLPF_CFG bits: 0 is ~246, 1 is ~246, 2 is ~111, 3 is ~50, 4 is ~24, 5 is ~12, 6 is ~6, 7 is ~473Hz BW
+  dlpf_cfg: 3
+  # 1=enable DLPF, 0=bypass
+  fchoice: 1
+
+# --- Accelerometer Configuration (Bank 2)---
+# Register address for ACCEL_CONFIG
+accel_cfg_address: 0x14
+# Accelerometer configuration bitfields
+accel_configs:
+  # Full-scale range: 1 is +/- 4g
+  fs_sel: 1
+  # Digital low-pass filter selection. DLPF_CFG bits: 0 is ~246, 1 is ~246, 2 is ~111, 3 is ~50, 4 is ~24, 5 is ~12, 6 is ~6, 7 is ~473Hz BW
+  dlpf_cfg: 3
+  # 1=enable DLPF, 0=bypass
+  fchoice: 1
+
+# --- Axis Mapping ---
+axis_map:
+  pitch: x 
+  roll: y
+  yaw: z
+  invert_pitch: False
+
