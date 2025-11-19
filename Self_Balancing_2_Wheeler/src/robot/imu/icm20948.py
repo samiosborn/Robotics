@@ -1,6 +1,7 @@
 # src/robot/imu/icm20948.py
 import math
 import yaml
+import time
 import smbus2
 
 class ICM20948:
@@ -124,53 +125,103 @@ class ICM20948:
             self._pack_accel_config()
         )
 
+    # --- Methods to Read Accel / Gyro ---
+    # Read IMU registers
+    def _read_sensor_registers(self, registers): 
+        return {
+        "x_h": self._read_register(registers["x_h"]),
+        "x_l": self._read_register(registers["x_l"]),
+        "y_h": self._read_register(registers["y_h"]),
+        "y_l": self._read_register(registers["y_l"]),
+        "z_h": self._read_register(registers["z_h"]),
+        "z_l": self._read_register(registers["z_l"]),
+        }
+    # Combine high and low bits and sign-extend
+    def _combine_h_l_as_signed(self, high_byte, low_byte):
+        # Combine high and low bytes
+        combined = (high_byte <<8 | low_byte)
+        # If bit 15 is 1, then it's actually negative
+        if combined & 0x8000:
+            # Sign-extend
+            combined = combined - 0x10000
+        return combined
+    # Combine all axis H/L pairs in a register dictionary
+    def _combine_axis_dict(self, raw_dict_h_l):
+        return {
+            "x": self._combine_h_l_as_signed(raw_dict_h_l["x_h"], raw_dict_h_l["x_l"]),
+            "y": self._combine_h_l_as_signed(raw_dict_h_l["y_h"], raw_dict_h_l["y_l"]),
+            "z": self._combine_h_l_as_signed(raw_dict_h_l["z_h"], raw_dict_h_l["z_l"]),
+        }
+    # Apply sensitivity to dict
+    def _sensitivity_for_dict(self, raw_dict, sensitivity): 
+        return {
+            "x": raw_dict["x"] / sensitivity,
+            "y": raw_dict["y"] / sensitivity,
+            "z": raw_dict["z"] / sensitivity,
+        }
+    # Apply scale factor to dict
+    def _apply_scale_factor(self, sensitised_dict, scale_factor):
+        return {
+            "x": sensitised_dict["x"] * scale_factor,
+            "y": sensitised_dict["y"] * scale_factor,
+            "z": sensitised_dict["z"] * scale_factor,
+        }
+    # Unbias dict
+    def _unbias_dict(self, biased_dict, bias): 
+        return {
+            "x": biased_dict["x"] - bias[0],
+            "y": biased_dict["y"] - bias[1],
+            "z": biased_dict["z"] - bias[2],
+        }
+    # Axis remapping for dict
+    def _axis_remapping(self, unbiased_dict):
+        # Dict indexing
+        mapped = {
+            "pitch": unbiased_dict[self._axis_map["pitch"]],
+            "roll": unbiased_dict[self._axis_map["roll"]], 
+            "yaw": unbiased_dict[self._axis_map["yaw"]],  
+        }
+        # Pitch inversion
+        if self._axis_map.get("invert_pitch", False): 
+            mapped["pitch"] = -mapped["pitch"]
+        return mapped
+
     # --- Public API ---
     # Read IMU
     def read(self):
+        # Switch to correct bank for sensor values
+        self._set_bank(self._sensor_values_bank)
         # Read raw accel and gyro
-        self.bank = self._sensor_values_bank
-        accel_raw_separate = {
-        "x_h": self._read_register(self._accel_registers["x_h"]),
-        "x_l": self._read_register(self._accel_registers["x_l"]),
-        "y_h": self._read_register(self._accel_registers["y_h"]),
-        "y_l": self._read_register(self._accel_registers["y_l"]),
-        "z_h": self._read_register(self._accel_registers["z_h"]),
-        "z_l": self._read_register(self._accel_registers["z_l"]),
-        }
-        gyro_raw_separate = {
-        "x_h": self._read_register(self._gyro_registers["x_h"]),
-        "x_l": self._read_register(self._gyro_registers["x_l"]),
-        "y_h": self._read_register(self._gyro_registers["y_h"]),
-        "y_l": self._read_register(self._gyro_registers["y_l"]),
-        "z_h": self._read_register(self._gyro_registers["z_h"]),
-        "z_l": self._read_register(self._accel_registers["z_l"]),
-        }
-        # Combine high and low bytes
-        accel_raw = [
-            "ax": (accel_raw_separate["x_h"]) <<8 | (accel_raw_separate["x_l"]), 
-            "ay": (accel_raw_separate["y_h"]) <<8 | (accel_raw_separate["y_l"]), 
-            "az": (accel_raw_separate["z_h"]) <<8 | (accel_raw_separate["z_l"]),  
-        ]
-        gyro_raw = {
-            "gx": (gyro_raw_separate["x_h"]) <<8 | (gyro_raw_separate["x_l"]), 
-            "gy": (gyro_raw_separate["y_h"]) <<8 | (gyro_raw_separate["y_l"]), 
-            "gz": (gyro_raw_separate["z_h"]) <<8 | (gyro_raw_separate["z_l"]),  
-        }
-        # Sign-extend
+        accel_raw_separate = self._read_sensor_registers(self._accel_registers)
+        gyro_raw_separate = self._read_sensor_registers(self._gyro_registers)
+        # Combine high and low bytes into signed 16-bit values
+        accel_raw = self._combine_axis_dict(accel_raw_separate)
+        gyro_raw  = self._combine_axis_dict(gyro_raw_separate)
         # Convert to SI units
-
-        acc_g = raw_accel / self._accel_sens
-        acc_ms2 = acc_g * self._gravity
-
-        gyro_dps = raw_gyro / self._gyro_sens
-        gyro_rad_s = gyro_dps * math.pi / 180.0
+        acc_g = self._sensitivity_for_dict(accel_raw, self._accel_sens)
+        acc_ms2 = self._apply_scale_factor(acc_g, self._gravity)
+        gyro_dps = self._sensitivity_for_dict(gyro_raw, self._gyro_sens)
+        gyro_rad_s = self._apply_scale_factor(gyro_dps, math.pi / 180.0)
         # Subtract bias
-        # Apply axis remapping     
+        unbiased_acc_ms2 = self._unbias_dict(acc_ms2, self._bias_accel)
+        unbiased_gyro_rad_s = self._unbias_dict(gyro_rad_s, self._bias_gyro)
+        # Apply axis remapping
+        accel = self._axis_remapping(unbiased_acc_ms2)
+        gyro = self._axis_remapping(unbiased_gyro_rad_s)
+        # Timestamp
+        timestamp = time.time()
         # Return dict: "accel", "gyro", "timestamp"
-        pass
+        return {
+            "accel": accel,
+            "gyro": gyro,
+            "timestamp": timestamp,
+        }
+
     # Calibrate IMU
     def calibrate(self, num_calib_samples):
         # Read IMU in SI
         # Average Error
+        "self._bias_accel = [bx, by, bz] self._bias_gyro  = [gx, gy, gz]
+        "
         # Set Bias for Accel and Gyro
         pass
