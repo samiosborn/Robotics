@@ -166,7 +166,7 @@ class ICM20948:
             "y": sensitised_dict["y"] * scale_factor,
             "z": sensitised_dict["z"] * scale_factor,
         }
-    # Unbias dict
+    # Unbias a dict of readings
     def _unbias_dict(self, biased_dict, bias): 
         return {
             "x": biased_dict["x"] - bias[0],
@@ -185,10 +185,8 @@ class ICM20948:
         if self._axis_map.get("invert_pitch", False): 
             mapped["pitch"] = -mapped["pitch"]
         return mapped
-
-    # --- Public API ---
-    # Read IMU
-    def read(self):
+    # Private read SI units method (before bias removal)
+    def _read_raw_si(self): 
         # Switch to correct bank for sensor values
         self._set_bank(self._sensor_values_bank)
         # Read raw accel and gyro
@@ -202,6 +200,18 @@ class ICM20948:
         acc_ms2 = self._apply_scale_factor(acc_g, self._gravity)
         gyro_dps = self._sensitivity_for_dict(gyro_raw, self._gyro_sens)
         gyro_rad_s = self._apply_scale_factor(gyro_dps, math.pi / 180.0)
+        return {
+            "accel": acc_ms2, 
+            "gyro": gyro_rad_s,  
+        }
+
+    # --- Public API ---
+    # Read IMU
+    def read(self):
+        # Biased SI units read 
+        biased_read = self._read_raw_si()
+        acc_ms2 = biased_read["accel"]
+        gyro_rad_s = biased_read["gyro"]
         # Subtract bias
         unbiased_acc_ms2 = self._unbias_dict(acc_ms2, self._bias_accel)
         unbiased_gyro_rad_s = self._unbias_dict(gyro_rad_s, self._bias_gyro)
@@ -210,18 +220,46 @@ class ICM20948:
         gyro = self._axis_remapping(unbiased_gyro_rad_s)
         # Timestamp
         timestamp = time.time()
-        # Return dict: "accel", "gyro", "timestamp"
         return {
             "accel": accel,
             "gyro": gyro,
             "timestamp": timestamp,
         }
-
     # Calibrate IMU
     def calibrate(self, num_calib_samples):
-        # Read IMU in SI
+        # Initialise
+        ax_bias = ay_bias = az_bias = 0.0
+        gx_bias = gy_bias = gz_bias = 0.0
+        # Loop
+        for _ in range(num_calib_samples):
+            # Read IMU in SI
+            new_reading = self._read_raw_si()
+            acc = new_reading["accel"]
+            gyro = new_reading["gyro"]
+            # Sum Error
+            ax_bias += acc["x"]
+            ay_bias += acc["y"]
+            az_bias += acc["z"]
+            gx_bias += gyro["x"]
+            gy_bias += gyro["y"]
+            gz_bias += gyro["z"]
+            # Wait (max 500Hz)
+            time.sleep(0.002)
         # Average Error
-        "self._bias_accel = [bx, by, bz] self._bias_gyro  = [gx, gy, gz]
-        "
-        # Set Bias for Accel and Gyro
-        pass
+        ax_avg = ax_bias / num_calib_samples
+        ay_avg = ay_bias / num_calib_samples
+        az_avg = az_bias / num_calib_samples
+        gx_avg = gx_bias / num_calib_samples
+        gy_avg = gy_bias / num_calib_samples
+        gz_avg = gz_bias / num_calib_samples
+        # Gyro bias
+        self._bias_gyro = [gx_avg, gy_avg, gz_avg]
+        # Expected acceleration vector when upright (m/s^2)
+        expected_acc = [0.0, 0.0, self._gravity]
+        # Accel bias considering calibration offsets
+        self._bias_accel = [
+            ax_avg - expected_acc[0],
+            ay_avg - expected_acc[1],
+            az_avg - expected_acc[2],
+        ]
+        return True
