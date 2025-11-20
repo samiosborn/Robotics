@@ -1,0 +1,234 @@
+% 02_imu_orientation_estimation.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{physics}
+\usepackage{bm}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{enumitem}
+\author{Sami Osborn}
+
+\setlength{\parindent}{0pt}
+\geometry{margin=1in}
+
+\title{IMU Orientation Estimation for Self-Balancing Robots}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ====
+\section{Introduction}
+% ====
+
+A self-balancing two-wheel robot must estimate its tilt angle: \( \theta(t) \)
+
+An IMU (such as the InvenSense ICM-20948) provides:
+\begin{itemize}
+    \item 3-axis accelerometer $\mathbf{a} = (a_x,a_y,a_z)$
+    \item 3-axis gyroscope $\bm{\omega} = (\omega_x,\omega_y,\omega_z)$
+    \item 3-axis magnetometer (unused here)
+\end{itemize}
+
+% ====
+\section{Coordinate Frames (Robot vs IMU)}
+% ====
+
+We adopt the robot frame:
+\[
+\begin{array}{ccl}
++x & = & \text{forward (towards the wheels)} \\
++y & = & \text{left} \\
++z & = & \text{up}
+\end{array}
+\]
+
+Pitch is rotation about the $+y$ axis:
+\[
+\theta(t) = \text{rotation about } +y
+\]
+Forward lean corresponds to $\theta \geq 0$
+
+\subsection*{ICM-20948 Native Axes}
+From the specification sheet:
+\[
+\begin{array}{ccl}
+\text{IMU: } +X &=& \text{right} \\
+\text{IMU: } +Y &=& \text{forward} \\
+\text{IMU: } +Z &=& \text{up}
+\end{array}
+\]
+
+\subsection*{Required Mapping (IMU to Robot frame)}
+
+To convert IMU readings into robot coordinates:
+\[
+\begin{aligned}
+a_x^{(R)} &= +a_Y^{(IMU)} \\
+a_y^{(R)} &= -a_X^{(IMU)} \\
+a_z^{(R)} &= +a_Z^{(IMU)}
+\end{aligned}
+\]
+
+Same mapping applies to gyro:
+\[
+\omega_x^{(R)},\ \omega_y^{(R)},\ \omega_z^{(R)}
+\]
+
+Thus pitch rate is:
+\[
+\omega(t) = \omega_y^{(R)}
+\]
+
+% ====
+\section{Accelerometer-Based Tilt Estimation}
+% ====
+
+When the robot is still, the accelerometer measures gravity (in robot frame):
+\[
+\mathbf{a}^{(R)} \approx \begin{bmatrix}0\\0\\-g\end{bmatrix}
+\]
+
+A pitch rotation $\theta$ about $+y$ gives:
+\[
+R_{BW}(\theta) =
+\begin{bmatrix}
+\cos\theta & 0 & \sin\theta \\
+0 & 1 & 0 \\
+-\sin\theta & 0 & \cos\theta
+\end{bmatrix}
+\]
+
+Gravity expressed in robot coordinates:
+\[
+\begin{bmatrix}
+a_x \\ a_y \\ a_z
+\end{bmatrix}
+= 
+R_{BW}(\theta)
+\begin{bmatrix}
+0 \\ 0 \\ -g
+\end{bmatrix}
+=
+\begin{bmatrix}
+g \sin\theta \\
+0 \\
+- g \cos\theta
+\end{bmatrix}
+\]
+
+Thus:
+\[
+a_x = g\sin\theta, \qquad
+a_z = -g\cos\theta
+\]
+
+A naive tilt estimate:
+\[
+\theta_{\text{acc}} = \arctan\!\left(\frac{-a_x}{a_z}\right)
+\]
+
+We instead use the numerically stable:
+\[
+\boxed{
+\theta_{\text{acc}} = \arctan2(-a_x,\ a_z)
+}
+\]
+
+% ====
+\section{Gyroscope-Based Tilt Estimation}
+% ====
+
+The gyro measures instantaneous angular velocity. 
+
+
+After axis mapping:
+\[
+\omega(t) = \omega_y^{(R)}
+\]
+
+Gyro-only integration:
+\[
+\theta_{\text{gyro,int}}(t)
+=
+\theta_{\text{gyro,int}}(t-\Delta t)
++
+\omega(t)\Delta t
+\]
+
+\textbf{Advantages:}
+\begin{itemize}
+    \item Smooth, fast response
+    \item Immune to linear acceleration
+\end{itemize}
+
+\textbf{Drawback:}
+\begin{itemize}
+    \item Bias drift causes angle drift
+\end{itemize}
+
+% ====
+\section{The Complementary Filter}
+% ====
+
+We fuse the two estimates:
+
+\[
+\boxed{
+\theta_k^{\text{est}}
+=
+\alpha\big(\theta_{k-1}^{\text{est}} + \omega_k \Delta t\big)
++
+(1-\alpha)\,\theta_{\text{acc},k}
+}
+\]
+
+\begin{itemize}
+    \item $\theta_{\text{acc}}$ corrects long-term drift
+    \item gyro integration gives short-term accuracy
+    \item $\alpha$ typically lies between $0.95$ and $0.99$
+\end{itemize}
+
+This is equivalent to applying a high-pass filter to the gyro and a low-pass filter to accelerometer. 
+
+% ====
+\section{Gyro Bias and Noise}
+% ====
+
+MEMS gyros (like the ICM-20948) exhibit:
+\begin{itemize}
+    \item constant bias $b$
+    \item temperature drift
+    \item random noise
+\end{itemize}
+
+Measured:
+\[
+\omega^{\text{meas}} = \dot{\theta} + b + n(t)
+\]
+
+Bias accumulates in integration:
+\[
+\int_0^t b \, d\tau = bt
+\]
+
+This is why accelerometer bias correction is critical.
+
+% ====
+\section{Angle Estimation Pipeline}
+% ====
+
+Each control cycle performs:
+
+\begin{enumerate}
+    \item IMU read $\rightarrow$ accel and gyro.
+    \item Apply axis remapping (IMU to robot frame).
+    \item Compute $\theta_{\text{acc}}$
+    \item Integrate gyro to get $\theta_{\text{gyro}}$
+    \item Fuse with complementary filter.
+    \item Output: $\theta^{\text{est}}$ and $\omega$
+\end{enumerate}
+
+\end{document}
