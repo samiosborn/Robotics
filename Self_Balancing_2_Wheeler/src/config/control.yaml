@@ -1,0 +1,25 @@
+# src/config/control.yaml
+
+# --- Complementary Filter ---
+# Fusion coefficient alpha
+alpha: 0.975
+
+# --- PID ---
+# Derivative low-pass filter coefficient
+beta: 0.75
+# Proportional gain
+kp: 1.0
+# Integral gain
+ki: 0.05
+# Derivative gain
+kd: 0.01
+# Intregral limits
+integral_limits: {
+  "max": 0.5,
+  "min": -0.5,
+}
+# Output limits
+output_limits: {
+  "max": 1.0,
+  "min": -1.0,
+}
