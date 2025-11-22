@@ -1,0 +1,222 @@
+% 03_encoder_velocity_estimation.tex
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{physics}
+\usepackage{bm}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usepackage{enumitem}
+\author{Sami Osborn}
+\geometry{margin=1in}
+\setlist[itemize]{leftmargin=*}
+
+
+\title{Encoder Velocity Estimation for DC Gear Motors in Self-Balancing Robots}
+\date{November 2025}
+
+\begin{document}
+\maketitle
+
+% ====
+\section{Introduction}
+% ====
+
+A self-balancing robot requires accurate estimation of wheel angular and linear velocities.  
+To obtain this information, the robot uses brushed DC motors equipped with quadrature encoders mounted on the motor shaft.  
+
+Key characteristics:
+\begin{itemize}
+    \item Two channels \( A \) and \( B \), phase--shifted by 90\(^\circ\)
+    \item Approximately \( 11 \) pulses per motor--shaft revolution per channel
+    \item Full quadrature decoding gives \( 4 \times 11 = 44 \) counts per motor--shaft revolution
+    \item Gearbox ratio scales counts per wheel revolution
+\end{itemize}
+
+This notebook derives the equations needed to convert encoder transitions into:
+\begin{enumerate}
+    \item wheel angular velocity \( \dot{\phi} \)
+    \item wheel linear velocity \( v \)
+    \item filtered velocity for use in a cascade control loop
+\end{enumerate}
+
+% ====
+\section{Quadrature Encoders}
+% ====
+
+A quadrature encoder outputs digital signals:
+\[
+A(t),\quad B(t)
+\]
+
+The pair moves through four possible states:
+\[
+00,\ 01,\ 11,\ 10
+\]
+
+Direction is inferred from valid state transitions:
+\[
+A \text{ leads } B \Rightarrow \text{forward} \qquad
+B \text{ leads } A \Rightarrow \text{reverse}
+\]
+
+Each transition (rising or falling) corresponds to one count increment or decrement.
+
+\subsection*{Counts per motor--shaft revolution}
+
+Let
+\[
+N_{\text{enc}} = 11
+\]
+be pulses per channel.  
+
+Full quadrature decoding gives:
+\[
+N_{\text{counts}} = 4 N_{\text{enc}}
+\]
+
+For typical motors:
+\[
+N_{\text{counts}} = 44
+\]
+
+% ====
+\section{Gear Ratio and Wheel Counts}
+% ====
+
+Let the gear ratio be
+\[
+G = \frac{\text{motor shaft rev}}{\text{wheel shaft rev}}
+\]
+
+Then the number of encoder counts per \emph{wheel} revolution is
+\[
+N_{\text{wheel}} = G N_{\text{counts}}
+\]
+
+This value determines measurement resolution and influences noise characteristics.
+
+% ====
+\section{Angular Velocity Estimation}
+% ====
+
+Encoders deliver discrete timestamps, not continuous motion.  
+Let the most recent \( N \) timestamps be collected in a buffer:
+\[
+t_0,\ t_1,\ \dots,\ t_{N-1}
+\]
+
+These correspond to \( N \) encoder edges, meaning there are \( N-1 \) intervals.
+
+\subsection*{Counts per second}
+
+\[
+\text{counts\_per\_sec} = \frac{N - 1}{t_{N-1} - t_0}
+\]
+
+\subsection*{Angular velocity}
+
+Each count represents an angular increment:
+\[
+\Delta \phi = \frac{2\pi}{N_{\text{wheel}}}
+\]
+
+Thus wheel angular velocity is
+\[
+\dot{\phi} = \text{counts\_per\_sec} \cdot \frac{2\pi}{N_{\text{wheel}}}
+\]
+
+Direction is encoded by the sign of each count transition.  
+The velocity expression accommodates this automatically.
+
+% ====
+\section{Linear Velocity}
+% ====
+
+Let wheel radius be \( r \).  
+Linear velocity follows directly from rigid--body kinematics:
+\[
+v = r \dot{\phi}
+\]
+
+Substituting the expression above,
+\[
+v = r\ \text{counts\_per\_sec}\ \frac{2\pi}{N_{\text{wheel}}}
+\]
+
+Left and right wheel velocities:
+\[
+v_L,\quad v_R
+\]
+
+Robot forward velocity:
+\[
+v = \frac{v_L + v_R}{2}
+\]
+
+Robot yaw rate (differential drive model):
+\[
+\omega_z = \frac{v_R - v_L}{d}
+\]
+where \( d \) is track width.
+
+% ====
+\section{Velocity Filtering}
+% ====
+
+Raw velocity computed from timestamp spacing is noisy due to:
+\begin{itemize}
+    \item quantisation (discrete counts)
+    \item irregular motor torque ripple
+    \item electrical noise
+\end{itemize}
+
+Thus we apply an exponential moving average (EMA):
+\[
+v_k^{\text{filt}} = 
+\alpha v_k + (1 - \alpha)\, v_{k-1}^{\text{filt}}
+\]
+
+with \( \alpha \in (0,1) \), often between \( 0.3 \) and \( 0.6 \) for balancing robots.
+
+This filtering stabilises the outer velocity-control loop.
+
+% ====
+\section{Interrupt-Based Measurement}
+% ====
+
+On embedded Linux, encoder edges are captured using GPIO interrupts.  
+Each interrupt:
+\begin{enumerate}
+    \item reads the current \( A,B \) state
+    \item updates the signed encoder count
+    \item appends a timestamp to the buffer
+    \item updates the filtered velocity
+\end{enumerate}
+
+This method produces high temporal resolution and avoids the drift of fixed-time polling.
+
+% ====
+\section{Cascade Control Context}
+% ====
+
+The encoder velocity estimate feeds the outer loop of the cascade controller:
+
+\[
+v_{\text{ref}}
+\longrightarrow
+\boxed{\text{Velocity PID}}
+\longrightarrow
+\theta_{\text{ref}}
+\longrightarrow
+\boxed{\text{Balance PID}}
+\longrightarrow
+u(t)
+\]
+
+The inner loop stabilises the lean angle.  
+The outer loop regulates forward/backward motion using encoder-based linear velocity.
+
+\end{document}
