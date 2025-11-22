@@ -1,0 +1,32 @@
+# src/config/motors.yaml
+
+# --- Motor Encoder ---
+# Pulses per revolution (per channel)
+encoder_ppr_channel: 11
+# Pin layout (BCM naming)
+motor_encoder_pins: 
+  left: 
+    # GPIO
+    channel_a: 17
+    # GPIO
+    channel_b: 27
+  right: 
+    # GPIO
+    channel_a: 23
+    # GPIO
+    channel_b: 24
+
+# --- Gearbox ---
+# Motor shaft turns per wheel shaft turns
+gear_ratio: 18.75
+
+# --- Wheels ---
+# Wheel diameter (m)
+wheel_diameter_m: 0.065
+# Wheel 
+
+# --- Velocity Estimation ---
+# Length tick timestamp buffer 
+length_tick_buffer: 20
+# Velocity low-pass filter coefficient alpha
+alpha: 0.4
