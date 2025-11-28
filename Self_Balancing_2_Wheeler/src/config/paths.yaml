@@ -1,0 +1,10 @@
+# src/config/paths.yaml
+
+# === CONTROL CONFIGS ===
+control_config: "src/config/control.yaml"
+
+# === IMU CONFIGS ===
+imu_config: "src/config/imu.yaml"
+
+# === MOTOR DRIVER & ENCODER CONFIGS ===
+motor_config: "src/config/motors.yaml"
