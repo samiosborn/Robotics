@@ -9,7 +9,7 @@ class Encoder():
     def __init__(self, motor_yaml_config_path):
         # Import YAML config
         with open(motor_yaml_config_path, 'r') as f: 
-            cfg = yaml.safe_load(f)
+            cfg = yaml.safe_load(f)["encoder"]
         
         # --- Load from YAML ---
         # Pulses per revolution (per channel)
@@ -213,4 +213,3 @@ class Encoder():
         GPIO.remove_event_detect(self._left_b_pin)
         GPIO.remove_event_detect(self._right_a_pin)
         GPIO.remove_event_detect(self._right_b_pin)
-
