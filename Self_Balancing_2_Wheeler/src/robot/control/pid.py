@@ -5,7 +5,7 @@ class PID():
     def __init__(self, control_yaml_config_path):
         # Import YAML config
         with open(control_yaml_config_path, 'r') as f: 
-            cfg = yaml.safe_load(f)
+            cfg = yaml.safe_load(f)["pid"]
 
         # --- Class Variables ---
         # Derivative low-pass filter coefficient
@@ -24,13 +24,11 @@ class PID():
         # --- Instance Variables ---
         # Error (previous)
         self._prev_error = 0.0
-        # Derivative (previous)
-        self._prev_derivative = 0.0
         # Integral
         self._integral = 0.0
 
     # --- Private Methods ---
-    # Clamp to liitss
+    # Clamp to limits
     def _clamp(self, value, limits):
         return max(limits["min"], min(value, limits["max"]))
 
@@ -39,30 +37,22 @@ class PID():
     def reset(self):
         # Error (previous)
         self._prev_error = 0.0
-        # Derivative (previous)
-        self._prev_derivative = 0.0
         # Integral
         self._integral = 0.0
     # Update
-    def update(self, error, dt):
+    def update(self, theta_error, theta_dot, dt):
         # Proportional component
-        P = error * self._kp
+        P = theta_error * self._kp
         # Integral 
-        self._integral += error * dt
+        self._integral += theta_error * dt
         # Anti-windup clamp
         self._integral = self._clamp(self._integral, self._integral_limits)
         # Integral component
         I = self._integral * self._ki
-        # Filtered derivative
-        if dt <= 0:
-            dt = 1e-6
-        raw_derivative = (error - self._prev_error) / dt
-        filtered_derivative = self._beta * self._prev_derivative + (1 - self._beta) * raw_derivative
         # Derivative component
-        D = filtered_derivative * self._kd
+        D = -theta_dot * self._kd
         # Store previous terms
-        self._prev_error = error
-        self._prev_derivative = filtered_derivative
+        self._prev_error = theta_error
         # Combine
         u = P + I + D
         # Clip output
