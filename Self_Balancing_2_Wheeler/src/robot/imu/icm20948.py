@@ -5,12 +5,12 @@ import time
 import smbus2
 
 class ICM20948:
-    def __init__(self, yaml_config_path):
+    def __init__(self, imu_yaml_config_path):
         # --- Import Configs ---
         # Import constants
         import src.config.imu_constants as constants
         # Load YAML Config
-        with open(yaml_config_path, 'r') as f:
+        with open(imu_yaml_config_path, 'r') as f:
             cfg = yaml.safe_load(f)
 
         # --- Class Variables ---
@@ -177,8 +177,8 @@ class ICM20948:
     def _axis_remapping(self, unbiased_dict):
         # Dict indexing
         mapped = {
-            "pitch": unbiased_dict[self._axis_map["pitch"]],
             "roll": unbiased_dict[self._axis_map["roll"]], 
+            "pitch": unbiased_dict[self._axis_map["pitch"]],
             "yaw": unbiased_dict[self._axis_map["yaw"]],  
         }
         # Pitch inversion
@@ -262,4 +262,4 @@ class ICM20948:
             ay_avg - expected_acc[1],
             az_avg - expected_acc[2],
         ]
-        return True
+        pass
