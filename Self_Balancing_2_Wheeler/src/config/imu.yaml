@@ -62,8 +62,7 @@ accel_configs:
 
 # --- Axis Mapping ---
 axis_map:
-  pitch: x 
   roll: y
+  pitch: x
   yaw: z
   invert_pitch: False
-
