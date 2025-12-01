@@ -1,0 +1,371 @@
+% 03_camera_motion_model.tex
+\documentclass[11pt,a4paper]{article}
+
+\input{preamble.tex}
+\title{Camera Motion Model}
+\author{Sami Osborn}
+\date{}
+
+\begin{document}
+\maketitle
+
+% ===
+\section{Purpose of the Motion Model}
+% ===
+
+We model the camera as a rigid body with position \( r_t \), velocity \( v_t \), and orientation \( q_t \).
+
+The state is:
+\[
+x_t =
+\begin{bmatrix}
+r_t \\[1mm]
+v_t \\[1mm]
+q_t
+\end{bmatrix},
+\qquad
+r_t,v_t \in \mathbb{R}^3,\;\; q_t \in \mathbb{H},\; \|q_t\| = 1
+\]
+
+Where for any point \(p_C\) expressed in camera coordinates, its world coordinates are
+\[
+p_W = r_t + R(q_t) p_C
+\]
+
+Here, \(R(q_t) \in SO(3)\) is the rotation matrix associated with \(q_t\).
+
+We assume the camera moves with approximately constant velocity and constant angular velocity over each small time interval.
+
+% ===
+\section{Continuous-Time Dynamics}
+% ===
+
+Let \( \omega_t \in \mathbb{R}^3 \) denote the angular velocity expressed in the camera frame.
+Let \( g \in \mathbb{R}^3 \) be the gravity vector expressed in the world frame.
+
+The first derivative equations are
+\begin{align}
+\dot r_t &= v_t, \label{eq:r_dot}\\[1mm]
+\dot v_t &= R(q_t) g + w_a(t), \label{eq:v_dot}\\[1mm]
+\dot{q}_t &= \tfrac{1}{2} \Omega(\omega_t) q_t + w_\omega(t) \label{eq:q_dot}
+\end{align}
+
+Where
+\[
+\Omega(\omega) =
+\begin{bmatrix}
+0 & -\omega^\top \\
+\omega & -[\omega]_\times
+\end{bmatrix}
+\]
+
+Process noises \( w_a(t), w_\omega(t) \) are assumed white Gaussian.
+
+% ---
+\subsection*{Proof of the Quaternion Kinematic Equation}
+% ---
+
+Let a vector \(p_C\) in the camera frame be expressed in the world frame as
+\(
+p_W(t) = R(t) p_C
+\)
+
+If the camera rotates with angular velocity \( \omega_t \) expressed in camera coordinates, then classical rigid-body kinematics state that
+\[
+\dot p_W(t) = \omega_t \times p_W(t) = [\omega_t]_\times p_W(t)
+\]
+Differentiating \(p_W(t) = R(t)p_C\) gives
+\[
+\dot p_W(t) = \dot R(t)p_C = [\omega_t]_\times R(t)p_C
+\]
+
+So
+\[
+\boxed{\;\dot R(t) = R(t)[\omega_t]_\times\;}
+\tag{1}
+\]
+
+Next, represent a unit quaternion as
+\[
+q =
+\begin{bmatrix}
+q_0 \\ \mathbf{q}
+\end{bmatrix},
+\qquad
+\|q\|=1
+\]
+A small rotation of angle \( \|\omega_t\|\Delta t \) about axis \( \hat\omega_t = \omega_t/\|\omega_t\| \) corresponds to the quaternion
+\[
+\delta q =
+\begin{bmatrix}
+1 \\[1mm] \tfrac12 \omega_t \Delta t
+\end{bmatrix}
++ \mathcal{O}(\Delta t^2)
+\]
+The quaternion update over a small interval is
+\[
+q(t+\Delta t) = \delta q \otimes q(t)
+\]
+Compute using the quaternion product formula:
+\[
+\delta q \otimes q
+=
+\begin{bmatrix}
+1 \\[1mm]
+\tfrac12 \omega\Delta t
+\end{bmatrix}
+\otimes
+\begin{bmatrix}
+q_0 \\ \mathbf{q}
+\end{bmatrix}
+=
+\begin{bmatrix}
+q_0 - \tfrac12 \omega^\top \mathbf{q}\, \Delta t \\[2mm]
+\mathbf{q} + \tfrac12 (q_0\omega + \omega\times\mathbf{q})\,\Delta t
+\end{bmatrix}
+\]
+Subtract \(q(t)\), divide by \(\Delta t\), and take \(\Delta t\to 0\):
+\[
+\dot q =
+\frac12
+\begin{bmatrix}
+0 & -\omega^\top \\
+\omega & -[\omega]_\times
+\end{bmatrix}
+= \frac{1}{2} \Omega q
+\]
+
+Thus we obtain the quaternion ODE above.
+
+% ====
+\section{Discrete-Time State Transition}
+% ====
+
+For timestep \( \Delta t \), assume velocity and angular velocity are constant on each interval.
+
+% ---
+\subsection{Position and Velocity Updates}
+% ---
+
+Since \( \dot r = v \) and \( \dot v = R(q)g \),
+\[
+v_t = v_{t-1} + R(q_{t-1}) g \,\Delta t
+\]
+and integrating velocity:
+\[
+r_t
+= r_{t-1}
++ v_{t-1}\Delta t
++ \tfrac12 R(q_{t-1}) g\, \Delta t^2
+\]
+
+% ---
+\subsection{Orientation Update}
+% ---
+
+Integrating \eqref{eq:q_dot} over \(\Delta t\) with constant \(\omega_{t-1}\) yields
+\[
+q_t
+= q_{t-1} \otimes
+\exp\!\left( \tfrac12\, \omega_{t-1}\Delta t \right)
+\]
+Where the exponential map on \(SO(3)\) is
+\[
+\exp(\phi) =
+\begin{bmatrix}
+\cos\!\left(\tfrac{\|\phi\|}{2}\right) \\[1mm]
+\frac{\phi}{\|\phi\|} \sin\!\left(\tfrac{\|\phi\|}{2}\right)
+\end{bmatrix}
+\]
+
+% ====
+\section{Linearisation and Jacobian}
+% ====
+
+Let the error-state be
+\[
+\delta x =
+\begin{bmatrix}
+\delta r \\ \delta v \\ \delta\theta
+\end{bmatrix}
+\]
+Where \(\delta\theta \in \mathbb{R}^3\) is the small rotation vector:
+\[
+q = \hat q \otimes
+\begin{bmatrix}
+1 \\ \tfrac12 \delta\theta
+\end{bmatrix}
+\]
+
+The linearised dynamics are
+\[
+\delta x_t = F_t\,\delta x_{t-1}
+\]
+
+% ---
+\subsection{Proof of Jacobian Blocks}
+% ---
+
+\paragraph{Position block}
+\[
+r_t = r_{t-1} + v_{t-1}\Delta t + \tfrac12 R(q_{t-1}) g\,\Delta t^2
+\]
+
+Clearly
+\[
+\frac{\partial r_t}{\partial r_{t-1}} = I_3,
+\qquad
+\frac{\partial r_t}{\partial v_{t-1}} = I_3\,\Delta t
+\]
+
+For the orientation dependence, use the first-order expansion
+\[
+R(q_{t-1}) \approx R(\hat q_{t-1}) (I + [\delta\theta]_\times)
+\]
+
+Multiplying by \(g\) gives
+\[
+R(q_{t-1})g
+\approx
+R(\hat q_{t-1})g
+\;+\;
+R(\hat q_{t-1}) \big([\delta\theta]_\times g\big)
+\]
+
+Since \( [\delta\theta]_\times g = \delta\theta \times g \), and using the identity
+\[
+\delta\theta \times g = -\, g \times \delta\theta = -\, [g]_\times \delta\theta,
+\]
+
+We obtain the perturbation
+\[
+\delta\!\left(R(q_{t-1})g\right)
+= -\, R(\hat q_{t-1}) [g]_\times \, \delta\theta
+\]
+
+Thus the derivative of the acceleration term is
+\[
+\frac{\partial}{\partial \delta\theta_{t-1}}
+\left(\tfrac12 R(q_{t-1}) g\, \Delta t^2\right)
+=
+\tfrac12 \Delta t^2
+\left( -\, R(q_{t-1}) [g]_\times \right)
+\]
+
+Hence
+\[
+\frac{\partial r_t}{\partial \delta\theta_{t-1}}
+= -\tfrac12 R(q_{t-1}) [g]_\times \Delta t^2
+\]
+
+\paragraph{Velocity block}
+\[
+v_t = v_{t-1} + R(q_{t-1}) g\,\Delta t
+\]
+
+Thus
+\[
+\frac{\partial v_t}{\partial v_{t-1}} = I_3,
+\qquad
+\frac{\partial v_t}{\partial r_{t-1}} = 0
+\]
+The orientation dependence follows the same expansion as above:
+\[
+\frac{\partial v_t}{\partial \delta\theta_{t-1}}
+= - R(q_{t-1}) [g]_\times \Delta t
+\]
+
+\paragraph{Orientation block}
+
+Small orientation errors evolve according to the first-order Baker-Campbell-Hausdorff (BCH) expansion of the quaternion increment
+\[
+\delta\theta_t
+= (I_3 - [\omega_{t-1}]_\times \Delta t)\,\delta\theta_{t-1}
+\]
+
+Thus
+\[
+\frac{\partial\,\delta\theta_t}{\partial\,\delta\theta_{t-1}}
+= I_3 - [\omega_{t-1}]_\times \Delta t
+\]
+
+\bigskip
+
+Combining all blocks:
+\[
+F_t =
+\begin{bmatrix}
+I_3 & I_3 \Delta t &
+-\tfrac12 R(q_{t-1})[g]_\times \Delta t^2 \\[2mm]
+0_{3\times3} & I_3 &
+-R(q_{t-1})[g]_\times \Delta t \\[2mm]
+0_{3\times3} & 0_{3\times3} &
+I_3 - [\omega_{t-1}]_\times \Delta t
+\end{bmatrix}
+\]
+
+% ====
+\section{Process Noise Propagation}
+% ====
+
+The process noise covariance \( Q_t \) models uncertainty due to unmodelled accelerations and angular velocity noise:
+\[
+w_t =
+\begin{bmatrix}
+w_a \\[1mm]
+w_\omega
+\end{bmatrix},
+\qquad
+Q_t =
+\begin{bmatrix}
+Q_a & 0 \\[1mm]
+0 & Q_\omega
+\end{bmatrix}
+\]
+
+Typical choices:
+\[
+Q_a = \sigma_a^2
+\begin{bmatrix}
+\frac{\Delta t^4}{4} I_3 & \frac{\Delta t^3}{2} I_3 \\[2mm]
+\frac{\Delta t^3}{2} I_3 & \Delta t^2 I_3
+\end{bmatrix},
+\qquad
+Q_\omega = \sigma_\omega^2 \Delta t^2 I_3
+\]
+
+The predicted covariance is then:
+\[
+P_t^- = F_t P_{t-1} F_t^\top + Q_t
+\]
+Where \( P_t^- \) is the prior covariance before incorporating observations.
+
+% ====
+\section{Manifold Formulation on SE(3)}
+% ====
+
+On the \( SE(3) \) manifold, the state can be represented as a homogeneous transform:
+\[
+T_t =
+\begin{bmatrix}
+R_t & r_t \\[1mm]
+0 & 1
+\end{bmatrix}
+\]
+The update is naturally expressed via the exponential map:
+\[
+T_t = T_{t-1} \exp\!\big( \hat{\xi}_t \big)
+\]
+Where \( \xi_t = [v_t^\top, \omega_t^\top]^\top \in \mathfrak{se}(3) \) is the twist vector, and
+\[
+\exp(\hat{\xi}_t) =
+\begin{bmatrix}
+\exp([\omega_t]_\times \Delta t) & J(\omega_t) v_t \Delta t \\[1mm]
+0 & 1
+\end{bmatrix}
+\]
+With \( J(\omega_t) \) the left Jacobian of \( SO(3) \).
+
+% ====
+\end{document}
+% ====
