@@ -1,0 +1,3 @@
+# src/config/paths.yaml
+
+constants_config: "src/config/constants.yaml"
