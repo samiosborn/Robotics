@@ -1,3 +1,4 @@
 # src/config/paths.yaml
 
 constants_config: "src/config/constants.yaml"
+ekf_config: "src/config/ekf.yaml"
