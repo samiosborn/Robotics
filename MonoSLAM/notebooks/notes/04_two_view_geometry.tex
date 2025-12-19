@@ -1,0 +1,245 @@
+% 04_two_view_geometry.tex
+\documentclass[11pt,a4paper]{article}
+
+\input{preamble.tex}
+\title{Two-View Geometry}
+
+\begin{document}
+\maketitle
+
+\section{Overview}
+
+This document develops the mathematical foundations of two-view geometry.
+
+Given two images of a static scene, our goals are:
+\begin{itemize}
+  \item Estimate the fundamental matrix
+  \item Recover the relative camera pose
+  \item Triangulate 3D points
+\end{itemize}
+
+\section{Camera Intrinsics and Extrinsics}
+
+A pinhole camera maps 3D points in the world to 2D image coordinates via a projective transformation.
+This mapping is parameterised by intrinsic and extrinsic components.
+
+\subsection{Intrinsic Matrix}
+
+The intrinsic matrix
+\(
+K \in \mathbb{R}^{3 \times 3}
+\)
+encodes the internal geometry of the camera, mapping camera-frame coordinates to pixel coordinates.
+
+It is typically written as
+\[
+K =
+\begin{bmatrix}
+f_x & s   & c_x \\
+0   & f_y & c_y \\
+0   & 0   & 1
+\end{bmatrix}
+\]
+where:
+\begin{itemize}
+  \item \(f_x, f_y\) are the focal lengths measured in pixels
+  \item \(s\) is the skew parameter (usually zero)
+  \item \((c_x, c_y)\) is the principal point
+\end{itemize}
+
+When working with normalised image coordinates, the effect of \(K\) is removed by pre-multiplying image points by \(K^{-1}\).
+
+\subsection{Rotation}
+
+The rotation matrix
+\(
+R \in SO(3)
+\)
+describes the orientation of the camera frame relative to the world frame.
+
+It satisfies the defining properties:
+\[
+R^\top R = I, \quad \det(R) = 1
+\]
+
+Geometrically, \(R\) maps vectors from the world coordinate frame into the camera coordinate frame.
+
+\subsection{Translation}
+
+The translation vector
+\(
+t \in \mathbb{R}^3
+\)
+represents the position of the camera centre expressed in the camera coordinate frame.
+
+Together with the rotation, it defines the rigid-body transformation between frames.
+
+\subsection{Camera Projection Matrix}
+
+The full camera projection matrix is \(P \in \mathbb{R}^{3 \times 4}\) given by
+\[
+P = K \,[\, R \mid t \,]
+\]
+
+A 3D point in homogeneous coordinates,
+\[
+X = (X, Y, Z, 1)^\top \in \mathbb{P}^3
+\]
+projects to an image point
+\[
+x \sim P X, \quad x \in \mathbb{P}^2
+\]
+
+\section{Two Views and Epipolar Geometry}
+
+Consider two cameras observing the same 3D point \(X\):
+\[
+x_1 \sim P_1 X, \quad x_2 \sim P_2 X
+\]
+
+The camera centres and \(X\) define a plane in 3D known as the \emph{epipolar plane}.
+This plane intersects each image plane in a line, called an \emph{epipolar line}.
+
+The key geometric consequence is:
+
+\begin{quote}
+Given a point \(x_1\) in the first image, its correspondence \(x_2\) in the second image must lie on a specific line.
+\end{quote}
+
+This constraint is purely projective.
+
+\section{The Fundamental Matrix}
+
+The epipolar constraint can be written algebraically as
+\[
+x_2^\top F x_1 = 0,
+\]
+where \(F \in \mathbb{R}^{3 \times 3}\) is the \emph{fundamental matrix}.
+
+\subsection{Properties}
+
+The fundamental matrix satisfies:
+\begin{itemize}
+  \item \(F\) is defined up to scale
+  \item \(\mathrm{rank}(F) = 2\)
+  \item it maps points to epipolar lines: \(l_2 = F x_1\)
+\end{itemize}
+
+Geometrically, the constraint enforces that the vectors \(x_2\), \(F x_1\), and the origin are coplanar.
+
+\section{Geometric Interpretation}
+
+In the calibrated case, the fundamental matrix factors as
+\[
+F = [t]_\times R,
+\]
+where
+\[
+[t]_\times =
+\begin{bmatrix}
+0 & -t_z & t_y \\
+t_z & 0 & -t_x \\
+-t_y & t_x & 0
+\end{bmatrix}
+\]
+is the skew-symmetric matrix representing the cross product.
+
+The epipolar constraint
+\[
+x_2^\top [t]_\times R x_1 = 0
+\]
+expresses the fact that the two viewing rays and the translation vector lie in the same plane.
+
+\section{Estimating the Fundamental Matrix}
+
+Each point correspondence \((x_1, x_2)\) yields one linear constraint:
+\[
+x_2^\top F x_1 = 0.
+\]
+
+Expanding this equation produces a linear system
+\[
+A f = 0,
+\]
+where \(f = \mathrm{vec}(F)\).
+
+With at least eight correspondences, the solution is obtained via Singular Value Decomposition (SVD).
+
+\subsection{Rank-2 Enforcement}
+
+The estimated matrix must satisfy \(\det(F) = 0\).
+This is enforced by:
+\begin{enumerate}
+  \item computing the SVD \(F = U \Sigma V^\top\)
+  \item setting the smallest singular value to zero
+  \item reconstructing \(F\)
+\end{enumerate}
+
+This step restores the correct geometric structure.
+
+\section{From Fundamental to Essential Matrix}
+
+If the cameras are calibrated, we define the \emph{essential matrix}
+\[
+E = K^\top F K.
+\]
+
+The essential matrix satisfies:
+\begin{itemize}
+  \item \(\mathrm{rank}(E) = 2\)
+  \item two equal nonzero singular values
+\end{itemize}
+
+It admits the factorisation
+\[
+E = [t]_\times R,
+\]
+from which the relative camera pose can be recovered.
+
+\section{Recovering Camera Pose}
+
+The SVD of \(E\) yields four possible solutions for \((R, t)\).
+This ambiguity arises from sign and reflection symmetries.
+
+The physically valid solution is selected using the \emph{cheirality condition}:
+\begin{quote}
+Triangulated points must lie in front of both cameras.
+\end{quote}
+
+Only one candidate satisfies this constraint.
+
+\section{Triangulation}
+
+Given camera matrices \(P_1, P_2\) and corresponding image points \(x_1, x_2\),
+the 3D point \(X\) is recovered by solving
+\[
+x_i \times (P_i X) = 0, \quad i = 1,2.
+\]
+
+Stacking the resulting equations yields a homogeneous linear system
+\[
+A X = 0,
+\]
+which is solved via SVD.
+The solution is defined up to scale.
+
+\section{What This Enables}
+
+Two-view geometry provides the foundation for:
+\begin{itemize}
+  \item Structure-from-Motion
+  \item Visual odometry
+  \item Visual SLAM
+  \item Multi-view reconstruction
+\end{itemize}
+
+All subsequent methods refine or extend the principles developed here.
+
+\section{Key Takeaway}
+
+Two-view geometry eliminates the 3D scene to recover camera geometry,
+then reintroduces 3D structure via triangulation.
+
+It is the minimal, exact, and geometric core of visual reconstruction.
+
+\end{document}
