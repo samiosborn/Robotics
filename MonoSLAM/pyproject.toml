@@ -1,0 +1,13 @@
+# pyproject.toml
+
+[project]
+name = "MonoSLAM"
+version = "0.1.0"
+
+# Minimum Python version
+requires-python = ">=3.10"
+
+# Direct runtime dependencies
+dependencies = [
+    "numpy",
+]
