@@ -1,4 +1,5 @@
-# OS-Specific Files
+# .gitignore
+# OS-specific
 .DS_Store
 Thumbs.db
 __MACOSX/
@@ -8,19 +9,17 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.pkl
 *.egg-info/
 *.egg
 *.log
 
-# Jupyter / Notebooks
+# Jupyter
 .ipynb_checkpoints/
 *.ipynb_save
 .notebook_autosave/
 
-# LaTeX Build Artifacts
+# LaTeX build artefacts
 *.aux
-*.log
 *.out
 *.toc
 *.synctex.gz
@@ -28,37 +27,38 @@ __pycache__/
 *.fls
 *.bbl
 *.blg
-*.pdfsync
 *.nav
 *.snm
 *.vrb
 *.lof
 *.lot
+*.pdfsync
+*_minted*
 
-# Environment / Build
-.env
-.venv
-venv/
+# Environments (uv / venv)
+.venv/
 env/
+venv/
+__pypackages__/
+.env
 *.env
-*.venv
-anaconda_projects/
-*.conda
 
-# Editor / IDE
+# Editors / IDEs
 .vscode/
 .idea/
 *.sublime-workspace
 *.sublime-project
 
-# Temporary / Cache
+# Temporary / cache
 .cache/
 .temp/
 *.tmp
 *.bak
 *.swp
+*~
 
-# Data / Model Files
+# Data / model artefacts
+*.pkl
 *.h5
 *.hdf5
 *.npz
@@ -70,12 +70,10 @@ anaconda_projects/
 *.ckpt
 *.onnx
 *.tfrecord
+
 datasets/
 data/
 logs/
 checkpoints/
 results/
 outputs/
-
-# Misc
-*~
