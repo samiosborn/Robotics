@@ -1,8 +1,8 @@
-# src/utils/quaternion.py
+# src/utils/rotations.py
 import numpy as np
 
 # Normalise
-def normalise(q):
+def quat_norm(q):
   # Norm
   n = np.linalg.norm(q)
   # Safety
@@ -36,7 +36,7 @@ def quat_conjugate(q):
 # Quaternion to rotation matrix
 def quat_to_rotmat(q):
   # Normalise q
-  q = normalise(q)
+  q = quat_norm(q)
   # Unpack
   q_w, q_x, q_y, q_z = q
   # Polynomial formula
@@ -68,7 +68,7 @@ def rotvec_to_quat(omega, dt):
 def quat_from_axis_angle(axis, theta):
   # Combine
   q = np.concatenate([[np.cos(theta/2)], (np.sin(theta/2) * axis)])
-  return normalise(q)
+  return quat_norm(q)
 
 # Integrate quaternion over timestep
 def integrate_quat(q, omega, dt):
@@ -77,12 +77,12 @@ def integrate_quat(q, omega, dt):
   # Multiply quaternions
   q_new = quat_mul(dq, q)
   # Normalise
-  return normalise(q_new)
+  return quat_norm(q_new)
 
 # Quaternion log (log mapping)
 def quat_log(q):
   # Normalise
-  q = normalise(q)
+  q = quat_norm(q)
   # Unpack
   q_w, q_x, q_y, q_z = q
   # Pack

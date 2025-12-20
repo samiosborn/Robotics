@@ -1,4 +1,4 @@
-# src/utils/linalg.py
+# src/utils/lie.py
 import numpy as np
 
 # Hat operator (skew-symmetric matrix)
@@ -15,7 +15,7 @@ def hat(omega):
 def vee(W):
   return np.array([W[2,1], W[0,2], W[1,0]])
 
-# Small-angle approximation for SO(3) exponential
-def so3_exp_small(omega, dt):
+# First-order approximation for SO(3) exponential
+def so3_exp_first_order(omega, dt):
   # R = I + omega x dt
   return np.eye(3) + hat(omega) * dt
