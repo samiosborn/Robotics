@@ -179,47 +179,129 @@ This step restores the correct geometric structure.
 
 \section{From Fundamental to Essential Matrix}
 
-If the cameras are calibrated, we define the essential matrix:
+The fundamental matrix \(F\) encodes the epipolar geometry between two views n pixel coordinates. If the cameras are calibrated, we can factor out the intrinsic parameters and work in normalised image coordinates.
+
+Let \(K_1, K_2\) denote the intrinsic calibration matrices of the two cameras.
+
+Let \(x_1, x_2 \in \mathbb{P}^2\) denote corresponding points in pixel coordinates, we define the corresponding points in normalised camera coordinates
+\[
+\hat{x}_1 = K_1^{-1} x_1, \qquad \hat{x}_2 = K_2^{-1} x_2
+\]
+
+The epipolar constraint in pixel coordinates is
+\(
+x_2^\top F x_1 = 0
+\)
+
+Substituting \(x_i = K_i \hat{x}_i\) yields
+\[
+\hat{x}_2^\top \left( K_2^\top F K_1 \right) \hat{x}_1 = 0.
+\]
+
+By definition, the matrix multiplying the normalised coordinates is the
+essential matrix:
+\[
+E = K_2^\top F K_1
+\]
+
+Equivalently, if the two cameras share the same intrinsics \(K\), this reduces to
 \[
 E = K^\top F K
 \]
 
-The essential matrix satisfies:
+\paragraph{Geometric interpretation}
+While the fundamental matrix operates on pixel coordinates, the essential matrix operates on normalised camera coordinates and therefore depends only on the relative pose between the cameras.
+
+\paragraph{Algebraic properties}
+The essential matrix satisfies the following constraints:
 \begin{itemize}
   \item \(\mathrm{rank}(E) = 2\)
-  \item Two, equal, nonzero singular values
+  \item \(E\) has two equal, nonzero singular values and one zero singular value
 \end{itemize}
 
-It admits the factorisation
+These constraints distinguish essential matrices from general \(3 \times 3\) matrices and must be enforced during estimation.
+
+\paragraph{Pose factorisation}
+The essential matrix admits the factorisation
 \[
 E = [t]_\times R
 \]
-from which the relative camera pose can be recovered.
+Where 
+\begin{itemize}
+  \item \(R \in SO(3)\) is the relative rotation between the two camera frames
+  \item \(t \in \mathbb{R}^3\) is the translation vector
+  \item \([t]_\times\) denotes the skew-symmetric matrix corresponding to the cross product with \(t\)
+\end{itemize}
+
+From this factorisation, the relative camera pose can be recovered up to a four-fold ambiguity, which is resolved using cheirality constraints after triangulation.
+
+\section{From Essential to Fundamental Matrix}
+
+The essential matrix is defined as
+\[
+E = K_2^\top F K_1
+\]
+
+Rearranging, we obtain the inverse relationship
+\[
+F = K_2^{-\top} E K_1^{-1}
+\]
 
 \section{Recovering Camera Pose}
 
-The SVD of \(E\) yields four possible solutions for \((R, t)\).
-This ambiguity arises from sign and reflection symmetries.
+After enforcing the essential matrix constraints, the essential matrix admits the singular value decomposition
+\[
+E = U \Sigma V^\top,
+\quad
+\Sigma = \mathrm{diag}(1, 1, 0)
+\]
 
-The physically valid solution is selected using the cheirality condition:
-\begin{quote}
-Triangulated points must lie in front of both cameras.
-\end{quote}
+Using the matrices
+\[
+W =
+\begin{bmatrix}
+0 & -1 & 0 \\
+1 & 0 & 0 \\
+0 & 0 & 1
+\end{bmatrix},
+\quad
+Z =
+\begin{bmatrix}
+0 & 1 & 0 \\
+-1 & 0 & 0 \\
+0 & 0 & 0
+\end{bmatrix},
+\]
+the relative camera pose can be recovered as
+\[
+R \in \{ U W V^\top,\; U W^\top V^\top \},
+\quad
+[t]_\times = U Z U^\top
+\]
 
-Note: Only one candidate solution satisfies this constraint.
+This decomposition yields four candidate solutions for \((R, t)\), arising from
+a two-fold ambiguity in the rotation and an unknown sign of the translation
+vector. The translation \(t\) is recovered only up to an unknown scale factor,
+which cannot be resolved from two-view geometry alone.
+
+\paragraph{Cheirality condition.}
+The physically valid solution is selected by enforcing the cheirality condition:
+triangulated 3D points must lie in front of both cameras. Concretely, a point satisfies the cheirality condition if its depth is positive in the coordinate frames of both cameras. Only one candidate solution satisfies this constraint.
 
 \section{Triangulation}
 
-Given camera matrices \(P_1, P_2\) and corresponding image points \(x_1, x_2\), the 3D point \(X\) is recovered by solving
+Given camera projection matrices \(P_1, P_2\) and corresponding homogeneous image points \(x_1, x_2\), the 3D point \(X\) satisfies the epipolar consistency conditions
 \[
 x_i \times (P_i X) = 0, \quad i = 1,2
 \]
 
-Stacking the resulting equations yields the homogeneous linear system below, which is solved via SVD.
+Each cross product yields two independent linear equations. Stacking these constraints produces a homogeneous linear system
 \[
 A X = 0
 \]
+which is solved using singular value decomposition. The solution is defined up to scale.
 
-The solution is defined up to scale.
+In practice, triangulation is performed using camera projection matrices expressed in a common coordinate frame, typically constructed from normalised image coordinates or full projection matrices of the form:
+\(P_i = K_i [R_i \mid t_i]\)
 
 \end{document}
