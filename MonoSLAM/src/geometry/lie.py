@@ -1,17 +1,18 @@
-# src/utils/lie.py
+# src/geometry/lie.py
 import numpy as np
 
-# Hat operator (skew-symmetric matrix)
+# Hat operator - Cross product: omega^ A = omega x A
 def hat(omega):
   # Unpack
   w_x, w_y, w_z = omega
+  # Vector to Skew-symmetric matrix
   return np.array([
     [0, -w_z, w_y],
     [w_z, 0, -w_x],
     [-w_y, w_x, 0]
   ], dtype = float)
 
-# Vee (inverse of hat operator)
+# Vee - Skew-symmetric to vector (inverse of hat operator)
 def vee(W):
   return np.array([W[2,1], W[0,2], W[1,0]])
 
