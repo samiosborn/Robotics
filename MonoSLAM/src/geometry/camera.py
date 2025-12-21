@@ -18,11 +18,13 @@ class Camera:
     # Projection Matrix (P)
     @property
     def P(self):
+        # P = K [R | t]
         return self.K @ np.hstack((self.R, self.t.reshape(3,1)))
 
     # Camera Center (C)
     @property
     def C(self): 
+        # C = - R^T t
         return - self.R.T @ self.t
 
     # --- Public API ---
