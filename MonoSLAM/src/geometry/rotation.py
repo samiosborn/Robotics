@@ -1,7 +1,51 @@
-# src/utils/rotations.py
+# src/geometry/rotation.py
 import numpy as np
+from geometry.lie import hat
 
-# Normalise
+# Axis-angle to rotation matrix
+def axis_angle_to_rotmat(axis, angle):
+  # Assert
+  axis = np.asarray(axis, dtype=float)
+  angle = float(angle)
+  # Normal
+  norm = np.linalg.norm(axis)
+  # Zero rotation
+  if norm < 1e-12: 
+    return np.eye(3)
+  # Normalise
+  axis = axis / norm
+  # Skew-symmetrix matrix
+  K = hat(axis)
+  # Rodrigues' formula
+  return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * K @ K
+
+# Rotation matrix to axis-angle
+def rotmat_to_axis_angle(R):
+  # Assert
+  R = np.asarray(R)
+  # Cos(theta)
+  cos_theta = (np.trace(R) - 1.0) / 2.0
+  # Clamp cos(theta)
+  cos_theta = np.clip(cos_theta, -1.0, 1.0)
+  # Angle theta
+  theta = np.arccos(cos_theta)
+  # Near-identity rotation
+  if theta < 1e-8: 
+    return np.array([1.0, 0.0, 0.0]), 0.0
+  # Near pi radians rotation
+  if np.abs(theta - np.pi) < 1e-6:
+    axis = np.sqrt((np.diag(R) + 1.0) / 2.0)
+    axis = axis / np.linalg.norm(axis)
+    return axis, theta
+  # Axis-angle
+  axis = np.array([
+    R[2, 1] - R[1, 2], 
+    R[0, 2] - R[2, 0],
+    R[1, 0] - R[0, 1]
+  ]) / (2.0 * np.sin(theta))
+  return axis, theta
+
+# Quaternion normalise
 def quat_norm(q):
   # Norm
   n = np.linalg.norm(q)
