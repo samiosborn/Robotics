@@ -4,6 +4,13 @@
 \input{preamble.tex}
 \title{Two-View Geometry}
 
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+
 \begin{document}
 \maketitle
 
@@ -14,24 +21,38 @@ This document develops the mathematical foundations of two-view geometry.
 Given two images of a static scene, our goals are:
 \begin{itemize}
   \item Estimate the fundamental matrix
-  \item Recover the relative camera pose
+  \item Recover the relative camera pose (up to scale)
   \item Triangulate 3D points
 \end{itemize}
 
-\section{Camera Intrinsics and Extrinsics}
+\section{Single-View Camera Model}
 
 A pinhole camera maps 3D points in the world to 2D image coordinates via a projective transformation.
-This mapping is parameterised by intrinsic and extrinsic components.
+
+\subsection{Camera Projection Matrix}
+
+Let \(X = (X, Y, Z, 1)^\top \in \mathbb{P}^3\) be a 3D point in homogeneous coordinates. 
+
+A camera is represented by the projection matrix
+\[
+P \in \mathbb{R}^{3\times 4}, \qquad x \sim P X,\quad x\in\mathbb{P}^2
+\]
+
+\begin{definition}[Intrinsics and extrinsics]
+A common parameterisation is
+\[
+P = K\,[\,R \mid t\,]
+\]
+where \(K \in \mathbb{R}^{3\times 3}\) is the intrinsic calibration matrix, and \((R,t)\) describes the rigid transform between world and camera frames with \(R\in SO(3)\), \(t\in\mathbb{R}^3\)
+\end{definition}
 
 \subsection{Intrinsic Matrix}
 
-The intrinsic matrix
+The intrinsic calibration matrix
 \(
 K \in \mathbb{R}^{3 \times 3}
 \)
-encodes the internal geometry of the camera, mapping camera-frame coordinates to pixel coordinates.
-
-It is typically written as
+maps camera-frame coordinates to pixel coordinates:
 \[
 K =
 \begin{bmatrix}
@@ -40,100 +61,55 @@ f_x & s   & c_x \\
 0   & 0   & 1
 \end{bmatrix}
 \]
-where:
-\begin{itemize}
-  \item \(f_x, f_y\) are the focal lengths measured in pixels
-  \item \(s\) is the skew parameter (usually zero)
-  \item \((c_x, c_y)\) is the principal point
-\end{itemize}
+Given \(\hat{x}\) in normalised (calibrated) image coordinates, pixel coordinates are \(x = K\hat{x}\).
 
-When working with normalised image coordinates, the effect of \(K\) is removed by pre-multiplying image points by \(K^{-1}\).
+Conversely, \(\hat{x} = K^{-1}x\).
 
-\subsection{Rotation}
+\subsection{Rotation and Translation}
 
-The rotation matrix
-\(
-R \in SO(3)
-\)
-describes the orientation of the camera frame relative to the world frame.
-
-It satisfies the defining properties:
+The rotation matrix \(R \in SO(3)\) satisfies
 \[
-R^\top R = I, \quad \det(R) = 1
+R^\top R = I,\quad \det(R)=1
 \]
+This maps vectors from world coordinates into camera coordinates. 
 
-Geometrically, \(R\) maps vectors from the world coordinate frame into the camera coordinate frame.
+The translation vector \(t\in\mathbb{R}^3\) determines the camera centre position relative to the world frame (in this convention, \(t\) is expressed in the camera frame). 
 
-\subsection{Translation}
-
-The translation vector
-\(
-t \in \mathbb{R}^3
-\)
-represents the position of the camera centre expressed in the camera coordinate frame.
-
-Together with the rotation, it defines the rigid-body transformation between frames.
-
-\subsection{Camera Projection Matrix}
-
-The full camera projection matrix is \(P \in \mathbb{R}^{3 \times 4}\) given by
-\[
-P = K \,[\, R \mid t \,]
-\]
-
-A 3D point in homogeneous coordinates,
-\[
-X = (X, Y, Z, 1)^\top \in \mathbb{P}^3
-\]
-projects to an image point
-\[
-x \sim P X, \quad x \in \mathbb{P}^2
-\]
-
-\section{Two Views and Epipolar Geometry}
+\section{Two Views and Relative Pose}
 
 Consider two cameras observing the same 3D point \(X\):
 \[
-x_1 \sim P_1 X, \quad x_2 \sim P_2 X
+x_1 \sim P_1 X,\qquad x_2 \sim P_2 X
 \]
-
-The camera centres and \(X\) define a plane in 3D known as the epipolar plane.
-This plane intersects each image plane in a line, called an epipolar line.
-
-The key geometric consequence is:
-
-\begin{quote}
-Given a point \(x_1\) in the first image, its correspondence \(x_2\) in the second image must lie on a specific line.
-\end{quote}
-
-This constraint is purely projective.
-
-\section{The Fundamental Matrix}
-
-The epipolar constraint can be written algebraically as
+With
 \[
-x_2^\top F x_1 = 0
+P_i = K_i [R_i \mid t_i],\quad i=1,2
 \]
-where \(F \in \mathbb{R}^{3 \times 3}\) is the fundamental matrix.
 
-\subsection{Properties}
+\subsection{Relative Pose Simplification}
 
-The fundamental matrix satisfies:
-\begin{itemize}
-  \item \(F\) is defined up to scale
-  \item \(\mathrm{rank}(F) = 2\)
-  \item It maps points to epipolar lines: \(l_2 = F x_1\)
-\end{itemize}
-
-Geometrically, the constraint enforces that the vectors \(x_2\), \(F x_1\), and the origin are coplanar.
-
-\section{Geometric Interpretation}
-
-In the calibrated case, the fundamental matrix factors as
+\begin{proposition}[Choice of world frame]
+WLOG, one may choose world coordinates so that the first camera is at the origin with identity orientation, i.e. for some relative pose \((R,t)\)
 \[
-F = [t]_\times R
+P_1 = K_1 [I \mid 0], \qquad P_2 = K_2 [R \mid t]
 \]
-where \( [t]_\times \) is the skew-symmetric matrix of \(t\): 
+
+\end{proposition}
+
+\begin{proof}
+Trivial.
+\end{proof}
+
+\section{Epipolar Geometry}
+
+The two camera centres and a 3D point \(X\) define the epipolar plane. 
+
+Its intersection with each image plane is an epipolar line.
+
+\subsection{A key algebraic tool}
+
+\begin{definition}[Cross-product matrix]
+For \(t=(t_x,t_y,t_z)^\top\), define the skew-symmetric matrix
 \[
 [t]_\times =
 \begin{bmatrix}
@@ -142,121 +118,206 @@ t_z & 0 & -t_x \\
 -t_y & t_x & 0
 \end{bmatrix}
 \]
+so that for any \(a\in\mathbb{R}^3\), \([t]_\times a = t \times a\)
+\end{definition}
 
-The epipolar constraint
+\section{The Essential Matrix (Calibrated Case)}
+
+Assume both cameras are calibrated, and work with normalised image coordinates
 \[
-x_2^\top [t]_\times R x_1 = 0
+\hat{x}_1 = K_1^{-1}x_1,\qquad \hat{x}_2 = K_2^{-1}x_2
 \]
-expresses the fact that the two viewing rays and the translation vector lie in the same plane.
+
+\begin{theorem}[Essential matrix and epipolar constraint]
+Let \(P_1 = [I\mid 0]\), \(P_2 = [R\mid t]\) be the normalised projection matrices (intrinsics removed). Then, there exists a matrix \(E\in\mathbb{R}^{3\times 3}\) such that for corresponding normalised points \(\hat{x}_1,\hat{x}_2\),
+\[
+\hat{x}_2^\top E \hat{x}_1 = 0,
+\qquad \text{and} \qquad
+E = [t]_\times R
+\]
+\end{theorem}
+
+\begin{proof}
+Let the 3D point in the first camera frame be \(X_1 \in \mathbb{R}^3\)
+
+Then the second camera frame sees
+\[
+X_2 = R X_1 + t
+\]
+Since \(\hat{x}_1\) and \(\hat{x}_2\) represent (homogeneous) directions of the viewing rays, \( \exists \) scalars \(\lambda_1,\lambda_2\neq 0\) such that
+\[
+X_1 = \lambda_1 \hat{x}_1,\qquad X_2 = \lambda_2 \hat{x}_2
+\]
+Hence
+\[
+\lambda_2 \hat{x}_2 = R(\lambda_1 \hat{x}_1) + t
+\]
+Rearrange to isolate \(t\):
+\[
+t = \lambda_2 \hat{x}_2 - \lambda_1 R\hat{x}_1
+\]
+The vectors \(\hat{x}_2\), \(R\hat{x}_1\), and \(t\) lie in the epipolar plane, so they are coplanar and therefore
+\[
+\hat{x}_2^\top [t]_\times (R\hat{x}_1) = 0
+\]
+Thus \(\hat{x}_2^\top E \hat{x}_1 = 0\) with \(E:=[t]_\times R\)
+\end{proof}
+
+\subsection{Algebraic properties}
+
+\begin{proposition}[Rank constraint]
+If \(t\neq 0\), then \(\mathrm{rank}(E)=2\).
+\end{proposition}
+
+\begin{proof}
+Since \(R\) is invertible, \(\mathrm{rank}([t]_\times R)=\mathrm{rank}([t]_\times) \)
+For nonzero \(t\), the linear map \(a\mapsto t\times a\) has a 1D nullspace which is \(\mathrm{span}\{t\}\), so \(\mathrm{rank}([t]_\times)=2\), and \(\mathrm{rank}(E)=2\).
+
+\end{proof}
+
+\begin{proposition}[Singular values of \(E\)]
+Any essential matrix \(E=[t]_\times R\) has two equal nonzero singular values and one zero singular value.
+\end{proposition}
+
+\begin{proof}
+Write \(E = [t]_\times R\). Since \(R\) is orthogonal,
+\[
+EE^\top = [t]_\times R R^\top [t]_\times^\top = [t]_\times [t]_\times^\top.
+\]
+A standard identity gives
+\[
+[t]_\times [t]_\times^\top = \|t\|^2 I - t t^\top.
+\]
+The matrix \(\|t\|^2 I - tt^\top\) has eigenvalue \(0\) in direction \(t\), and eigenvalue \(\|t\|^2\) on the two-dimensional subspace orthogonal to \(t\). 
+
+Hence \(EE^\top\) has eigenvalues \(\|t\|^2, \|t\|^2, 0\), so \(E\) has singular values \(\|t\|,\|t\|,0\).
+\end{proof}
+
+\section{The Fundamental Matrix (Pixel Coordinates)}
+
+For pixel coordinates \(x_i = K_i \hat{x}_i\)
+
+\begin{theorem}[Relation between \(F\) and \(E\)]
+The fundamental matrix \(F\) is the unique (up to scale) matrix satisfying
+\[
+x_2^\top F x_1 = 0 \quad \text{for all corresponding pixels }(x_1,x_2)
+\]
+and is related to the essential matrix by
+\[
+E = K_2^\top F K_1,
+\qquad \text{or} \qquad
+F = K_2^{-\top} E K_1^{-1}
+\]
+\end{theorem}
+
+\begin{proof}
+Start from the essential constraint in normalised coordinates:
+\[
+\hat{x}_2^\top E \hat{x}_1 = 0
+\]
+Substitute \(\hat{x}_1 = K_1^{-1}x_1\), \(\hat{x}_2 = K_2^{-1}x_2\):
+\[
+(K_2^{-1}x_2)^\top E (K_1^{-1}x_1)=0
+\;\Longleftrightarrow\;
+x_2^\top (K_2^{-\top} E K_1^{-1}) x_1 = 0
+\]
+Thus, \(F := K_2^{-\top} E K_1^{-1}\) satisfies the pixel epipolar constraint. Rearranging gives \(E = K_2^\top F K_1\)
+\end{proof}
+
+\subsection{Geometric meaning and basic properties}
+
+\begin{proposition}[Epipolar lines]
+Given \(x_1\in\mathbb{P}^2\), define \(l_2 := F x_1\). Then any corresponding point \(x_2\) satisfies \(x_2^\top l_2=0\), i.e. \(x_2\) lies on the line \(l_2\). Similarly, \(l_1 := F^\top x_2\) is the epipolar line in image 1.
+\end{proposition}
+
+\begin{proof}
+The epipolar constraint is \(x_2^\top F x_1=0\). Set \(l_2:=Fx_1\). Then \(x_2^\top l_2=0\), which is precisely the incidence relation “point \(x_2\) lies on line \(l_2\)” in homogeneous coordinates.
+\end{proof}
+
+\begin{proposition}[Rank-2 constraint]
+\(\mathrm{rank}(F)=2\).
+\end{proposition}
+
+\begin{proof}
+From \(F = K_2^{-\top} E K_1^{-1}\), and since \(K_i\) are invertible, \(\mathrm{rank}(F)=\mathrm{rank}(E)\).
+In the non-degenerate case \(t\neq 0\), \(\mathrm{rank}(E)=2\) by the earlier proposition, hence \(\mathrm{rank}(F)=2\).
+\end{proof}
+
+\begin{proposition}[Epipoles as nullspaces]
+There exist points \(e_1,e_2\in\mathbb{P}^2\) (the epipoles) such that
+\[
+F e_1 = 0, \qquad F^\top e_2 = 0
+\]
+\end{proposition}
+
+\begin{proof}
+Since \(\mathrm{rank}(F)=2\), both nullspaces are one-dimensional. Choose any nonzero \(e_1\in\ker(F)\) and \(e_2\in\ker(F^\top)\). 
+\end{proof}
 
 \section{Estimating the Fundamental Matrix}
 
-Each point correspondence \((x_1, x_2)\) yields one linear constraint:
+Each correspondence \((x_1,x_2)\) yields one linear constraint:
 \[
 x_2^\top F x_1 = 0
 \]
 
-Expanding this equation produces a linear system
+\subsection{The 8-point linear system}
+
+Write \(F = (f_{ij})\). For \(x_1=(u_1,v_1,1)^\top\), \(x_2=(u_2,v_2,1)^\top\),
 \[
-A f = 0
+x_2^\top F x_1
+=
+[u_2\; v_2\; 1]
+\begin{bmatrix}
+f_{11}&f_{12}&f_{13}\\
+f_{21}&f_{22}&f_{23}\\
+f_{31}&f_{32}&f_{33}
+\end{bmatrix}
+\begin{bmatrix}
+u_1\\ v_1\\ 1
+\end{bmatrix}
+=0
 \]
-where \(f = \mathrm{vec}(F)\)
-
-With at least eight correspondences, the solution can be obtained, typically using Singular Value Decomposition (SVD).
-
-\subsection{Rank-2 Enforcement}
-
-The estimated matrix must satisfy: \(\det(F) = 0\)
-
-This is enforced by:
-\begin{enumerate}
-  \item Computing the SVD \(F = U \Sigma V^\top\)
-  \item Setting the smallest singular value to zero
-  \item Reconstructing \(F\)
-\end{enumerate}
-
-This step restores the correct geometric structure.
-
-\section{From Fundamental to Essential Matrix}
-
-The fundamental matrix \(F\) encodes the epipolar geometry between two views n pixel coordinates. If the cameras are calibrated, we can factor out the intrinsic parameters and work in normalised image coordinates.
-
-Let \(K_1, K_2\) denote the intrinsic calibration matrices of the two cameras.
-
-Let \(x_1, x_2 \in \mathbb{P}^2\) denote corresponding points in pixel coordinates, we define the corresponding points in normalised camera coordinates
+Expanding gives a homogeneous linear equation in the 9 unknown entries of \(F\):
 \[
-\hat{x}_1 = K_1^{-1} x_1, \qquad \hat{x}_2 = K_2^{-1} x_2
+(u_2u_1)f_{11} + (u_2v_1)f_{12} + (u_2)f_{13}
++ (v_2u_1)f_{21} + (v_2v_1)f_{22} + (v_2)f_{23}
++ (u_1)f_{31} + (v_1)f_{32} + f_{33} = 0.
 \]
-
-The epipolar constraint in pixel coordinates is
-\(
-x_2^\top F x_1 = 0
-\)
-
-Substituting \(x_i = K_i \hat{x}_i\) yields
+Stacking \(n\) correspondences yields
 \[
-\hat{x}_2^\top \left( K_2^\top F K_1 \right) \hat{x}_1 = 0.
+A f = 0,\qquad f=\mathrm{vec}(F)\in\mathbb{R}^9,
 \]
+Where each row of \(A\) is \([u_2u_1,\;u_2v_1,\;u_2,\;v_2u_1,\;v_2v_1,\;v_2,\;u_1,\;v_1,\;1]\)
 
-By definition, the matrix multiplying the normalised coordinates is the
-essential matrix:
-\[
-E = K_2^\top F K_1
-\]
+With at least 8 correspondences (and non-degenerate configurations), one obtains \(f\) as the right singular vector of \(A\) corresponding to the smallest singular value (least-squares solution under noise).
 
-Equivalently, if the two cameras share the same intrinsics \(K\), this reduces to
-\[
-E = K^\top F K
-\]
+\subsection{Rank-2 enforcement}
 
-\paragraph{Geometric interpretation}
-While the fundamental matrix operates on pixel coordinates, the essential matrix operates on normalised camera coordinates and therefore depends only on the relative pose between the cameras.
+The estimate from the linear solve is a general \(3\times 3\) matrix and need not satisfy \(\mathrm{rank}(F)=2\).
 
-\paragraph{Algebraic properties}
-The essential matrix satisfies the following constraints:
-\begin{itemize}
-  \item \(\mathrm{rank}(E) = 2\)
-  \item \(E\) has two equal, nonzero singular values and one zero singular value
-\end{itemize}
+\begin{proposition}[Closest rank-2 matrix in Frobenius norm]
+Let \(F = U\Sigma V^\top\) be the SVD with \(\Sigma=\mathrm{diag}(\sigma_1,\sigma_2,\sigma_3)\), \(\sigma_1\ge\sigma_2\ge\sigma_3\ge 0\).
+Define \(\Sigma'=\mathrm{diag}(\sigma_1,\sigma_2,0)\) and \(F' = U\Sigma' V^\top\).
+Then \(F'\) has rank 2 and minimises \(\|F-G\|_F\) over all rank-2 matrices \(G\).
+\end{proposition}
 
-These constraints distinguish essential matrices from general \(3 \times 3\) matrices and must be enforced during estimation.
+\begin{proof}
+This is the Eckart--Young--Mirsky theorem: the best rank-\(k\) approximation (in Frobenius norm) is obtained by truncating the SVD to the top \(k\) singular values. Take \(k=2\).
+\end{proof}
 
-\paragraph{Pose factorisation}
-The essential matrix admits the factorisation
-\[
-E = [t]_\times R
-\]
-Where 
-\begin{itemize}
-  \item \(R \in SO(3)\) is the relative rotation between the two camera frames
-  \item \(t \in \mathbb{R}^3\) is the translation vector
-  \item \([t]_\times\) denotes the skew-symmetric matrix corresponding to the cross product with \(t\)
-\end{itemize}
+\section{Recovering Camera Pose from the Essential Matrix}
 
-From this factorisation, the relative camera pose can be recovered up to a four-fold ambiguity, which is resolved using cheirality constraints after triangulation.
+Assume \(E\) has been estimated and projected onto the essential manifold (two equal singular values, one zero). 
 
-\section{From Essential to Fundamental Matrix}
-
-The essential matrix is defined as
-\[
-E = K_2^\top F K_1
-\]
-
-Rearranging, we obtain the inverse relationship
-\[
-F = K_2^{-\top} E K_1^{-1}
-\]
-
-\section{Recovering Camera Pose}
-
-After enforcing the essential matrix constraints, the essential matrix admits the singular value decomposition
+Then
 \[
 E = U \Sigma V^\top,
-\quad
-\Sigma = \mathrm{diag}(1, 1, 0)
+\qquad
+\Sigma=\mathrm{diag}(1,1,0)
 \]
 
-Using the matrices
+Using
 \[
 W =
 \begin{bmatrix}
@@ -270,38 +331,50 @@ Z =
 0 & 1 & 0 \\
 -1 & 0 & 0 \\
 0 & 0 & 0
-\end{bmatrix},
+\end{bmatrix}
 \]
-the relative camera pose can be recovered as
+Define candidate rotations and translation skew matrix by
 \[
 R \in \{ U W V^\top,\; U W^\top V^\top \},
-\quad
+\qquad
 [t]_\times = U Z U^\top
 \]
 
-This decomposition yields four candidate solutions for \((R, t)\), arising from
-a two-fold ambiguity in the rotation and an unknown sign of the translation
-vector. The translation \(t\) is recovered only up to an unknown scale factor,
-which cannot be resolved from two-view geometry alone.
+\begin{proposition}[Four-fold ambiguity]
+The decomposition above yields four candidate poses \((R,\pm t)\), where \(t\) is recovered only up to an overall unknown scale.
+\end{proposition}
+
+\begin{proof}
+The SVD-based construction produces two candidates for \(R\) (via \(W\) or \(W^\top\)). The skew matrix \([t]_\times\) determines \(t\) only up to sign (since \([(-t)]_\times = -[t]_\times\) and scaling of \(E\) is unobservable), hence \(\pm t\). Finally, because \(E\) (and thus \([t]_\times\)) is only defined up to nonzero scale in two-view geometry, the magnitude of \(t\) cannot be recovered from image correspondences alone.
+\end{proof}
 
 \paragraph{Cheirality condition.}
-The physically valid solution is selected by enforcing the cheirality condition:
-triangulated 3D points must lie in front of both cameras. Concretely, a point satisfies the cheirality condition if its depth is positive in the coordinate frames of both cameras. Only one candidate solution satisfies this constraint.
+Select the physically valid solution by enforcing cheirality: triangulated points must lie in front of both cameras (positive depth in each camera frame). Exactly one of the four candidates satisfies this for a set of correct correspondences in a non-degenerate configuration.
 
 \section{Triangulation}
 
-Given camera projection matrices \(P_1, P_2\) and corresponding homogeneous image points \(x_1, x_2\), the 3D point \(X\) satisfies the epipolar consistency conditions
+Given \(P_1,P_2\) and corresponding homogeneous image points \(x_1,x_2\), the 3D point \(X\) satisfies
 \[
-x_i \times (P_i X) = 0, \quad i = 1,2
+x_i \times (P_i X) = 0,\quad i=1,2
 \]
 
-Each cross product yields two independent linear equations. Stacking these constraints produces a homogeneous linear system
+\begin{proposition}[Linear triangulation system]
+Each equation \(x_i\times(P_iX)=0\) yields two independent linear constraints in \(X\). Stacking both views produces a homogeneous system
 \[
 A X = 0
 \]
-which is solved using singular value decomposition. The solution is defined up to scale.
+solvable (up to scale) by SVD as the right singular vector corresponding to the smallest singular value.
+\end{proposition}
 
-In practice, triangulation is performed using camera projection matrices expressed in a common coordinate frame, typically constructed from normalised image coordinates or full projection matrices of the form:
-\(P_i = K_i [R_i \mid t_i]\)
+\begin{proof}
+For fixed \(i\), the cross product \(x_i \times (P_iX)=0\) means \(x_i\) and \(P_iX\) are colinear in \(\mathbb{P}^2\). Writing \(x_i=(u_i,v_i,w_i)^\top\) and \(P_iX = (p_{i1}^\top X,\; p_{i2}^\top X,\; p_{i3}^\top X)^\top\), the cross product gives three linear equations, but only two are independent because scaling in homogeneous coordinates makes one redundant. Taking the two independent rows and stacking both cameras yields \(AX=0\). 
+\end{proof}
+
+In practice, one triangulates using projection matrices expressed in a common frame, e.g.
+\(
+P_1 = K_1[I\mid 0],\;
+P_2 = K_2[R\mid t]
+\),
+or using normalised coordinates with \(K_i=I\).
 
 \end{document}
