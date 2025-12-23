@@ -45,6 +45,15 @@ def rotmat_to_axis_angle(R):
   ]) / (2.0 * np.sin(theta))
   return axis, theta
 
+# Rotation angle (radians) between rotation matrices
+def angle_between_rotmats(R1, R2): 
+  # Relative rotation
+  R_delta = R1.T @ R2
+  # Cosine(angle)
+  cos_theta = np.clip((np.trace(R_delta) - 1.0) / 2.0, -1.0, 1.0)
+  # Angle
+  return np.arccos(cos_theta)
+
 # Quaternion normalise
 def quat_norm(q):
   # Norm
