@@ -7,6 +7,11 @@ def epipolar_constraint(x1, x2, F):
     # x2^T F x1 = 0
     return float(x2.T @ F @ x1)
 
+# Normalised epipolar constraint
+def normalised_epipolar_constraint(x1_hat, x2_hat, E): 
+    # x2_hat^T E x1_hat = 0
+    return float(x2_hat.T @ E @ x1_hat)
+
 # Essential matrix from pose
 def essential_from_pose(R, t): 
     # Enforce shape
