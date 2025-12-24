@@ -61,7 +61,7 @@ f_x & s   & c_x \\
 0   & 0   & 1
 \end{bmatrix}
 \]
-Given \(\hat{x}\) in normalised (calibrated) image coordinates, pixel coordinates are \(x = K\hat{x}\).
+Given \(\hat{x}\) in intrinsic normalised (calibrated) image coordinates, pixel coordinates are \(x = K\hat{x}\).
 
 Conversely, \(\hat{x} = K^{-1}x\).
 
@@ -123,7 +123,7 @@ so that for any \(a\in\mathbb{R}^3\), \([t]_\times a = t \times a\)
 
 \section{The Essential Matrix (Calibrated Case)}
 
-Assume both cameras are calibrated, and work with normalised image coordinates
+Assume both cameras are calibrated, and work with intrinsic normalised image coordinates
 \[
 \hat{x}_1 = K_1^{-1}x_1,\qquad \hat{x}_2 = K_2^{-1}x_2
 \]
@@ -211,7 +211,7 @@ F = K_2^{-\top} E K_1^{-1}
 \end{theorem}
 
 \begin{proof}
-Start from the essential constraint in normalised coordinates:
+Start from the essential constraint in intrinsic normalised coordinates:
 \[
 \hat{x}_2^\top E \hat{x}_1 = 0
 \]
@@ -254,70 +254,180 @@ F e_1 = 0, \qquad F^\top e_2 = 0
 Since \(\mathrm{rank}(F)=2\), both nullspaces are one-dimensional. Choose any nonzero \(e_1\in\ker(F)\) and \(e_2\in\ker(F^\top)\). 
 \end{proof}
 
-\section{Estimating the Fundamental Matrix}
+\section{Two-View Estimation from Point Correspondences}
 
-Each correspondence \((x_1,x_2)\) yields one linear constraint:
+\subsection{Linear Estimation of the Fundamental Matrix}
+
+\begin{proposition}[Linear constraint from one correspondence]
+Let \(x_1=(u_1,v_1,1)^\top\) and \(x_2=(u_2,v_2,1)^\top\). Writing \(f=\mathrm{vec}(F)\in\mathbb{R}^9\), the epipolar constraint \(x_2^\top F x_1=0\) is equivalent to a homogeneous linear equation \(a^\top f=0\), where
 \[
-x_2^\top F x_1 = 0
+a = [u_2u_1,\;u_2v_1,\;u_2,\;v_2u_1,\;v_2v_1,\;v_2,\;u_1,\;v_1,\;1]
 \]
+\end{proposition}
 
-\subsection{The 8-point linear system}
-
-Write \(F = (f_{ij})\). For \(x_1=(u_1,v_1,1)^\top\), \(x_2=(u_2,v_2,1)^\top\),
+\begin{proof}
+Write \(F=(f_{ij})\). Then
 \[
 x_2^\top F x_1
 =
-[u_2\; v_2\; 1]
+[u_2\;v_2\;1]
 \begin{bmatrix}
-f_{11}&f_{12}&f_{13}\\
-f_{21}&f_{22}&f_{23}\\
-f_{31}&f_{32}&f_{33}
+f_{11} & f_{12} & f_{13}\\
+f_{21} & f_{22} & f_{23}\\
+f_{31} & f_{32} & f_{33}
 \end{bmatrix}
 \begin{bmatrix}
 u_1\\ v_1\\ 1
 \end{bmatrix}
-=0
 \]
-Expanding gives a homogeneous linear equation in the 9 unknown entries of \(F\):
+Expanding produces
 \[
 (u_2u_1)f_{11} + (u_2v_1)f_{12} + (u_2)f_{13}
 + (v_2u_1)f_{21} + (v_2v_1)f_{22} + (v_2)f_{23}
-+ (u_1)f_{31} + (v_1)f_{32} + f_{33} = 0.
++ (u_1)f_{31} + (v_1)f_{32} + f_{33} = 0
 \]
-Stacking \(n\) correspondences yields
+This is precisely \(a^\top f=0\) when \(f\) is the vector of stacked entries of \(F\).
+\end{proof}
+
+\begin{proposition}[The 8-point linear system]
+Given \(n\) correspondences \(\{(x_1^{(i)},x_2^{(i)})\}_{i=1}^n\)
+Define \(A\in\mathbb{R}^{n\times 9}\) by stacking the row vectors \(a^{(i)\top}\) from the previous proposition. Then the epipolar constraints are equivalent to: 
 \[
-A f = 0,\qquad f=\mathrm{vec}(F)\in\mathbb{R}^9,
+A f = 0
 \]
-Where each row of \(A\) is \([u_2u_1,\;u_2v_1,\;u_2,\;v_2u_1,\;v_2v_1,\;v_2,\;u_1,\;v_1,\;1]\)
+Under noise, a least-squares estimate is obtained by choosing \(f\) as the right singular vector of \(A\) corresponding to the smallest singular value.
+\end{proposition}
 
-With at least 8 correspondences (and non-degenerate configurations), one obtains \(f\) as the right singular vector of \(A\) corresponding to the smallest singular value (least-squares solution under noise).
+\begin{proof}
+By the variational characterisation of singular values (Rayleigh--Ritz), the minimiser is the right singular vector corresponding to the smallest singular value of \(A\).
+\end{proof}
 
-\subsection{Rank-2 enforcement}
+\subsection{Hartley Normalisation}
 
-The estimate from the linear solve is a general \(3\times 3\) matrix and need not satisfy \(\mathrm{rank}(F)=2\).
+\begin{theorem}[Hartley normalisation transform]
+Let \(\{x^{(i)}\}_{i=1}^n\) be pixel points with \(x^{(i)}=(u^{(i)},v^{(i)},1)^\top\)
+Define the centroid
+\[
+c_x := \frac{1}{n}\sum_{i=1}^n u^{(i)}, 
+\qquad
+c_y := \frac{1}{n}\sum_{i=1}^n v^{(i)}
+\]
+Let translated coordinates be
+\[
+\bar{u}^{(i)} := u^{(i)}-c_x,
+\qquad
+\bar{v}^{(i)} := v^{(i)}-c_y
+\]
+Define the mean Euclidean distance from the origin
+\[
+d := \frac{1}{n}\sum_{i=1}^n \sqrt{(\bar{u}^{(i)})^2+(\bar{v}^{(i)})^2}
+\]
+Assuming \(d>0\), let \(s:=\sqrt{2}/d\) and define
+\[
+T :=
+\begin{bmatrix}
+s & 0 & -s c_x\\
+0 & s & -s c_y\\
+0 & 0 & 1
+\end{bmatrix}
+\]
+Then, the transformed points \(\tilde{x}^{(i)} := T x^{(i)}\) satisfy:
+\begin{enumerate}
+\item The centroid of the inhomogeneous coordinates of \(\{\tilde{x}^{(i)}\}\) is at the origin
+\item The average Euclidean distance of the inhomogeneous coordinates from the origin is \(\sqrt{2}\)
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+Write \(\tilde{x}^{(i)}=(\tilde{u}^{(i)},\tilde{v}^{(i)},1)^\top\)
+By construction,
+\[
+\tilde{u}^{(i)} = s(u^{(i)}-c_x)=s\bar{u}^{(i)},\qquad
+\tilde{v}^{(i)} = s(v^{(i)}-c_y)=s\bar{v}^{(i)}
+\]
+For the centroid,
+\[
+\frac{1}{n}\sum_i \tilde{u}^{(i)} = s\left(\frac{1}{n}\sum_i (u^{(i)}-c_x)\right)
+= s\left(\frac{1}{n}\sum_i u^{(i)} - c_x\right)=0
+\]
+Similarly, \(\frac{1}{n}\sum_i \tilde{v}^{(i)}=0\)
+
+For the average distance, note that
+\[
+\sqrt{(\tilde{u}^{(i)})^2+(\tilde{v}^{(i)})^2}
+= s\sqrt{(\bar{u}^{(i)})^2+(\bar{v}^{(i)})^2}
+\]
+Thus, 
+\[
+\frac{1}{n}\sum_i \sqrt{(\tilde{u}^{(i)})^2+(\tilde{v}^{(i)})^2}
+=
+s \left(\frac{1}{n}\sum_i \sqrt{(\bar{u}^{(i)})^2+(\bar{v}^{(i)})^2}\right)
+= s d = \sqrt{2}
+\]
+\end{proof}
+
+\begin{proposition}[Effect of normalisation on the fundamental matrix]
+Let \(\tilde{x}_1 = T_1 x_1\) and \(\tilde{x}_2 = T_2 x_2\) be similarity transforms applied to the points in images \(1\) and \(2\). 
+
+If \(\tilde{F}\) satisfies
+\[
+\tilde{x}_2^\top \tilde{F}\,\tilde{x}_1 = 0
+\quad \text{for all corresponding } (\tilde{x}_1,\tilde{x}_2)
+\]
+Then, the corresponding fundamental matrix in the original coordinates is
+\[
+F = T_2^\top \tilde{F} T_1
+\]
+\end{proposition}
+
+\begin{proof}
+Substitute \(\tilde{x}_1=T_1x_1\) and \(\tilde{x}_2=T_2x_2\) into the normalised epipolar constraint:
+\[
+(T_2x_2)^\top \tilde{F} (T_1x_1)=0
+\;\Longleftrightarrow\;
+x_2^\top (T_2^\top \tilde{F} T_1) x_1=0
+\]
+\end{proof}
+
+\subsection{Rank-2 Enforcement}
 
 \begin{proposition}[Closest rank-2 matrix in Frobenius norm]
 Let \(F = U\Sigma V^\top\) be the SVD with \(\Sigma=\mathrm{diag}(\sigma_1,\sigma_2,\sigma_3)\), \(\sigma_1\ge\sigma_2\ge\sigma_3\ge 0\).
 Define \(\Sigma'=\mathrm{diag}(\sigma_1,\sigma_2,0)\) and \(F' = U\Sigma' V^\top\).
-Then \(F'\) has rank 2 and minimises \(\|F-G\|_F\) over all rank-2 matrices \(G\).
+Then \(F'\) has rank \(2\) and minimises \(\|F-G\|_F\) over all rank-\(2\) matrices \(G\).
 \end{proposition}
 
 \begin{proof}
-This is the Eckart--Young--Mirsky theorem: the best rank-\(k\) approximation (in Frobenius norm) is obtained by truncating the SVD to the top \(k\) singular values. Take \(k=2\).
+This is the Eckart--Young--Mirsky theorem: the best rank-\(k\) approximation of a matrix in Frobenius norm is obtained by truncating its SVD to the top \(k\) singular values. Take \(k=2\).
 \end{proof}
 
-\section{Recovering Camera Pose from the Essential Matrix}
+\section{Metric Reconstruction from the Essential Matrix}
 
-Assume \(E\) has been estimated and projected onto the essential manifold (two equal singular values, one zero). 
+This section concerns the geometric reconstruction problem: given the essential matrix, recover the relative camera pose and reconstruct 3D scene points. 
 
-Then
+\subsection{Decomposition of the Essential Matrix}
+
+\begin{proposition}[Canonical SVD form]
+Let \(E=[t]_\times R\) be an essential matrix with \(t\neq 0\). Then \(E\) has rank \(2\) and singular values \((\|t\|,\|t\|,0)\). In particular, after scaling, one may write an SVD
 \[
 E = U \Sigma V^\top,
 \qquad
 \Sigma=\mathrm{diag}(1,1,0)
 \]
+\end{proposition}
 
-Using
+\begin{proof}
+The rank and singular value structure were established earlier: \(EE^\top = [t]_\times[t]_\times^\top = \|t\|^2 I - tt^\top\), which has eigenvalues \(\|t\|^2,\|t\|^2,0\). Hence the singular values of \(E\) are \(\|t\|,\|t\|,0\). Since \(E\) is defined up to nonzero scale, we may rescale so that the two nonzero singular values are \(1\), yielding \(\Sigma=\mathrm{diag}(1,1,0)\).
+\end{proof}
+
+\begin{theorem}[Pose recovery from \(E\)]
+Let \(E\in\mathbb{R}^{3\times 3}\) be an essential matrix with SVD
+\[
+E = U \Sigma V^\top,
+\qquad
+\Sigma=\mathrm{diag}(1,1,0).
+\]
+Define
 \[
 W =
 \begin{bmatrix}
@@ -325,7 +435,7 @@ W =
 1 & 0 & 0 \\
 0 & 0 & 1
 \end{bmatrix},
-\quad
+\qquad
 Z =
 \begin{bmatrix}
 0 & 1 & 0 \\
@@ -333,48 +443,99 @@ Z =
 0 & 0 & 0
 \end{bmatrix}
 \]
-Define candidate rotations and translation skew matrix by
+Then, the relative rotation and translation direction satisfy
 \[
-R \in \{ U W V^\top,\; U W^\top V^\top \},
+R \in \{UWV^\top,\;UW^\top V^\top\},
 \qquad
 [t]_\times = U Z U^\top
 \]
+Yielding four candidate poses \((R,\pm t)\), where \(t\) is determined only up to an unknown overall scale. 
 
-\begin{proposition}[Four-fold ambiguity]
-The decomposition above yields four candidate poses \((R,\pm t)\), where \(t\) is recovered only up to an overall unknown scale.
+\end{theorem}
+
+\begin{proof}
+Since \(\Sigma=\mathrm{diag}(1,1,0)\), we may write
+\[
+\Sigma = Z W^\top
+\]
+Because a direct multiplication gives
+\[
+Z W^\top =
+\begin{bmatrix}
+0 & 1 & 0 \\
+-1 & 0 & 0 \\
+0 & 0 & 0
+\end{bmatrix}
+\begin{bmatrix}
+0 & 1 & 0 \\
+-1 & 0 & 0 \\
+0 & 0 & 1
+\end{bmatrix}
+=
+\begin{bmatrix}
+1 & 0 & 0 \\
+0 & 1 & 0 \\
+0 & 0 & 0
+\end{bmatrix}
+=\Sigma
+\]
+Hence
+\[
+E = U \Sigma V^\top = U Z W^\top V^\top
+\]
+Define \([t]_\times := U Z U^\top\), which is skew-symmetric because \(Z\) is skew-symmetric and \(U\) is orthogonal. 
+
+Next define candidate rotations
+\[
+R_1 := U W V^\top, \qquad R_2 := U W^\top V^\top
+\]
+Using orthogonality \(U^\top U = V^\top V = I\), we compute
+\[
+[t]_\times R_1
+= (U Z U^\top)(U W V^\top)
+= U Z W V^\top
+\]
+Similarly,
+\[
+[t]_\times R_2
+= (U Z U^\top)(U W^\top V^\top)
+= U Z W^\top V^\top
+\]
+Since \(E = U Z W^\top V^\top\), we have \(E = [t]_\times R_2\). The alternative choice \(R_1\) corresponds to a second valid decomposition \(E=[t]_\times R\) because changing \(W\) to \(W^\top\) produces the same essential manifold up to the intrinsic four-fold ambiguity.
+
+Finally, \([t]_\times\) determines \(t\) only up to sign, since \([(-t)]_\times = -[t]_\times\), and \(E\) itself is defined only up to overall nonzero scale, so the magnitude of \(t\) cannot be recovered from two views alone. Combining the two candidate rotations with \(\pm t\) yields four candidate poses.
+\end{proof}
+
+\subsection{Cheirality Condition}
+
+\begin{proposition}[Cheirality to select the valid pose]
+Let \(P_1=[I\mid 0]\) and \(P_2=[R\mid t]\) be candidate normalised camera matrices obtained from an essential matrix decomposition. For a set of correct correspondences in a non-degenerate configuration, exactly one of the four candidates \((R,\pm t)\) yields triangulated 3D points with positive depth in both camera frames (cheirality).
 \end{proposition}
 
 \begin{proof}
-The SVD-based construction produces two candidates for \(R\) (via \(W\) or \(W^\top\)). The skew matrix \([t]_\times\) determines \(t\) only up to sign (since \([(-t)]_\times = -[t]_\times\) and scaling of \(E\) is unobservable), hence \(\pm t\). Finally, because \(E\) (and thus \([t]_\times\)) is only defined up to nonzero scale in two-view geometry, the magnitude of \(t\) cannot be recovered from image correspondences alone.
+For any candidate pose, triangulation yields a projective point \(X\in\mathbb{P}^3\) which, when expressed in each camera frame, has a depth given by the third component of \(X_1\) and \(X_2=RX_1+t\) (up to homogeneous scale). 
+
+Physically valid reconstructions require that the point lies in front of both cameras, i.e. both depths are positive after choosing a consistent scale. 
+
+The four decompositions differ by a reflection of the reconstructed rays with respect to the baseline direction and/or reversal of the translation direction. In a non-degenerate configuration with multiple correspondences, only one choice places the majority of points in front of both cameras simultaneously. Hence cheirality uniquely selects the correct solution.
 \end{proof}
 
-\paragraph{Cheirality condition.}
-Select the physically valid solution by enforcing cheirality: triangulated points must lie in front of both cameras (positive depth in each camera frame). Exactly one of the four candidates satisfies this for a set of correct correspondences in a non-degenerate configuration.
-
-\section{Triangulation}
-
-Given \(P_1,P_2\) and corresponding homogeneous image points \(x_1,x_2\), the 3D point \(X\) satisfies
-\[
-x_i \times (P_i X) = 0,\quad i=1,2
-\]
+\subsection{Triangulation}
 
 \begin{proposition}[Linear triangulation system]
-Each equation \(x_i\times(P_iX)=0\) yields two independent linear constraints in \(X\). Stacking both views produces a homogeneous system
+Given two projection matrices \(P_1,P_2\) and corresponding homogeneous image points \(x_1,x_2\in\mathbb{P}^2\), the 3D point \(X\in\mathbb{P}^3\) satisfies
+\[
+x_i \times (P_i X) = 0,\qquad i=1,2
+\]
+Each equation yields two independent linear constraints in \(X\). Stacking both views produces a homogeneous system
 \[
 A X = 0
 \]
-solvable (up to scale) by SVD as the right singular vector corresponding to the smallest singular value.
+Solvable (up to scale) by SVD as the right singular vector corresponding to the smallest singular value.
 \end{proposition}
 
 \begin{proof}
-For fixed \(i\), the cross product \(x_i \times (P_iX)=0\) means \(x_i\) and \(P_iX\) are colinear in \(\mathbb{P}^2\). Writing \(x_i=(u_i,v_i,w_i)^\top\) and \(P_iX = (p_{i1}^\top X,\; p_{i2}^\top X,\; p_{i3}^\top X)^\top\), the cross product gives three linear equations, but only two are independent because scaling in homogeneous coordinates makes one redundant. Taking the two independent rows and stacking both cameras yields \(AX=0\). 
+For fixed \(i\), the relation \(x_i \sim P_iX\) in \(\mathbb{P}^2\) means that \(x_i\) and \(P_iX\) are colinear, which is equivalent to \(x_i \times (P_iX)=0\). The cross product yields three linear equations in the homogeneous coordinates of \(X\), but only two are independent because one equation is a linear combination of the other two due to homogeneity. Selecting two independent rows for each view and stacking them yields a matrix \(A\) such that \(AX=0\). Under noise, the least-squares solution is obtained as the right singular vector associated with the smallest singular value of \(A\).
 \end{proof}
-
-In practice, one triangulates using projection matrices expressed in a common frame, e.g.
-\(
-P_1 = K_1[I\mid 0],\;
-P_2 = K_2[R\mid t]
-\),
-or using normalised coordinates with \(K_i=I\).
 
 \end{document}
