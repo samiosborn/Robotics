@@ -31,6 +31,11 @@ class Camera:
 
     # Project to camera frame
     def project(self, X_world): 
+        # Assert 
+        X_world = np.asarray(X_world, dtype=float)
+        # Raise error
+        if X_world.shape[0] != 3: 
+            raise ValueError("Points should have shape (3, N)")
         # Convert to homogeneous 
         X_h = homogenise(X_world)
         # Project

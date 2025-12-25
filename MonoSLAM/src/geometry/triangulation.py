@@ -19,7 +19,25 @@ def triangulate_point(P1, P2, x1, x2):
     # X
     X_h = Vt[-1]
     # Dehomogenise
-    return dehomogenise(X_h).reshape(3, )
+    X = dehomogenise(X_h).reshape(3, )
+    return X
+
+# Triangulate points
+def triangulate_points(P1, P2, x1s, x2s):
+    # Number of points
+    n_points = x1s.shape[1]
+    # Pre-allocate
+    Xs = np.zeros((3, n_points))
+    # Loop over points
+    for i in range(n_points):
+        # Corresponding point
+        x1i = x1s[:, i]
+        x2i = x2s[:, i]
+        # Triangulated point
+        Xi = triangulate_point(P1, P2, x1i, x2i)
+        # Append
+        Xs[:, i] = Xi
+    return Xs
 
 # Check if a point is in front of camera
 def is_in_front_of_camera(R, t, X):
@@ -38,20 +56,31 @@ def cheirality_check(R, t, X):
 
 # Select the valid pose from candidates
 def select_valid_pose(candidates, P1, x1s, x2s):
+    # Initialise
+    n_points = x1s.shape[1]
+    best_idx = None
+    best_count = 0
     # Loop over candidates
-    for R, t in candidates: 
+    for i, (R, t) in enumerate(candidates): 
         # Projection matrix (assuming no intrinsics)
         P2 = np.hstack((R, t.reshape(3, 1)))
         # Initialise cheirality check count
         count = 0
         # Loop over corresponding points
-        for x1, x2 in zip(x1s, x2s): 
-            X = triangulate_point(P1, P2, x1, x2)
+        for j in range(n_points): 
+            # Corresponding point
+            x1j = x1s[:, j]
+            x2j = x2s[:, j]
+            X = triangulate_point(P1, P2, x1j, x2j)
             # Check for cheirality
             if cheirality_check(R, t, X): 
                 count += 1
-        # Return valid pose
-        if count > 0: 
-            return R, t
+        # Counts
+        if count > best_count: 
+            best_idx = i
+            best_count = count
+    # Return best pose
+    if best_count > 0:
+        return candidates[best_idx]
     # Failure
     raise RuntimeError("No valid pose found")
