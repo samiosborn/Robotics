@@ -33,8 +33,8 @@ def generate_two_view_scene(n_points=20, seed=42, max_angle_deg=15.0, K1=None, K
     cam1 = Camera(K1, np.eye(3), np.zeros(3))
     cam2 = Camera(K2, R, t)
     # Project to image coordinates 
-    x1 = np.array([cam1.project(Xi) for Xi in X])
-    x2 = np.array([cam2.project(Xi) for Xi in X])
+    x1 = np.column_stack([cam1.project(Xi) for Xi in X])
+    x2 = np.column_stack([cam2.project(Xi) for Xi in X])
     # Return dict
     return {
         "R": R,
