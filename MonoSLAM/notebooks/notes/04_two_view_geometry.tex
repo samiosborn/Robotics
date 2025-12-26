@@ -538,4 +538,350 @@ Solvable (up to scale) by SVD as the right singular vector corresponding to the 
 For fixed \(i\), the relation \(x_i \sim P_iX\) in \(\mathbb{P}^2\) means that \(x_i\) and \(P_iX\) are colinear, which is equivalent to \(x_i \times (P_iX)=0\). The cross product yields three linear equations in the homogeneous coordinates of \(X\), but only two are independent because one equation is a linear combination of the other two due to homogeneity. Selecting two independent rows for each view and stacking them yields a matrix \(A\) such that \(AX=0\). Under noise, the least-squares solution is obtained as the right singular vector associated with the smallest singular value of \(A\).
 \end{proof}
 
+\subsection{Error metrics for epipolar geometry}
+
+In practice, correspondences \((x_1,x_2)\) are noisy, so the epipolar constraint, \(
+x_2^\top F x_1 = 0
+\), will not hold exactly. 
+
+So, let \(x_1, x_2 \in \mathbb{P}^2\) be corresponding homogeneous image points (typically with \(w=1\)), and define the induced epipolar lines
+\[
+\ell_2 := F x_1, \qquad \ell_1 := F^\top x_2
+\]
+Where \(\ell_2\) is the epipolar line in image 2 corresponding to \(x_1\), and \(\ell_1\) is the epipolar line in image 1 corresponding to \(x_2\).
+
+\subsubsection{Algebraic epipolar residual}
+
+\begin{definition}[Algebraic residual]
+The algebraic epipolar residual of a correspondence \((x_1, x_2)\) under \(F\) is
+
+\[
+r(x_1,x_2;F) := x_2^\top F x_1
+\]
+\end{definition}
+
+\begin{proposition}[Scale sensitivity of the algebraic residual]
+For any nonzero scalar \(\alpha\), one has
+\[
+r(x_1,x_2;\alpha F) = \alpha\, r(x_1,x_2;F)
+\]
+Hence the algebraic residual is not invariant to the projective scaling ambiguity \(F \sim \alpha F\)
+\end{proposition}
+
+\begin{proof}
+Immediate from bilinearity:
+\[
+r(x_1,x_2;\alpha F) = x_2^\top (\alpha F) x_1 = \alpha\, x_2^\top F x_1
+\]
+\end{proof}
+
+\paragraph{Scale-invariant residuals}
+Because of this scale dependence, raw algebraic residuals are best used only after fixing a convention for the scale of \(F\) (e.g. \(\|F\|_F=1\)), or as an intermediate quantity inside scale-invariant metrics.
+
+\subsubsection{Point-to-line distance and symmetric epipolar distance}
+
+\begin{lemma}[Euclidean point-to-line distance in homogeneous coordinates]
+Let \(\ell = (a,b,c)^\top \in \mathbb{P}^2\) represent the line
+\[
+\ell = \{(u,v)\in\mathbb{R}^2 : a u + b v + c = 0\}
+\]
+Let \(x=(u,v,1)^\top\) be a point in homogeneous coordinates. If \((a,b)\neq(0,0)\), then the Euclidean distance from \(x\) to \(\ell\) is
+\[
+d(x,\ell) = \frac{|\,\ell^\top x\,|}{\sqrt{a^2+b^2}}
+\]
+\end{lemma}
+
+\begin{proof}
+Let \(n := (a,b)^\top \in \mathbb{R}^2\), and write the line as
+\[
+n^\top y + c = 0,
+\qquad y=(y_1,y_2)^\top \in \mathbb{R}^2
+\]
+Since \((a,b)\neq(0,0)\), we have \(n\neq 0\). Define the unit normal vector
+\[
+\hat{n} := \frac{n}{\|n\|}, \qquad \|n\|=\sqrt{a^2+b^2}
+\]
+We claim that for any point \(p=(u,v)^\top\), the (signed) distance from \(p\) to the line is
+\[
+d_{\mathrm{signed}}(p,\ell) = \hat{n}^\top p + \frac{c}{\|n\|}
+\]
+To prove this, consider the orthogonal projection of \(p\) onto the line along the normal direction. Any point on the normal line through \(p\) has the form
+\[
+q(\lambda) = p - \lambda \hat{n}, \qquad \lambda\in\mathbb{R}
+\]
+We choose \(\lambda\) such that \(q(\lambda)\in \ell\), i.e.
+\[
+n^\top q(\lambda) + c = 0
+\]
+Substitute \(q(\lambda)=p-\lambda \hat{n}\):
+\[
+n^\top(p-\lambda \hat{n}) + c = 0
+\quad\Longleftrightarrow\quad
+n^\top p - \lambda\, n^\top \hat{n} + c = 0
+\]
+But \(n^\top \hat{n} = n^\top (n/\|n\|) = \|n\|\)
+
+Hence
+\[
+n^\top p - \lambda \|n\| + c = 0
+\quad\Longrightarrow\quad
+\lambda = \frac{n^\top p + c}{\|n\|}
+\]
+Now observe that \(\lambda\) is exactly the signed length of the displacement from \(p\) to its projection \(q(\lambda)\), because \(\hat{n}\) is a unit vector:
+\[
+\|p-q(\lambda)\| = \|\lambda \hat{n}\| = |\lambda|
+\]
+Therefore the Euclidean distance is
+\[
+d(p,\ell)=|\lambda|=\frac{|n^\top p + c|}{\|n\|}
+=\frac{|a u + b v + c|}{\sqrt{a^2+b^2}}
+\]
+Finally, writing \(x=(u,v,1)^\top\) and \(\ell=(a,b,c)^\top\) gives \(a u + b v + c = \ell^\top x\), so
+\[
+d(x,\ell)=\frac{|\ell^\top x|}{\sqrt{a^2+b^2}}
+\]
+\end{proof}
+
+\begin{definition}[Symmetric epipolar distance]
+Given a correspondence \((x_1,x_2)\) and a fundamental matrix \(F\), the induced epipolar lines are
+\[
+\ell_2 := F x_1 \quad \text{(the epipolar line in image 2)}, 
+\qquad
+\ell_1 := F^\top x_2 \quad \text{(the epipolar line in image 1)}
+\]
+The \emph{symmetric epipolar distance} measures how well the correspondence satisfies the epipolar geometry by summing the squared point-to-line distances in both images:
+\[
+d_{\mathrm{sym}}^2(x_1,x_2;F)
+:=
+d(x_2,\ell_2)^2 \;+\; d(x_1,\ell_1)^2
+\]
+In other words, it penalises both deviations: how far \(x_2\) lies from the line predicted by \(x_1\), and how far \(x_1\) lies from the line predicted by \(x_2\).
+
+If \(x_i=(u_i,v_i,1)^\top\), \(\ell_2=(a_2,b_2,c_2)^\top\), and \(\ell_1=(a_1,b_1,c_1)^\top\), then using the Euclidean point-to-line distance formula one may write
+\[
+d_{\mathrm{sym}}^2(x_1,x_2;F)
+=
+\frac{(x_2^\top F x_1)^2}{a_2^2+b_2^2}
++
+\frac{(x_2^\top F x_1)^2}{a_1^2+b_1^2}
+\]
+\end{definition}
+
+\begin{proposition}[Scale invariance of symmetric epipolar distance]
+For any nonzero scalar \(\alpha\), the symmetric epipolar distance satisfies
+\[
+d_{\mathrm{sym}}^2(x_1,x_2;\alpha F) = d_{\mathrm{sym}}^2(x_1,x_2;F)
+\]
+\end{proposition}
+
+\begin{proof}
+Scaling \(F\mapsto \alpha F\) scales the epipolar lines \(\ell_2\mapsto \alpha \ell_2\), \(\ell_1\mapsto \alpha \ell_1\). 
+
+Then the numerators \((\ell^\top x)^2\) scale by \(\alpha^2\), and the denominators \(a^2+b^2\) also scale by \(\alpha^2\). Hence, each squared distance term is invariant, and so is their sum.
+\end{proof}
+
+\subsubsection{Sampson distance (first-order geometric approximation)}
+
+The symmetric epipolar distance treats the two point-to-line distances separately, but it is still not the true geometric reprojection error. A widely used approximation is the Sampson distance, obtained by a first-order (Gauss--Newton) correction of the epipolar constraint.
+
+\begin{definition}[Epipolar constraint function]
+Let \(x_1=(u_1,v_1,1)^\top\), \(x_2=(u_2,v_2,1)^\top\). 
+
+Define the scalar constraint
+\[
+g(u_1,v_1,u_2,v_2) := x_2^\top F x_1
+\]
+\end{definition}
+
+\begin{theorem}[Sampson distance formula]
+Let \(g\) be as above and assume \(\nabla g \neq 0\) at the correspondence. 
+
+The Sampson distance is defined by
+\[
+d_{\mathrm{samp}}^2(x_1,x_2;F)
+:=
+\frac{g^2}{\|\nabla g\|^2}
+\]
+Where the gradient is taken with respect to \((u_1,v_1,u_2,v_2)\).
+
+Writing \(\ell_2 = F x_1 = (a_2,b_2,c_2)^\top\) and \(\ell_1 = F^\top x_2 = (a_1,b_1,c_1)^\top\), one obtains the explicit expression
+\[
+d_{\mathrm{samp}}^2(x_1,x_2;F)
+=
+\frac{(x_2^\top F x_1)^2}
+{a_2^2 + b_2^2 + a_1^2 + b_1^2 }
+\]
+\end{theorem}
+
+\begin{proof}
+Consider the smallest correction \(\delta = (\delta u_1,\delta v_1,\delta u_2,\delta v_2)^\top\) such that the corrected correspondence satisfies the epipolar constraint to first order. 
+
+Linearising \(g\) around the observation gives
+\[
+g(u+\delta u) \approx g(u) + \nabla g(u)^\top \delta
+\]
+We seek the minimum-norm correction \(\delta\) such that the linearised constraint is satisfied:
+\[
+g(u) + \nabla g(u)^\top \delta = 0,
+\qquad
+\text{minimise } \|\delta\|^2
+\]
+This is a constrained least-squares problem. By standard Lagrange multiplier arguments, the minimiser is attained when \(\delta\) is parallel to \(\nabla g\), i.e. \(\delta = -\lambda \nabla g\). Substituting into the constraint yields
+\[
+g(u) - \lambda \|\nabla g(u)\|^2 = 0
+\quad\Longrightarrow\quad
+\lambda = \frac{g(u)}{\|\nabla g(u)\|^2}
+\]
+Therefore
+\[
+\|\delta\|^2 = \lambda^2 \|\nabla g(u)\|^2 = \frac{g(u)^2}{\|\nabla g(u)\|^2}
+\]
+This defines the Sampson distance.
+
+It remains to compute \(\nabla g\). Writing \(g = x_2^\top F x_1\), differentiation with respect to the inhomogeneous coordinates gives
+\[
+\frac{\partial g}{\partial u_2} = (F x_1)_1 = a_2,\qquad
+\frac{\partial g}{\partial v_2} = (F x_1)_2 = b_2
+\]
+and similarly
+\[
+\frac{\partial g}{\partial u_1} = (F^\top x_2)_1 = a_1,\qquad
+\frac{\partial g}{\partial v_1} = (F^\top x_2)_2 = b_1
+\]
+Hence \(\|\nabla g\|^2 = a_2^2+b_2^2+a_1^2+b_1^2\), yielding the stated closed form.
+\end{proof}
+
+\begin{proposition}[Scale invariance of Sampson distance]
+For any nonzero scalar \(\alpha\),
+\[
+d_{\mathrm{samp}}^2(x_1,x_2;\alpha F) = d_{\mathrm{samp}}^2(x_1,x_2;F).
+\]
+\end{proposition}
+
+\begin{proof}
+Under \(F\mapsto \alpha F\), the numerator \((x_2^\top F x_1)^2\) scales by \(\alpha^2\). The line coefficients \(\ell_2 = F x_1\) and \(\ell_1 = F^\top x_2\) scale by \(\alpha\), so the denominator \(a_2^2+b_2^2+a_1^2+b_1^2\) scales by \(\alpha^2\). The ratio is invariant.
+\end{proof}
+
+\paragraph{Aggregating per-correspondence errors}
+Given correspondences \(\{(x_1^{(i)},x_2^{(i)})\}_{i=1}^N\) and a chosen metric \(d^2(\cdot)\), a common summary statistic is the root-mean-square (RMS) error
+\[
+\mathrm{RMS}(d)
+=
+\sqrt{\frac{1}{N}\sum_{i=1}^N d^2\!\left(x_1^{(i)},x_2^{(i)};F\right)}
+\]
+
+\subsection{RANSAC for robust fundamental matrix estimation}
+
+In real data, putative correspondences \(\{(x_1^{(i)},x_2^{(i)})\}_{i=1}^N\) contain outliers (mismatches), so a single least-squares fit (e.g. the normalised 8-point algorithm) can be corrupted. 
+
+A standard remedy is RANSAC (Random Sample Consensus), which repeatedly fits a model from minimal random subsets and selects the model that attains the largest consensus set under an error threshold.
+
+\subsubsection{Minimal solver and inlier test}
+
+Let \(s\) denote the sample size required by a minimal solver. For the 8-point algorithm, \(s=8\).
+Given a candidate fundamental matrix \(F\), define a per-correspondence error \(d(\cdot)\) (e.g. Sampson distance or symmetric epipolar distance). 
+
+Declare \(i\) an inlier if for a chosen threshold \(\tau>0\)
+\[
+d\!\left(x_1^{(i)},x_2^{(i)};F\right) \le \tau
+\]
+The consensus set (inlier set) is
+\[
+\mathcal{I}(F) := \left\{ i \in \{1,\dots,N\} : d\!\left(x_1^{(i)},x_2^{(i)};F\right) \le \tau \right\}
+\]
+
+\begin{definition}[RANSAC estimator for \(F\)]
+Fix an integer \(T\ge 1\) (number of trials), a sample size \(s\), and a threshold \(\tau\).
+For each trial \(t=1,\dots,T\):
+\begin{enumerate}[label=(\roman*)]
+  \item Sample a subset \(S_t \subset \{1,\dots,N\}\) uniformly at random with \(|S_t|=s\).
+  \item Fit \(F_t\) using a minimal solver on \(\{(x_1^{(i)},x_2^{(i)}) : i\in S_t\}\).
+  \item Compute the consensus set \(\mathcal{I}(F_t)\) under the chosen metric \(d\) and threshold \(\tau\).
+\end{enumerate}
+Return the candidate with maximal consensus size:
+\[
+F_{\mathrm{best}} \in \arg\max_{t\in\{1,\dots,T\}} |\mathcal{I}(F_t)|
+\]
+Optionally, refit by recomputing \(F\) from all the inliers \(\mathcal{I}(F_{\mathrm{best}})\).
+\end{definition}
+
+\paragraph{Practical tie-breaking}
+If multiple candidates achieve the same inlier count, a common tie-break is the smallest mean inlier error:
+\[
+\frac{1}{|\mathcal{I}(F_t)|}\sum_{i\in \mathcal{I}(F_t)} d\!\left(x_1^{(i)},x_2^{(i)};F_t\right)
+\]
+
+\subsubsection{Success probability and iteration bound}
+
+RANSAC succeeds once it draws at least one all-inlier minimal sample.
+
+\begin{definition}[Inlier ratio]
+Let \(w \in [0,1]\) denote the (unknown) fraction of inliers among the \(N\) correspondences:
+\[
+w := \frac{|\mathcal{I}_\star|}{N}
+\]
+Where \(\mathcal{I}_\star\) is the true inlier set (with respect to an ideal model and noise level).
+\end{definition}
+
+\begin{lemma}[Probability of an all-inlier sample]
+Assume each RANSAC trial samples \(s\) indices uniformly at random, and that the inlier ratio is \(w\). Then the probability that a single trial draws an all-inlier sample is
+\[
+p_{\mathrm{good}} = w^s
+\]
+\end{lemma}
+
+\begin{proof}
+Under the idealised independence model, the probability that one randomly drawn correspondence is an inlier is \(w\). 
+For an \(s\)-tuple of draws, the probability all \(s\) are inliers is the product \(w^s\). 
+Note: When sampling without replacement, the exact probability differs slightly but is well-approximated by \(w^s\) when \(N\) is large.
+\end{proof}
+
+\begin{theorem}[RANSAC iteration bound for a desired confidence]
+Fix a desired success probability \(p \in (0,1)\). If the inlier ratio is \(w\) and the minimal sample size is \(s\), then choosing the number of trials \(T\) to satisfy
+\[
+T \;\ge\; \frac{\log(1-p)}{\log(1-w^s)}
+\]
+This ensures that the probability of drawing at least one all-inlier sample is at least \(p\).
+\end{theorem}
+
+\begin{proof}
+Let \(p_{\mathrm{good}} = w^s\) be the probability that a single trial is all-inlier. The probability a trial is not all-inlier is \(1-p_{\mathrm{good}}\). 
+
+Assuming independent trials, the probability that none of the \(T\) trials is all-inlier is
+\[
+(1-p_{\mathrm{good}})^T = (1-w^s)^T
+\]
+Therefore, the probability of at least one all-inlier sample is
+\[
+1 - (1-w^s)^T
+\]
+To achieve success probability at least \(p\), require
+\[
+1 - (1-w^s)^T \ge p
+\quad\Longleftrightarrow\quad
+(1-w^s)^T \le 1-p
+\]
+Taking logarithms (note \(0<1-w^s<1\), hence \(\log(1-w^s)<0\)) yields
+\[
+T \log(1-w^s) \le \log(1-p)
+\quad\Longleftrightarrow\quad
+T \ge \frac{\log(1-p)}{\log(1-w^s)}
+\]
+\end{proof}
+
+\paragraph{Adaptive iteration count}
+Since \(w\) is unknown, RANSAC commonly updates an empirical estimate \(\hat{w} = |\mathcal{I}(F_{\mathrm{best}})|/N\) as better models are found, and recomputes a target \(T\) via the bound above to stop early.
+
+\subsubsection{Why refit on inliers improves the estimate}
+
+The best model found by RANSAC is usually fitted from a minimal subset, which is statistically inefficient under noise. After identifying inliers, one should refit using all inliers.
+
+\begin{proposition}[Refitting on inliers reduces variance (heuristic)]
+Assume the inlier correspondences are generated from a fixed ground-truth fundamental matrix \(F_\star\) with i.i.d.\ measurement noise, and assume the deterministic estimator \(\widehat{F}\) behaves like a least-squares estimator on the chosen coordinates. Then, refitting \(F\) on a larger set of inliers typically reduces the estimator variance relative to using a single minimal sample.
+\end{proposition}
+
+\begin{proof}
+In least-squares estimation under i.i.d.\ noise, the covariance of the parameter estimate is proportional to \((A^\top A)^{-1}\), where \(A\) is the design matrix formed from the data. Using more (independent) inlier correspondences increases \(A^\top A\) in the positive semidefinite order, which decreases \((A^\top A)^{-1}\) and hence reduces estimator variance. While the fundamental matrix estimation problem includes a rank constraint and projective scale, the same principle applies: fitting on more inliers yields a more stable estimate than fitting on a minimal subset.
+\end{proof}
+
 \end{document}
