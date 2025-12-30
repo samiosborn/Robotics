@@ -28,7 +28,7 @@ def dehomogenise(X_h):
     # Weight
     w = X_h[-1]
     # Error
-    if np.any(abs(w)) < 1e-12: 
+    if np.any(np.abs(w)) < 1e-12: 
         raise ValueError("Cannot dehomogenise point at infinity")
     # Divide all but last by weight
     return X_h[:-1] / w
