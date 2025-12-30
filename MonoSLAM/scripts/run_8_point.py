@@ -2,7 +2,7 @@
 import numpy as np
 from synthetic.two_view import generate_two_view_scene
 from geometry.essential import essential_from_fundamental, enforce_essential_constraints, decompose_essential
-from geometry.epipolar import mean_epipolar_residual
+from geometry.epipolar import sampson_distances_sq
 from geometry.fundamental import estimate_fundamental
 from geometry.camera import Camera
 from geometry.triangulation import triangulate_points, select_valid_pose
@@ -24,9 +24,10 @@ K2 = scene_data["K2"]
 # Estimate fundamental matrix
 F_est = estimate_fundamental(x1, x2)
 
-# Epipolar RMS residual
-residual_RMS = mean_epipolar_residual(x1, x2, F_est)
-print("Epipolar RMS residual: ", np.round(residual_RMS, 3))
+# Sampson distance
+d_sq = sampson_distances_sq(x1, x2, F_est)
+sampson_rmse = np.sqrt(np.mean(d_sq))
+print("Sampson distance RMSE: ", np.round(sampson_rmse, 3))
 
 # Estimate essential matrix
 E_est = essential_from_fundamental(F_est, K1, K2)
@@ -70,7 +71,7 @@ x2_est = cam2.project(X_est)
 # Reprojection depth error
 x1_residual = x1 - x1_est
 x2_residual = x2 - x2_est
-x1_residual_RMS = np.sqrt(np.mean(x1_residual**2))
-x2_residual_RMS = np.sqrt(np.mean(x2_residual**2))
+x1_residual_RMS = np.sqrt(np.mean(np.sum(x1_residual**2, axis=0)))
+x2_residual_RMS = np.sqrt(np.mean(np.sum(x2_residual**2, axis=0)))
 print("Camera 1 RMS reprojection error: ", np.round(x1_residual_RMS, 3))
 print("Camera 2 RMS reprojection error: ", np.round(x2_residual_RMS, 3))
