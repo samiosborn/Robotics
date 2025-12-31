@@ -42,8 +42,8 @@ def point_to_line_distances(x, l):
     den = np.maximum(np.sqrt(l[0]**2 + l[1]**2), 1e-12)
     return num / den
 
-# Symmetric distances squared
-def symmetric_distances_sq(x1, x2, F):
+# Symmetric epipolar distances squared
+def symmetric_epipolar_distances_sq(x1, x2, F):
     # Assert 
     x1 = np.asarray(x1, dtype = float)
     x2 = np.asarray(x2, dtype = float)
@@ -83,3 +83,10 @@ def sampson_distances_sq(x1, x2, F):
     # Denominator
     den = np.maximum(l1[0]**2 + l1[1]**2 + l2[0]**2 + l2[1]**2, 1e-12)
     return num / den
+
+# Sampson RMSE
+def sampson_rmse(x1, x2, F): 
+    # Sampson distances squared
+    d_sq = sampson_distances_sq(x1, x2, F)
+    # RMSE
+    return np.sqrt(np.mean(d_sq))
