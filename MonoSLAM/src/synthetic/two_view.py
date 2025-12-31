@@ -4,7 +4,7 @@ from geometry.rotation import axis_angle_to_rotmat
 from geometry.camera import Camera
 
 # Generate two-view scene
-def generate_two_view_scene(n_points=20, seed=42, max_angle_deg=15.0, K1=None, K2=None): 
+def generate_two_view_scene(n_points=20, seed=42, max_angle_deg=15.0, K1=None, K2=None, outlier_ratio=0.2, noise_sigma_pixels=5): 
     # Random number generator
     rng = np.random.default_rng(seed)
     # Intrinsics
@@ -33,15 +33,42 @@ def generate_two_view_scene(n_points=20, seed=42, max_angle_deg=15.0, K1=None, K
     cam1 = Camera(K1, np.eye(3), np.zeros(3))
     cam2 = Camera(K2, R, t)
     # Project to image coordinates 
-    x1 = np.column_stack([cam1.project(Xi) for Xi in X])
-    x2 = np.column_stack([cam2.project(Xi) for Xi in X])
+    x1_clean = np.column_stack([cam1.project(Xi) for Xi in X])
+    x2_clean = np.column_stack([cam2.project(Xi) for Xi in X])
+    # No noise
+    if noise_sigma_pixels is None or noise_sigma_pixels <= 0: 
+        x1 = x1_clean.copy()
+        x2 = x2_clean.copy()
+    else: 
+        # Gaussian noise
+        x1 = x1_clean + rng.normal(scale=noise_sigma_pixels, size=x1_clean.shape)
+        x2 = x2_clean + rng.normal(scale=noise_sigma_pixels, size=x2_clean.shape)
+    # Initialise inlier mask
+    inlier_mask = np.ones(n_points, dtype=bool)
+    # Number of outliers
+    outlier_ratio = float(np.clip(outlier_ratio, 0.0, 1.0))
+    n_outliers = int(np.round(outlier_ratio * n_points))
+    if n_outliers > 0: 
+        # Outliers index
+        outliers_idx = rng.choice(n_points, size=n_outliers, replace=False)
+        # Inlier mask
+        inlier_mask[outliers_idx] = False
+        # Permutation as copy of idx
+        perm = outliers_idx.copy()
+        # Shuffle outliers index
+        rng.shuffle(perm)
+        # Shuffle outliers 
+        x2[:, outliers_idx] = x2[:, perm]
+    else:
+        outliers_idx = np.array([], dtype=int)
     # Return dict
     return {
         "R": R,
         "t": t,
         "X": X,
-        "x1": x1,
-        "x2": x2,
-        "K1": K1,
-        "K2": K2
+        "x1_clean": x1_clean, "x2_clean": x2_clean,
+        "x1": x1, "x2": x2,
+        "inlier_mask": inlier_mask,
+        "outliers_idx": outliers_idx,
+        "K1": K1, "K2": K2
     }
