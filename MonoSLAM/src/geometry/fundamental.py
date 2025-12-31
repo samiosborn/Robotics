@@ -89,15 +89,13 @@ def estimate_fundamental_ransac(x1, x2, num_trials, threshold_sq, seed=42):
         count = int(np.sum(inlier_mask))
         if count > best_count: 
             best_count = count
-            if best_count == N: 
-                break
             best_inlier_mask = inlier_mask
             best_F = F_t
+            # Early return
+            if best_count == N: 
+                break
 
     if best_F is None or best_count < sample_size: 
         raise ValueError("RANSAC failed: not enough inliers to estimate F below threshold")
-
-    # Refit using all inliers
-    best_F = estimate_fundamental(x1[:, best_inlier_mask], x2[:, best_inlier_mask])
 
     return best_F, best_inlier_mask, best_count
