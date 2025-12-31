@@ -55,15 +55,27 @@ def cheirality_check(R, t, X):
     return (in_front_cam_1 and in_front_cam_2)
 
 # Select the valid pose from candidates
-def select_valid_pose(candidates, P1, x1s, x2s):
+def select_valid_pose(candidates, K1, K2, x1s, x2s):
+    # Assert
+    K1 = np.asarray(K1, dtype=float)
+    K2 = np.asarray(K2, dtype=float)
+    x1 = np.asarray(x1, dtype=float)
+    x2 = np.asarray(x2, dtype=float)
+    # Check dimensions
+    if K1.shape != (3, 3) or K2.shape != (3, 3):
+        raise ValueError("Shape of K1 and K2 should be (3, 3)")
+    if x1s.shape[0] != 2 or x1s.shape != x2s.shape: 
+        raise ValueError("Points should be (2, N)")
     # Initialise
     n_points = x1s.shape[1]
     best_idx = None
     best_count = 0
+    # Projection matrix 1 (at origin)
+    P1 = K1 @ np.hstack((np.eye(3), np.zeros((3, 1))))
     # Loop over candidates
     for i, (R, t) in enumerate(candidates): 
         # Projection matrix (assuming no intrinsics)
-        P2 = np.hstack((R, t.reshape(3, 1)))
+        P2 = K2 @ np.hstack((R, t.reshape(3, 1)))
         # Initialise cheirality check count
         count = 0
         # Loop over corresponding points
