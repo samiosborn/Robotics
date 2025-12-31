@@ -10,7 +10,7 @@ from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations
 
 # Generate two-view scene data
-scene_data = generate_two_view_scene(n_points = 10)
+scene_data = generate_two_view_scene(n_points = 10, outlier_ratio=0.0, noise_sigma_pixels=None)
 
 # Unpack
 R_true = scene_data["R"]
@@ -39,7 +39,7 @@ E_est = enforce_essential_constraints(E_est)
 candidate_poses = decompose_essential(E_est)
 
 # Camera 1
-cam1 = Camera(K1, np.eye(3), np.zeros(3))
+cam1 = Camera(K1, np.eye(3), np.zeros((3, 1)))
 
 # Projection matrix 1
 P1 = cam1.P
@@ -68,7 +68,7 @@ X_est = triangulate_points(P1, P2, x1, x2)
 x1_est = cam1.project(X_est)
 x2_est = cam2.project(X_est)
 
-# Reprojection depth error
+# 2D Reprojection error
 x1_residual = x1 - x1_est
 x2_residual = x2 - x2_est
 x1_residual_RMS = np.sqrt(np.mean(np.sum(x1_residual**2, axis=0)))
