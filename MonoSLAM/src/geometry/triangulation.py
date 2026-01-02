@@ -4,7 +4,7 @@ from geometry.homogeneous import homogenise, dehomogenise
 
 # Triangulate a point
 def triangulate_point(P1, P2, x1, x2):
-    # Homogenise
+    # Homogenise and reshape
     x1 = homogenise(x1).reshape(3, )
     x2 = homogenise(x2).reshape(3, )
     # AX = 0
@@ -23,21 +23,27 @@ def triangulate_point(P1, P2, x1, x2):
     return X
 
 # Triangulate points
-def triangulate_points(P1, P2, x1s, x2s):
+def triangulate_points(P1, P2, x1, x2):
+    # Assert
+    x1 = np.asarray(x1, dtype=float)
+    x2 = np.asarray(x2, dtype=float)
+    # Dimension check
+    if x1.ndim != 2 or x2.ndim != 2 or x1.shape[0] != 2 or x2.shape[0] != 2 or x1.shape[1] != x2.shape[1]:
+        raise ValueError(f"x1 and x2 must be (2, N); got {x1.shape} and {x2.shape}")
     # Number of points
-    n_points = x1s.shape[1]
+    n_points = x1.shape[1]
     # Pre-allocate
-    Xs = np.zeros((3, n_points))
+    X = np.zeros((3, n_points))
     # Loop over points
     for i in range(n_points):
         # Corresponding point
-        x1i = x1s[:, i]
-        x2i = x2s[:, i]
+        x1i = x1[:, i]
+        x2i = x2[:, i]
         # Triangulated point
         Xi = triangulate_point(P1, P2, x1i, x2i)
         # Append
-        Xs[:, i] = Xi
-    return Xs
+        X[:, i] = Xi
+    return X
 
 # Check if a point is in front of camera
 def is_in_front_of_camera(R, t, X):
@@ -54,8 +60,8 @@ def cheirality_check(R, t, X):
     # Check both
     return (in_front_cam_1 and in_front_cam_2)
 
-# Select the valid pose from candidates
-def select_valid_pose(candidates, K1, K2, x1s, x2s):
+# Disambiguate pose candidates using cheirality
+def disambiguate_pose_cheirality(candidates, K1, K2, x1, x2):
     # Assert
     K1 = np.asarray(K1, dtype=float)
     K2 = np.asarray(K2, dtype=float)
@@ -64,10 +70,10 @@ def select_valid_pose(candidates, K1, K2, x1s, x2s):
     # Check dimensions
     if K1.shape != (3, 3) or K2.shape != (3, 3):
         raise ValueError("Shape of K1 and K2 should be (3, 3)")
-    if x1s.shape[0] != 2 or x1s.shape != x2s.shape: 
+    if x1.shape[0] != 2 or x1.shape != x2.shape: 
         raise ValueError("Points should be (2, N)")
     # Initialise
-    n_points = x1s.shape[1]
+    n_points = x1.shape[1]
     best_idx = None
     best_count = 0
     # Projection matrix 1 (at origin)
@@ -81,8 +87,8 @@ def select_valid_pose(candidates, K1, K2, x1s, x2s):
         # Loop over corresponding points
         for j in range(n_points): 
             # Corresponding point
-            x1j = x1s[:, j]
-            x2j = x2s[:, j]
+            x1j = x1[:, j]
+            x2j = x2[:, j]
             X = triangulate_point(P1, P2, x1j, x2j)
             # Check for cheirality
             if cheirality_check(R, t, X): 
