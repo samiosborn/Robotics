@@ -52,7 +52,7 @@ def estimate_fundamental(x1, x2):
     return F
 
 # Estimate fundamental matrix via RANSAC
-def estimate_fundamental_ransac(x1, x2, num_trials, threshold_sq, seed=42):
+def estimate_fundamental_ransac(x1, x2, num_trials=1000, threshold_sq=9, seed=42):
     # Random number generator
     rng = np.random.default_rng(seed)
     # Check dimensions
