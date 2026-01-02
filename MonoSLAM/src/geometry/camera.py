@@ -7,11 +7,11 @@ class Camera:
         # --- Class Variables ---
 
         # Intrinsic Matrix (K)
-        self.K = K
+        self.K = np.asarray(K, dtype=float).reshape(3, 3)
         # Rotation Matrix (R)
-        self.R = R
+        self.R = np.asarray(R, dtype=float).reshape(3, 3)
         # Translation Vector (t)
-        self.t = t
+        self.t = np.asarray(t, dtype=float).reshape(3,)
         # Projection Matrix (P)
         self.P = self.K @ np.hstack((self.R, self.t.reshape(3,1)))
         # Camera Center (C)
@@ -35,7 +35,7 @@ class Camera:
         # Return pixel coordinates
         return x_camera
 
-    # Reprojection residuals
+    # Reprojection residuals (pixels)
     def reprojection_residuals(self, X, x_obs):
         # Assert
         x_obs = np.asarray(x_obs, dtype=float)
