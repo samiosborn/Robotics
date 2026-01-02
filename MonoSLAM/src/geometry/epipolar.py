@@ -89,4 +89,4 @@ def sampson_rmse(x1, x2, F):
     # Sampson distances squared
     d_sq = sampson_distances_sq(x1, x2, F)
     # RMSE
-    return np.sqrt(np.mean(d_sq))
+    return float(np.sqrt(np.mean(d_sq)))
