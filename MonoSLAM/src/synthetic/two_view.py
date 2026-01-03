@@ -4,12 +4,13 @@ from geometry.rotation import axis_angle_to_rotmat
 from geometry.camera import Camera
 
 # Generate two-view scene
-def generate_two_view_scene(n_points=20, seed=42, max_angle_deg=15.0, K1=None, K2=None, outlier_ratio=0.2, noise_sigma=0.005): 
+def generate_two_view_scene(n_points=50, seed=42, max_angle_deg=15.0, K1=None, K2=None, outlier_ratio=0.2, noise_sigma=3): 
     # Random number generator
     rng = np.random.default_rng(seed)
     # Intrinsics
     if K1 is None:
-        K1 = np.array([[800, 0, 320],
+        K1 = np.array([
+                    [800, 0, 320],
                     [0, 800, 240],
                     [0,   0,   1]], dtype=float)
     if K2 is None:
