@@ -66,7 +66,7 @@ def _evaluate_model(tag, F_est, x1, x2, K1, K2, x1_clean=None, x2_clean=None, X_
             x1_clean_pred = x1[:, clean_mask]
             x2_clean_pred = x2[:, clean_mask]
             # Triangulate on that same subset for comparison
-            X_clean = triangulate_points(P1, P2, x1_clean_pred, x2_clean_pred)
+            X_clean = triangulate_points(P1, P2, x1_clean[:, clean_mask], x2_clean[:, clean_mask])
             print(tag, "Cam1 reproj RMSE (clean, true & pred):", cam1.reprojection_rmse(X_clean, x1_clean_use))
             print(tag, "Cam2 reproj RMSE (clean, true & pred):", cam2.reprojection_rmse(X_clean, x2_clean_use))
     # GT 3D RMSE reprojection using estimates cameras
@@ -76,12 +76,13 @@ def _evaluate_model(tag, F_est, x1, x2, K1, K2, x1_clean=None, x2_clean=None, X_
             Xgt = Xgt.T
         if Xgt.shape[0] == 3 and Xgt.shape[1] == N:
             print(tag, "Cam1 GT-3D reproj RMSE (clean):", cam1.reprojection_rmse(Xgt, x1_clean))
-            print(tag, "Cam2 GT-3D reproj RMSE (clean):", cam2.reprojection_rmse(Xgt, x2_clean))
+            cam2_gt = Camera(K2, R_true, t_true)
+            print(tag, "Cam2 GT-3D reproj RMSE (clean):", cam2_gt.reprojection_rmse(Xgt, x2_clean))
     # Pose error
     if R_true is not None:
-        print(tag, "Rotation error (rad):", float(np.round(angle_between_rotmats(R_est, R_true), 3)))
+        print(tag, "Rotation error (rad):", np.round(angle_between_rotmats(R_est, R_true), 3))
     if t_true is not None:
-        print(tag, "Translation error (rad):", float(np.round(angle_between_translations(t_est, t_true), 3)))
+        print(tag, "Translation error (rad):", np.round(angle_between_translations(t_est, t_true), 3))
     # Sampson RMSE
     print(tag, "Sampson RMSE (all):", np.round(sampson_rmse(x1, x2, F_est), 3))
     if true_inlier_mask is not None:
@@ -90,7 +91,14 @@ def _evaluate_model(tag, F_est, x1, x2, K1, K2, x1_clean=None, x2_clean=None, X_
         print(tag, "Sampson RMSE (pred inliers):", np.round(sampson_rmse(x1_use, x2_use, F_est), 3))
 
 # Generate scene (with noise and outliers)
-scene_data = generate_two_view_scene(n_points=20, outlier_ratio=0.2, noise_sigma=0.005)
+noise_sigma=2
+outlier_ratio=0.2
+n_points=50
+scene_data = generate_two_view_scene(
+    n_points=n_points,
+    outlier_ratio=outlier_ratio,
+    noise_sigma=noise_sigma,
+)
 
 # Unpack scene
 R_true = scene_data["R"]
@@ -116,9 +124,10 @@ _evaluate_model("Baseline: ", F_baseline, x1, x2, K1, K2, x1_clean, x2_clean, X_
 
 # --- RANSAC ---
 # RANSAC 8-point algo
-num_trials=1000
-threshold_sq=9
+num_trials=2000
+threshold_sq=36
 F_ransac, ransac_pred_inlier_mask_1, _ = estimate_fundamental_ransac(x1, x2, num_trials, threshold_sq)
+n1 = int(ransac_pred_inlier_mask_1.sum())
 # Evaluate model
 _evaluate_model("RANSAC: ", F_ransac, x1, x2, K1, K2, x1_clean, x2_clean, X_true, R_true, t_true, cam1, true_inlier_mask, ransac_pred_inlier_mask_1)
 
@@ -128,13 +137,12 @@ F_ransac_refit_1 = estimate_fundamental(x1[:, ransac_pred_inlier_mask_1], x2[:, 
 # Redo mask
 ransac_pred_inlier_mask_2 = sampson_distances_sq(x1, x2, F_ransac_refit_1) < threshold_sq
 n2 = int(ransac_pred_inlier_mask_2.sum())
-# Mask too small
-if n2 < 8:
-    print(f"LO-RANSAC: mask shrank to {n2} (<8). Keeping previous refit.")
-    F_ransac_refit_2 = F_ransac_refit_1
+# Keep new mask only if it doesn't shrink too much
+if n2 < 0.8 * n1:
+    print(f"LO-RANSAC: mask shrank {n1}->{n2}. Keeping mask 1.")
     ransac_pred_inlier_mask_2 = ransac_pred_inlier_mask_1
+    F_ransac_refit_2 = F_ransac_refit_1
 else:
-    # Refit on best RANSAC inliers (again)
     F_ransac_refit_2 = estimate_fundamental(x1[:, ransac_pred_inlier_mask_2], x2[:, ransac_pred_inlier_mask_2])
 
 # Evaluate model
