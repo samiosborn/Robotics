@@ -44,7 +44,7 @@ def _evaluate_model(tag, F_est, x1, x2, K1, K2, x1_clean=None, x2_clean=None, X_
     P1 = cam1.P
     # Pose from F
     try:
-        R_est, t_est, _ = recover_pose_from_fundamental(F_est, K1, K2, x1_use, x2_use)
+        R_est, t_est, E_est, cheir_ratio, best_mask = recover_pose_from_fundamental(F_est, K1, K2, x1_use, x2_use)
     except Exception as e:
         print(tag, "Pose recovery failed:", e)
         return
