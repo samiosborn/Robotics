@@ -45,20 +45,38 @@ def triangulate_points(P1, P2, x1, x2):
         X[:, i] = Xi
     return X
 
-# Check if a point is in front of camera
-def is_in_front_of_camera(R, t, X):
-    # Camera model
-    X_cam = R @ X + t
-    return X_cam[2] > 0
+# Depths in the two cameras for Euclidean X
+def depths_two_view(R, t, X):
+    # Z-dim (cam1)
+    z1 = X[2, :]
+    # Project (cam2)
+    X2 = R @ X + t.reshape(3, 1)
+    # Z-dim (cam2)
+    z2 = X2[2, :]
+    return z1, z2
 
-# Cheirality check for two views
-def cheirality_check(R, t, X):
-    # Camera 1 (at origin)
-    in_front_cam_1 = X[2] > 0
-    # Camera 2 with (R, t)
-    in_front_cam_2 = is_in_front_of_camera(R, t, X)
-    # Check both
-    return (in_front_cam_1 and in_front_cam_2)
+# Cheirality mask from X
+def cheirality_mask_from_X(R, t, X):
+    # Assert
+    X = np.asarray(X, dtype=float)
+    # Check dimensions
+    if X.ndim != 2 or X.shape[0] != 3:
+        raise ValueError(f"X must be (3, N) Euclidean; got {X.shape}")
+    # Depths
+    z1, z2 = depths_two_view(R, t, X)
+    # Both positive depth
+    eps = 1e-9
+    return (z1 > eps) & (z2 > eps)
+
+# Cheirality mask for pose
+def cheirality_mask_for_pose(R, t, P1, K2, x1, x2): 
+    # Projection matrix 2
+    P2 = K2 @ np.hstack((R, t.reshape(3, 1)))
+    # Triangulate points
+    X = triangulate_points(P1, P2, x1, x2)
+    # Cheirality mask
+    mask = cheirality_mask_from_X(R, t, X)
+    return mask, X
 
 # Disambiguate pose candidates using cheirality
 def disambiguate_pose_cheirality(candidates, K1, K2, x1, x2):
@@ -69,36 +87,27 @@ def disambiguate_pose_cheirality(candidates, K1, K2, x1, x2):
     x2 = np.asarray(x2, dtype=float)
     # Check dimensions
     if K1.shape != (3, 3) or K2.shape != (3, 3):
-        raise ValueError("Shape of K1 and K2 should be (3, 3)")
-    if x1.shape[0] != 2 or x1.shape != x2.shape: 
-        raise ValueError("Points should be (2, N)")
+        raise ValueError(f"Shape of K1 and K2 should be (3, 3); got K1 {K1.shape}, K2 {K2.shape}")
+    if x1.ndim != 2 or x2.ndim != 2 or x1.shape != x2.shape or x1.shape[0] != 2:
+        raise ValueError(f"Points should be (2, N); got x1 {x1.shape}, x2 {x2.shape}")
     # Initialise
-    n_points = x1.shape[1]
-    best_idx = None
+    best = None
     best_count = 0
+    best_mask = None
     # Projection matrix 1 (at origin)
     P1 = K1 @ np.hstack((np.eye(3), np.zeros((3, 1))))
     # Loop over candidates
     for i, (R, t) in enumerate(candidates): 
-        # Projection matrix (assuming no intrinsics)
-        P2 = K2 @ np.hstack((R, t.reshape(3, 1)))
-        # Initialise cheirality check count
-        count = 0
-        # Loop over corresponding points
-        for j in range(n_points): 
-            # Corresponding point
-            x1j = x1[:, j]
-            x2j = x2[:, j]
-            X = triangulate_point(P1, P2, x1j, x2j)
-            # Check for cheirality
-            if cheirality_check(R, t, X): 
-                count += 1
+        # Cheirality count for pose
+        mask, _ = cheirality_count_for_pose(R, t, P1, K2, x1, x2)
+        count = int(np.sum(mask))
         # Counts
         if count > best_count: 
-            best_idx = i
+            best = R, t
             best_count = count
+            best_mask = mask
     # Return best pose
     if best_count > 0:
-        return candidates[best_idx]
+        return best[0], best[1], best_mask
     # Failure
     raise RuntimeError("No valid pose found")
