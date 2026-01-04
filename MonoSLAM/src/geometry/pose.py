@@ -44,5 +44,7 @@ def recover_pose_from_fundamental(F, K1, K2, x1, x2, enforce_constraints=True):
     # Decompose essential matrix 
     candidate_poses = decompose_essential(E)
     # Disambiguate pose via cheirality
-    R, t = disambiguate_pose_cheirality(candidate_poses, K1, K2, x1, x2)
-    return R, t, E
+    R, t, best_mask = disambiguate_pose_cheirality(candidate_poses, K1, K2, x1, x2)
+    # Cheirality ratio
+    cheir_ratio = float(best_mask.mean())
+    return R, t, E, cheir_ratio, best_mask
