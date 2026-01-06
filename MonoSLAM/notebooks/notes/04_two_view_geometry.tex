@@ -884,31 +884,75 @@ Assume the inlier correspondences are generated from a fixed ground-truth fundam
 In least-squares estimation under i.i.d.\ noise, the covariance of the parameter estimate is proportional to \((A^\top A)^{-1}\), where \(A\) is the design matrix formed from the data. Using more (independent) inlier correspondences increases \(A^\top A\) in the positive semidefinite order, which decreases \((A^\top A)^{-1}\) and hence reduces estimator variance. While the fundamental matrix estimation problem includes a rank constraint and projective scale, the same principle applies: fitting on more inliers yields a more stable estimate than fitting on a minimal subset.
 \end{proof}
 
-\subsection{Homography estimation and degeneracy testing}
+\section{Homography estimation and degeneracy testing}
 
-While the fundamental matrix captures general two-view geometry, a homography is the appropriate model for planar scenes and for near-pure rotations. This section formalises the homography model, gives a minimal estimator, and defines the error used for robust fitting.
+While the fundamental matrix captures general two-view geometry, a homography is the appropriate model for planar scenes and for (near) pure rotations. 
 
-\subsubsection{Homography model and degrees of freedom}
+\subsection{Homography model}
 
-\begin{definition}[Planar projective mapping]
-A homography is a projective mapping \(H\in\mathbb{R}^{3\times 3}\) (defined up to nonzero scale) relating corresponding homogeneous image points \(\tilde x_1,\tilde x_2\in\mathbb{P}^2\) by
+\begin{definition}[Homography]
+A homography is a projective mapping \(H\in\mathbb{R}^{3\times 3}\), defined up to nonzero scale, that relates corresponding homogeneous image points \(\tilde x_1,\tilde x_2\in\mathbb{P}^2\) via
 \[
-\tilde x_2 \sim H \tilde x_1.
+\tilde x_2 \sim H\tilde x_1
 \]
+The notation \(H\sim \alpha H\) for \(\alpha\neq 0\) means that multiplying \(H\) by a nonzero scalar produces the same projective map, since homogeneous points are defined only up to scale. 
 \end{definition}
 
 \begin{proposition}[Degrees of freedom and minimal sample size]
-A homography \(H\) has \(8\) degrees of freedom (since \(H\sim \alpha H\) for \(\alpha\neq 0\)). Consequently, a minimal solver requires \(4\) point correspondences \((\tilde x_1^{(i)},\tilde x_2^{(i)})\), assuming they are in general position (not all colinear in either image).
+A homography \(H\) has \(8\) degrees of freedom (since \(H\sim \alpha H\) for \(\alpha\neq 0\)). Each correspondence \(\tilde x_2 \sim H\tilde x_1\) provides two independent constraints, so a minimal solver requires \(4\) point correspondences \((\tilde x_1^{(i)},\tilde x_2^{(i)})\) in general position (not all colinear in either image).
 \end{proposition}
 
 \begin{proof}
-A \(3\times 3\) matrix has \(9\) entries, but homography is defined up to scale, leaving \(8\) independent parameters. Each correspondence \(\tilde x_2 \sim H\tilde x_1\) provides two independent linear constraints (the third is redundant due to homogeneity). Hence \(4\) correspondences yield \(8\) constraints, sufficient to determine \(H\) up to scale in generic configurations.
+A \(3\times 3\) matrix has \(9\) entries, but the projective scaling ambiguity reduces this to \(8\) independent parameters. For one correspondence, \(\tilde x_2 \sim H\tilde x_1\) is equivalent to \(\tilde x_2 \times (H\tilde x_1)=0\), which yields three linear equations but only two are independent due to homogeneity. Hence \(4\) correspondences yield \(8\) independent linear constraints, sufficient to determine \(H\) up to scale in generic configurations.
 \end{proof}
 
-\subsubsection{Direct Linear Transform (DLT) for homography}
+\subsection{Planar scene check}
 
-\begin{proposition}[Linear constraints for homography]
-Let \(\tilde x_1=(u_1,v_1,1)^\top\) and \(\tilde x_2=(u_2,v_2,1)^\top\) be corresponding points. Writing the rows of \(H\) as \(h_1^\top,h_2^\top,h_3^\top\), the relation \(\tilde x_2 \times (H\tilde x_1)=0\) yields two independent linear equations in the \(9\) unknown entries of \(H\). Stacking \(N\ge 4\) correspondences gives a homogeneous system
+\begin{proposition}[Homography explains planar scenes and pure rotations]
+If all observed 3D points lie on a plane \(\pi: n^\top X + d = 0\) in the camera-1/world frame, then the image correspondence satisfies
+\[
+\tilde x_2 \sim H \tilde x_1,
+\qquad
+H = K_2\Big(R - \frac{t n^\top}{d}\Big)K_1^{-1}
+\]
+In the special case of pure rotation (\(t=0\)), the correspondence is also a homography:
+\[
+\tilde x_2 \sim K_2 R K_1^{-1}\tilde x_1
+\]
+\end{proposition}
+
+\begin{proof}
+For a 3D point \(X\) in the camera-1/world frame, the calibrated projection equations are
+\[
+\lambda_1 \tilde x_1 = K_1 X,
+\qquad
+\lambda_2 \tilde x_2 = K_2(RX+t)
+\]
+Assume \(X\) lies on the plane \(\pi\), so \(n^\top X = -d\). Then, 
+\[
+\Big(R - \frac{t n^\top}{d}\Big)X
+= RX - t\,\frac{n^\top X}{d}
+= RX - t\,\frac{-d}{d}
+= RX + t
+\]
+Substituting into the camera-2 projection gives
+\[
+\lambda_2 \tilde x_2 \sim K_2\Big(R - \frac{t n^\top}{d}\Big)X
+\]
+From camera 1, \(X \sim K_1^{-1}\tilde x_1\), so
+\[
+\tilde x_2 \sim K_2\Big(R - \frac{t n^\top}{d}\Big)K_1^{-1}\tilde x_1
+=: H\tilde x_1
+\]
+Setting \(t=0\) yields \(\tilde x_2 \sim K_2 R K_1^{-1}\tilde x_1\), the pure-rotation case.
+\end{proof}
+
+\subsection{Homography estimation via Direct Linear Transform}
+
+\begin{proposition}[Linear constraints for homography (DLT)]
+Let \(\tilde x_1=(u_1,v_1,1)^\top\) and \(\tilde x_2=(u_2,v_2,1)^\top\) be corresponding homogeneous image points.
+Writing the rows of \(H\) as \(h_1^\top,h_2^\top,h_3^\top\), the relation \(\tilde x_2 \sim H\tilde x_1\) yields two independent linear equations in the entries of \(H\).
+Stacking \(N\ge 4\) correspondences gives a homogeneous system
 \[
 A h = 0,
 \qquad
@@ -918,48 +962,108 @@ solvable (up to scale) by SVD.
 \end{proposition}
 
 \begin{proof}
-The constraint \(\tilde x_2 \sim H\tilde x_1\) is equivalent to colinearity of \(\tilde x_2\) and \(H\tilde x_1\), i.e.
+The projective relation \(\tilde x_2 \sim H\tilde x_1\) means there exists a nonzero scalar \(\lambda\) such that
 \[
-\tilde x_2 \times (H\tilde x_1)=0.
+\lambda \tilde x_2 = H\tilde x_1
 \]
-The cross product gives three linear equations in the entries of \(H\), but only two are independent due to projective scale. Writing \(H\tilde x_1 = (h_1^\top \tilde x_1,\; h_2^\top \tilde x_1,\; h_3^\top \tilde x_1)^\top\), a standard choice of two independent rows yields
+Equivalently, \(\tilde x_2\) and \(H\tilde x_1\) are colinear, which is expressed by the cross product constraint
+\[
+\tilde x_2 \times (H\tilde x_1)=0
+\]
+Rather than expanding the cross product directly, it is convenient to write
+\[
+H\tilde x_1 =
+\begin{bmatrix}
+h_1^\top \tilde x_1\\
+h_2^\top \tilde x_1\\
+h_3^\top \tilde x_1
+\end{bmatrix}
+=
+\begin{bmatrix}
+a\\ b\\ c
+\end{bmatrix}
+\]
+Since \(\tilde x_2=(u_2,v_2,1)^\top\) and \(\tilde x_2 \sim (a,b,c)^\top\), dehomogenisation implies
+\[
+u_2 = \frac{a}{c},\qquad v_2 = \frac{b}{c}
+\]
+Which is equivalent to the two equations
+\[
+a - u_2 c = 0,\qquad b - v_2 c = 0
+\]
+Substituting \(a=h_1^\top \tilde x_1\), \(b=h_2^\top \tilde x_1\), \(c=h_3^\top \tilde x_1\) yields two equations
+\[
+h_1^\top \tilde x_1 - u_2\, h_3^\top \tilde x_1 = 0,
+\qquad
+h_2^\top \tilde x_1 - v_2\, h_3^\top \tilde x_1 = 0
+\]
+These are linear in the unknown rows \(h_1,h_2,h_3\). Writing them in block-matrix form gives
 \[
 \begin{bmatrix}
 \tilde x_1^\top & 0 & -u_2 \tilde x_1^\top \\
 0 & \tilde x_1^\top & -v_2 \tilde x_1^\top
 \end{bmatrix}
 \begin{bmatrix}
-h_1 \\ h_2 \\ h_3
+h_1\\ h_2\\ h_3
 \end{bmatrix}
-= 0,
+= A h = 0
 \]
-which is linear in the \(9\) unknown entries. Stacking over \(N\) correspondences produces \(A h = 0\). Under noise, the least-squares solution is the right singular vector of \(A\) corresponding to the smallest singular value, reshaped into \(H\).
+For each correspondence \(i\), we obtain two such rows; stacking all \(N\) correspondences produces
+\[
+A h = 0, A\in\mathbb{R}^{2N\times 9}, 
+\qquad
+h=\mathrm{vec}(H)\in\mathbb{R}^9
+\]
+
+With noisy measurements, an exact null vector typically does not exist, so one solves the constrained least-squares problem
+\[
+\min_{\|h\|_2=1}\ \|Ah\|_2
+\]
+Let \(A=U\Sigma V^\top\) be the SVD with singular values \(\sigma_1\ge\cdots\ge\sigma_9\ge 0\).
+Writing \(y=V^\top h\) and using orthogonality of \(U,V\), we have
+\[
+\|Ah\|_2 = \|U\Sigma V^\top h\|_2 = \|\Sigma y\|_2
+\]
+Thus
+\[
+\|Ah\|_2^2 = \sum_{k=1}^9 \sigma_k^2 y_k^2,
+\quad \text{with } \|y\|_2=\|h\|_2=1
+\]
+This is minimised by placing all mass on the smallest singular value, i.e.\ \(y=e_9\), so the minimiser is the right singular vector corresponding to the smallest singular value: 
+\[
+h = V e_9
+\]
+Reshaping \(h\) into a \(3\times 3\) matrix yields \(H\), defined up to scale.
 \end{proof}
 
-\paragraph{Normalisation}
-As with the normalised 8-point algorithm, DLT is numerically improved by normalising image coordinates via a similarity transform so that the centroid is near the origin and the mean distance to the origin is \(\sqrt{2}\). One then estimates \(\widehat H\) in normalised coordinates and denormalises.
+\paragraph{Hartley Normalisation}
+As with the normalised 8-point algorithm, DLT is numerically improved by normalising image coordinates via similarity transforms \(T_1,T_2\) so that the centroid is near the origin and the mean distance to the origin is \(\sqrt{2}\) - also known as Hartley normalisation. One estimates \(\widehat H\) in normalised coordinates and denormalises via \(H = T_2^{-1}\widehat H T_1\).
 
 \subsubsection{Homography error metrics}
 
 \begin{definition}[Reprojection and transfer error]
 Given \(\tilde x_2 \sim H\tilde x_1\), define the predicted point in image 2 by
 \[
-\widehat{\tilde x}_2 := H\tilde x_1, \qquad \hat x_2 := \pi(\widehat{\tilde x}_2),
+\widehat{\tilde x}_2 := H\tilde x_1, \qquad \hat x_2 := \pi(\widehat{\tilde x}_2)
 \]
-where \(\pi(a,b,c)^\top := (a/c,\; b/c)^\top\) is dehomogenisation. The (forward) reprojection/transfer error is
+Where \(\pi(a,b,c)^\top := (a/c,\; b/c)^\top\) is dehomogenisation. 
+
+The (forward) reprojection/transfer error is
 \[
-e_{1\to 2}(x_1,x_2;H) := \|x_2 - \hat x_2\|_2.
+e_{1\to 2}(x_1,x_2;H) := \|x_2 - \hat x_2\|_2
 \]
-Similarly define \(e_{2\to 1}(x_2,x_1;H^{-1})\). The symmetric transfer error is
+Similarly define \(e_{2\to 1}(x_2,x_1;H^{-1})\). 
+
+The symmetric transfer error is
 \[
-e_{\mathrm{sym}}^2(x_1,x_2;H) := e_{1\to 2}(x_1,x_2;H)^2 + e_{2\to 1}(x_2,x_1;H^{-1})^2.
+e_{\mathrm{sym}}^2(x_1,x_2;H) := e_{1\to 2}(x_1,x_2;H)^2 + e_{2\to 1}(x_2,x_1;H^{-1})^2
 \]
 \end{definition}
 
 \begin{proposition}[Scale invariance of the symmetric transfer error]
 For any nonzero scalar \(\alpha\), one has
 \[
-e_{\mathrm{sym}}^2(x_1,x_2;\alpha H) = e_{\mathrm{sym}}^2(x_1,x_2;H).
+e_{\mathrm{sym}}^2(x_1,x_2;\alpha H) = e_{\mathrm{sym}}^2(x_1,x_2;H)
 \]
 \end{proposition}
 
@@ -967,126 +1071,41 @@ e_{\mathrm{sym}}^2(x_1,x_2;\alpha H) = e_{\mathrm{sym}}^2(x_1,x_2;H).
 Scaling \(H\mapsto \alpha H\) scales the homogeneous prediction \(\widehat{\tilde x}_2 = H\tilde x_1\) by \(\alpha\), but dehomogenisation \(\pi\) is invariant to overall scale: \(\pi(\alpha \widehat{\tilde x}_2)=\pi(\widehat{\tilde x}_2)\). Hence both forward and backward reprojection terms are unchanged, and so is their sum.
 \end{proof}
 
-\subsubsection{RANSAC for robust homography estimation}
+\subsection{RANSAC for robust homography estimation}
 
-Homography estimation from real correspondences is also corrupted by outliers, so we apply RANSAC with a minimal sample size \(s=4\).
+Homography estimation from real correspondences is corrupted by outliers, so we apply RANSAC with a minimal sample size \(s=4\).
 
 \begin{definition}[RANSAC estimator for \(H\)]
 Fix a number of trials \(T\), a sample size \(s=4\), and a threshold \(\tau_H>0\). For each trial \(t=1,\dots,T\):
 \begin{enumerate}[label=(\roman*)]
-  \item Sample \(S_t\subset\{1,\dots,N\}\) uniformly at random with \(|S_t|=4\).
-  \item Fit \(H_t\) using a DLT solver on \(\{(x_1^{(i)},x_2^{(i)}): i\in S_t\}\).
+  \item Sample \(S_t\subset\{1,\dots,N\}\) uniformly at random with \(|S_t|=4\)
+  \item Fit \(H_t\) using a DLT solver on \(\{(x_1^{(i)},x_2^{(i)}): i\in S_t\}\)
   \item Define the inlier set by a transfer-error test, e.g.
   \[
-  \mathcal{I}(H_t) := \left\{ i : e_{\mathrm{sym}}^2\!\left(x_1^{(i)},x_2^{(i)};H_t\right) \le \tau_H^2 \right\}.
+  \mathcal{I}(H_t) := \left\{ i : e_{\mathrm{sym}}^2\!\left(x_1^{(i)},x_2^{(i)};H_t\right) \le \tau_H^2 \right\}
   \]
 \end{enumerate}
 Return \(H_{\mathrm{best}}\in\arg\max_t |\mathcal{I}(H_t)|\), optionally refitting \(H\) on all inliers.
 \end{definition}
 
-\paragraph{Relationship to planar degeneracy testing}
-Given inlier sets \(\mathcal{I}_F\) and \(\mathcal{I}_H\) produced by RANSAC on the same correspondence set, we treat a strong advantage of the homography model as evidence of planar structure or near-pure rotation, and reject two-view bootstrap initialisation when
+\subsection{Planar / pure-rotation degeneracy detection for two-view bootstrap}
+
+\begin{definition}[Homography-vs-fundamental model selection]
+Run RANSAC for both a fundamental matrix \(F\) (or essential matrix \(E\)) and a homography \(H\), producing inlier sets \(\mathcal{I}_F\) and \(\mathcal{I}_H\) on the same correspondence set. 
+
+Declare a candidate pair homography-dominant if for a margin \(\gamma>1\)
 \[
-|\mathcal{I}_H| \ge \gamma |\mathcal{I}_F|.
-\]
-This criterion is heuristic but effective in practice, because in these regimes triangulation becomes ill-conditioned and many points are pushed towards infinity.
-
-\subsubsection{Bootstrap validity checks (parallax, cheirality, planar degeneracy)}
-
-Even with a robust estimate of \(F\) (or \(E\)), two-view initialisation can fail in low-parallax or planar / pure-rotation regimes. Before accepting an initial map, we apply three geometric sanity checks. 
-
-\paragraph{Cheirality margin}
-Given a candidate relative pose \((R,t)\) (camera 2 w.r.t.\ camera 1) and triangulated points \(\{X_j\}_{j=1}^N\) in the camera-1/world frame, define depths
-\[
-z^{(1)}_j \;=\; e_3^\top X_j,
-\qquad
-z^{(2)}_j \;=\; e_3^\top (R X_j + t)
-\]
-Where \(e_3 = (0,0,1)^\top\). 
-
-A correspondence is cheirally valid if: \(z^{(1)}_j>0\) and \(z^{(2)}_j>0\)
-
-We require a minimum cheirality ratio
-\[
-\rho_{\mathrm{cheir}} \;=\; \frac{1}{N}\sum_{j=1}^N \mathbf{1}\{z^{(1)}_j>0 \;\wedge\; z^{(2)}_j>0\} \;\;\ge\;\; \rho_{\min}
-\]
-E.g.\ \(\rho_{\min}=0.7\)
-
-If too few points lie in front of both cameras, the pose is likely incorrect or the geometry is degenerate.
-
-\paragraph{Parallax via triangulation angle}
-Low parallax leads to ill-conditioned triangulation: many 3D points are sent to extremely large depth, and small image noise induces large depth error. In calibrated coordinates, let \(\tilde x = (u,v,1)^\top\) 
-
-Define bearing vectors
-\[
-b^{(1)}_j \;\propto\; K_1^{-1}\tilde x^{(1)}_j,
-\qquad
-b^{(2)}_j \;\propto\; K_2^{-1}\tilde x^{(2)}_j
-\qquad
-\hat b \;=\; \frac{b}{\|b\|}
-\]
-Express the second bearing in the camera-1/world frame as \(\hat b^{(2\to 1)}_j = R^\top \hat b^{(2)}_j\). 
-
-The triangulation (parallax) angle is
-\[
-\alpha_j \;=\; \arccos\!\Big( \hat b^{(1)\top}_j \, \hat b^{(2\to 1)}_j \Big)\in[0,\pi]
+|\mathcal{I}_H| \ge \gamma\,|\mathcal{I}_F|
 \]
 
-We require that the median parallax exceeds a threshold:
-\[
-\mathrm{median}_j(\alpha_j) \;\ge\; \alpha_{\min}
-\]
-With \(\alpha_{\min}\) typically a few degrees (scene- and noise-dependent). Intuitively, \(\alpha_j\) is the opening angle between the two viewing rays; if it is too small, depth becomes numerically unstable.
+\end{definition}
 
-\paragraph{Depth sanity (baseline-to-depth proxy)}
-Monocular initialisation fixes scale arbitrarily (often \(\|t\|=1\)), but the relative depth distribution is still diagnostic. 
-
-With baseline \(B=\|t\|\) and depths \(z^{(1)}_j, z^{(2)}_j\) as above, we reject initialisations where a large fraction of points have negative depth or implausibly large depth relative to the baseline, e.g.
-\[
-\frac{1}{N}\sum_{j=1}^N \mathbf{1}\!\left\{ z^{(1)}_j > 0 \wedge z^{(2)}_j > 0 \wedge \min(z^{(1)}_j,z^{(2)}_j) \le z_{\max} \right\}
-\;\;\ge\;\; \rho_{\min}
-\]
-With \(z_{\max} = \kappa B\) for some \(\kappa\) (e.g.\ \(\kappa\in[50,200]\)), or using an equivalent inverse-depth criterion. This blocks ``points at infinity'' caused by near-pure rotation or insufficient translation.
-
-\subsubsection{Planar / pure-rotation degeneracy via homography-vs-fundamental selection}
-
-A classic failure mode is that the scene is (approximately) planar, or the motion is (approximately) pure rotation. In both cases, image correspondences are well explained by a homography, and the two-view baseline is insufficient to initialise stable depth.
-
-\begin{proposition}[Homography explains planar scenes and pure rotations]
-If all observed 3D points lie on a plane \(\pi: n^\top X + d = 0\) in the camera-1/world frame, then the image correspondence satisfies
-\[
-\tilde x_2 \;\sim\; H \tilde x_1,
-\qquad
-H \;=\; K_2 \Big(R + \frac{t n^\top}{d}\Big) K_1^{-1}
-\]
-
-In the special case of pure rotation (\(t=0\)), the correspondence is also a homography:
-\[
-\tilde x_2 \;\sim\; K_2 R K_1^{-1}\tilde x_1
-\]
+\begin{proposition}[Interpretation of homography dominance]
+If \(|\mathcal{I}_H|\) substantially exceeds \(|\mathcal{I}_F|\), then the correspondences are better explained by a planar projective mapping than by general epipolar geometry. This is strong evidence of an (approximately) planar scene, (approximately) pure rotation, or very distant structure, and two-view monocular initialisation is likely ill-conditioned.
 \end{proposition}
 
 \begin{proof}
-For a planar point \(X\) on \(\pi\), write \(X\) in the camera-1/world frame and project into camera 2:
-\(
-\lambda_2 \tilde x_2 = K_2(RX+t)
-\)
-Using the plane constraint \(n^\top X = -d\), decompose \(t\) along the plane normal to eliminate the unknown depth scale and obtain
-\(
-\lambda_2 \tilde x_2 \sim K_2\big(R + \frac{t n^\top}{d}\big)X
-\)
-Since camera-1 projection is \(\lambda_1 \tilde x_1 = K_1 X\), substituting \(X \sim K_1^{-1}\tilde x_1\) yields \(\tilde x_2 \sim H\tilde x_1\). 
-The pure rotation case follows by setting \(t=0\).
+In planar scenes and pure-rotation motion, the correspondence relation is exactly (or approximately) \(\tilde x_2 \sim H\tilde x_1\), so a homography achieves a large consensus set under a geometric error threshold. In contrast, epipolar geometry relies on a non-degenerate baseline and non-planar structure to constrain depth; when parallax is small, fitting \(F\) can yield fewer inliers and the recovered pose/triangulation becomes unstable. Hence homography dominance is a practical diagnostic for rejecting initialisation pairs where triangulation is numerically unstable and many reconstructed points are pushed towards infinity.
 \end{proof}
-
-\paragraph{RANSAC model selection heuristic}
-We run RANSAC for both a fundamental matrix \(F\) (or essential matrix \(E\)) and a homography \(H\), producing inlier sets \(\mathcal{I}_F\) and \(\mathcal{I}_H\) under comparable geometric thresholds. 
-
-If the homography explains significantly more correspondences than the epipolar model, we reject the pair for monocular initialisation:
-\[
-|\mathcal{I}_H| \;\ge\; \gamma \, |\mathcal{I}_F|
-\quad \Longrightarrow \quad \text{planar / near-rotation degeneracy (reject init)}
-\]
-For a margin \(\gamma>1\) (e.g.\ \(\gamma\in[1.1,1.5]\)). This guards against initialising depth from configurations where triangulation is ill-conditioned and map scale is not observable.
 
 \end{document}
