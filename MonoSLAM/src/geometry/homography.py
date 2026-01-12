@@ -1,12 +1,15 @@
 # geometry/homography.py
 import numpy as np
-from geometry.checks import check_2xN_pair
+from geometry.checks import check_2xN, check_2xN_pair, check_3x3
 from geometry.homogeneous import homogenise, dehomogenise
 from geometry.normalisation import hartley_norm, denormalise_point_mapping, normalise_projective_scale
-from epipolar import point_to_point_distances_sq
+from geometry.distances import point_to_point_distances_sq
 
 # Apply homography
 def apply_homography(H, x): 
+    # Checks
+    check_2xN(x)
+    check_3x3(H)
     # Homogenise
     x_h = homogenise(x)
     # Transform
@@ -73,13 +76,17 @@ def transfer_errors_sq(x1, x2, H):
     # Apply homography
     x2_hat = apply_homography(H, x1)
     # Point-to-point distance (squared)
-    return point_to_point_distances_sq(x1, x2)
+    return point_to_point_distances_sq(x2, x2_hat)
 
 # Symmetric transfer errors (squared)
 def symmetric_transfer_errors_sq(x1, x2, H): 
     # Check dims
     check_2xN_pair(x1, x2)
     check_3x3(H)
+    # Near singular H
+    det = np.linalg.det(H)
+    if abs(det) < 1e-12:
+        return np.full(x1.shape[1], np.inf, dtype=float)
     # Forward
     e12 = transfer_errors_sq(x1, x2, H)
     # Backwards
@@ -87,3 +94,51 @@ def symmetric_transfer_errors_sq(x1, x2, H):
     e21 = transfer_errors_sq(x2, x1, Hinv)
     # Sum
     return e12 + e21
+
+# Estimate homography RANSAC
+def estimate_homography_ransac(x1, x2, num_trials, threshold_sq, normalise=True, seed=None): 
+    # Check dims
+    check_2xN_pair(x1, x2)
+    N = x1.shape[1]
+    if N < 4: 
+        raise ValueError(f"Need at least 4 correspondences; got {N}")
+    # Initialise
+    rng = np.random.default_rng(seed)
+    best_H = None
+    best_mask = None
+    best_count = 0
+    best_err = np.inf
+    # Loop
+    for _ in range(num_trials): 
+        # Subset
+        idx = rng.choice(N, size=4, replace=False)
+        # Estimate homography
+        try: 
+            H = estimate_homography(x1[:, idx], x2[:, idx], normalise)
+        except Exception: 
+            continue
+        # Symmetric transfer errors (sq)
+        d_sq = symmetric_transfer_errors_sq(x1, x2, H)
+        # Inlier mask
+        mask = d_sq < threshold_sq
+        # Count
+        count = int(mask.sum())
+        if count > 0: 
+            err = float(np.mean(d_sq[mask]))
+            # Take higher count
+            if count > best_count: 
+                best_count = count
+                best_H = H
+                best_mask = mask
+                best_err = err
+            # Tie
+            elif count == best_count: 
+                if err < best_err: 
+                    best_err = err
+                    best_H = H
+                    best_mask = mask
+    # Failure
+    if best_H is None: 
+        raise RuntimeError("Homography RANSAC failed to find a valid model")
+    # Return
+    return best_H, best_mask
