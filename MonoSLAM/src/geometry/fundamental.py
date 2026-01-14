@@ -1,5 +1,6 @@
-# src/geometry/fundamental.py
+# geometry/fundamental.py
 import numpy as np
+from geometry.checks import check_2xN_pair
 from geometry.hartley_normalisation import hartley_norm
 from geometry.essential import essential_from_pose
 from geometry.epipolar import sampson_distances_sq
@@ -99,3 +100,41 @@ def estimate_fundamental_ransac(x1, x2, num_trials=1000, threshold_sq=9, seed=42
         raise ValueError("RANSAC failed: not enough inliers to estimate F below threshold")
 
     return best_F, best_inlier_mask, best_count
+
+# Refit fundamental matrix on inliers
+def refit_fundamental_on_inliers(x1, x2, F, inlier_mask, threshold_sq, min_inliers=8, shrink_guard=0.8, recompute_mask=True):
+    # Check dims
+    check_2xN_pair(x1, x2)
+    check_3x3(F)
+    N = x1.shape[1]
+    mask = check_bool_N(inlier_mask, N)
+    if mask is None:
+        return F, None, {"refit": False, "reason": "mask_is_none"}
+    n0 = int(mask.sum())
+    # Initialise statistics
+    stats = {"n0": n0}
+    # Not enough to refit;
+    if n0 < min_inliers:
+        # Return original
+        stats.update({"refit": False, "reason": "too_few_inliers"})
+        return F, mask, stats
+    # Refit on inliers
+    F_refit = estimate_fundamental(x1[:, mask], x2[:, mask])
+    stats.update({"refit": True})
+    # Don't recompute mask
+    if not recompute_mask:
+        stats.update({"n1": n0, "used_mask": "original"})
+        return F_refit, mask, stats
+    # Recompute mask from refit model
+    d_sq = sampson_distances_sq(x1, x2, F_refit)
+    mask_new = d_sq < float(threshold_sq)
+    n1 = int(mask_new.sum())
+    # Shrink ratio
+    stats.update({"n1": n1, "shrink_ratio": (n1 / max(n0, 1))})
+    # Shrink guard
+    if n1 < shrink_guard * n0:
+        stats.update({"used_mask": "original", "reason": "shrink_guard_triggered"})
+        return F, mask, stats
+    # Use new mask
+    stats.update({"used_mask": "recomputed"})
+    return F_refit, mask_new, stats
