@@ -26,3 +26,12 @@ def check_3x3(K):
     K = np.asarray(K)
     if K.shape != (3,3):
         raise ValueError(f"Must be (3,3); got {K.shape}")
+
+# Check if boolean and (N, )
+def check_bool_N(mask, N): 
+    if mask is None: 
+        return None
+    mask = np.asarray(mask, dtype=bool)
+    if mask.ndim != 1 or mask.size != N: 
+        raise ValueError(f"Must be shape (N, ), got {mask.shape} for N={N}")
+    return mask
