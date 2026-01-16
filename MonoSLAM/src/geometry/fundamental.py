@@ -1,9 +1,9 @@
 # geometry/fundamental.py
 import numpy as np
-from geometry.checks import check_2xN_pair
-from geometry.hartley_normalisation import hartley_norm
+from geometry.checks import check_2xN_pair, check_3x3, check_bool_N
+from geometry.normalisation import hartley_norm
 from geometry.essential import essential_from_pose
-from geometry.epipolar import sampson_distances_sq
+from geometry.distances import sampson_distances_sq
 
 # Fundamental from essential matrix
 def fundamental_from_essential(E, K1, K2):
@@ -20,8 +20,7 @@ def fundamental_from_pose(R, t, K1, K2):
 # Estimate fundamental matrix (normalised 8-point algo)
 def estimate_fundamental(x1, x2): 
     # Check dimensions
-    if x1.shape[0] != 2 or x1.shape != x2.shape: 
-        raise ValueError("x1, x2 must have shape (2, N)")
+    check_2xN_pair(x1, x2)
     N = x1.shape[1]
     # Minimum points
     if N < 8: 
@@ -53,21 +52,22 @@ def estimate_fundamental(x1, x2):
     return F
 
 # Estimate fundamental matrix via RANSAC
-def estimate_fundamental_ransac(x1, x2, num_trials=1000, threshold_sq=9, seed=42):
+def estimate_fundamental_ransac(x1, x2, num_trials=1000, sample_size = 8, threshold=3, seed=42):
     # Random number generator
     rng = np.random.default_rng(seed)
     # Check dimensions
-    if x1.shape[0] != 2 or x1.shape != x2.shape: 
-        raise ValueError("x1, x2 must have shape (2, N)")
+    check_2xN_pair(x1, x2)
     N = x1.shape[1]
-    # Minimum points
-    sample_size = 8
-    if N < sample_size: 
-        raise ValueError("At least 8 correspondences required")
+    # Too few points vs sample size
+    if sample_size > N: 
+        raise ValueError(f"Sample size of {sample_size} is more than number of points: {N}")
+    # Sample size too small
+    if sample_size < 8: 
+        raise ValueError("Sample size of at least 8 correspondences is required")
     # Initialise inliers
     best_inlier_mask = np.zeros(N, dtype=bool)
     best_count = 0
-    best_F = None
+    F_best = None
     # Trial iteration
     for _ in range(num_trials): 
         # Random subset index
@@ -82,38 +82,39 @@ def estimate_fundamental_ransac(x1, x2, num_trials=1000, threshold_sq=9, seed=42
             # Sampson distances squared
             distances_sq_t = sampson_distances_sq(x1, x2, F_t)
         except (ValueError, np.linalg.LinAlgError, FloatingPointError):
-        # Degenerate sample / numerical failure (skip)
+            # Degenerate sample / numerical failure (skip)
             continue
         # Below threshold
-        inlier_mask = distances_sq_t < threshold_sq
+        inlier_mask = distances_sq_t < threshold**2
         # Update best count
         count = int(np.sum(inlier_mask))
         if count > best_count: 
             best_count = count
             best_inlier_mask = inlier_mask
-            best_F = F_t
+            F_best = F_t
             # Early return
             if best_count == N: 
                 break
 
-    if best_F is None or best_count < sample_size: 
+    if F_best is None or best_count < sample_size: 
         raise ValueError("RANSAC failed: not enough inliers to estimate F below threshold")
 
-    return best_F, best_inlier_mask, best_count
+    return F_best, best_inlier_mask
 
 # Refit fundamental matrix on inliers
-def refit_fundamental_on_inliers(x1, x2, F, inlier_mask, threshold_sq, min_inliers=8, shrink_guard=0.8, recompute_mask=True):
+def refit_fundamental_on_inliers(x1, x2, F, inlier_mask, min_inliers=8, threshold=3, shrink_guard=0.8, recompute_mask=True):
     # Check dims
     check_2xN_pair(x1, x2)
     check_3x3(F)
     N = x1.shape[1]
     mask = check_bool_N(inlier_mask, N)
+    # No mask
     if mask is None:
         return F, None, {"refit": False, "reason": "mask_is_none"}
     n0 = int(mask.sum())
     # Initialise statistics
-    stats = {"n0": n0}
-    # Not enough to refit;
+    stats = {"n0": n0, "reason": None}
+    # Not enough points to refit
     if n0 < min_inliers:
         # Return original
         stats.update({"refit": False, "reason": "too_few_inliers"})
@@ -127,14 +128,14 @@ def refit_fundamental_on_inliers(x1, x2, F, inlier_mask, threshold_sq, min_inlie
         return F_refit, mask, stats
     # Recompute mask from refit model
     d_sq = sampson_distances_sq(x1, x2, F_refit)
-    mask_new = d_sq < float(threshold_sq)
+    mask_new = d_sq < float(threshold**2)
     n1 = int(mask_new.sum())
     # Shrink ratio
     stats.update({"n1": n1, "shrink_ratio": (n1 / max(n0, 1))})
     # Shrink guard
     if n1 < shrink_guard * n0:
         stats.update({"used_mask": "original", "reason": "shrink_guard_triggered"})
-        return F, mask, stats
+        return F_refit, mask, stats
     # Use new mask
     stats.update({"used_mask": "recomputed"})
     return F_refit, mask_new, stats
