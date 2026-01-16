@@ -1,24 +1,33 @@
 # config/bootstrap.yaml
-seed: 0
-
-eps: 1e-9
 
 ransac:
+  seed: 0
+  
   F:
     num_trials: 2000
-    threshold_px_sq: 36.0
+    sample_size: 8
+    threshold_px: 8.0
     min_inliers: 30
     min_inlier_ratio: 0.3
+    shrink_guard: 0.8
+    recompute_mask: true
+    noise_sigma_px: null
+  
   H:
     num_trials: 2000
-    threshold_px_sq: 9.0
+    normalise: true
+    threshold_px: 3.0
     min_inliers: 20
 
 bootstrap:
+  eps: 1e-9
+
+  mask_policy: "intersection" # "F" or "cheirality" or "intersection"
 
   planar:
     gamma: 1.2
     min_H_inliers: 20
+    require_H_success: false
     min_F_inliers_for_test: 30
 
   parallax:
@@ -29,4 +38,5 @@ bootstrap:
     cheirality_min: 0.7
     depth_max_ratio: 100.0
     depth_sanity_min: 0.7
+    translation_norm: 1.0
     baseline_override: null
