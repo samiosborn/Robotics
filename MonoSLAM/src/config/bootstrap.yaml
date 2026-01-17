@@ -6,7 +6,7 @@ ransac:
   F:
     num_trials: 2000
     sample_size: 8
-    threshold_px: 8.0
+    threshold_px: 8
     min_inliers: 30
     min_inlier_ratio: 0.3
     shrink_guard: 0.8
@@ -16,13 +16,13 @@ ransac:
   H:
     num_trials: 2000
     normalise: true
-    threshold_px: 3.0
+    threshold_px: 3
     min_inliers: 20
 
 bootstrap:
   eps: 1e-9
 
-  mask_policy: "intersection" # "F" or "cheirality" or "intersection"
+  mask_policy: "F" # "F" or "cheirality" or "intersection"
 
   planar:
     gamma: 1.2
