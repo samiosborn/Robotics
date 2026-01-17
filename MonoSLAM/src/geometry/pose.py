@@ -1,5 +1,6 @@
 # src/geometry/pose.py 
 import numpy as np
+from geometry.checks import check_2xN_pair, check_3x3, check_bool_N
 from geometry.triangulation import disambiguate_pose_cheirality
 from geometry.essential import essential_from_fundamental, enforce_essential_constraints, decompose_essential
 
@@ -26,16 +27,17 @@ def angle_between_translations(t_1, t_2):
     return np.arccos(cos_theta)
 
 # Recover pose from fundamental matrix estimate
-def recover_pose_from_fundamental(F, K1, K2, x1, x2, enforce_constraints=True):
-    # Assert
-    F  = np.asarray(F, dtype=float)
-    K1 = np.asarray(K1, dtype=float)
-    K2 = np.asarray(K2, dtype=float)
-    x1 = np.asarray(x1, dtype=float)
-    x2 = np.asarray(x2, dtype=float)
+def pose_from_fundamental(F, K1, K2, x1, x2, F_mask=None, enforce_constraints=True):
     # Check dims
-    if x1.ndim != 2 or x2.ndim != 2 or x1.shape != x2.shape or x1.shape[0] != 2:
-        raise ValueError(f"Points must be (2, N); got x1 {x1.shape}, x2 {x2.shape}")
+    check_2xN_pair(x1, x2)
+    N_full = x1.shape[1]
+    check_3x3(K1)
+    check_3x3(K2)
+    # Apply mask
+    if F_mask is not None: 
+        check_bool_N(F_mask, N_full)
+        x1 = x1[:, F_mask]
+        x2 = x2[:, F_mask]
     # Essential from fundamental
     E = essential_from_fundamental(F, K1, K2)
     # Enforce essential constraints (rank 2)
@@ -44,7 +46,14 @@ def recover_pose_from_fundamental(F, K1, K2, x1, x2, enforce_constraints=True):
     # Decompose essential matrix 
     candidate_poses = decompose_essential(E)
     # Disambiguate pose via cheirality
-    R, t, best_mask = disambiguate_pose_cheirality(candidate_poses, K1, K2, x1, x2)
+    R, t, best_cheir_mask = disambiguate_pose_cheirality(candidate_poses, K1, K2, x1, x2)
     # Cheirality ratio
-    cheir_ratio = float(best_mask.mean())
-    return R, t, E, cheir_ratio, best_mask
+    cheir_ratio = float(best_cheir_mask.mean())
+    # If mask provided
+    if F_mask is not None: 
+        # Full mask 
+        full_best_mask = np.zeros(N_full, dtype=bool)
+        full_best_mask[F_mask] = best_cheir_mask
+        return R, t, E, cheir_ratio, full_best_mask
+    else: 
+        return R, t, E, cheir_ratio, best_cheir_mask
