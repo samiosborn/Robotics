@@ -5,6 +5,7 @@ from geometry.parallax import median_parallax_angle_deg
 from geometry.triangulation import triangulate_points, depths_two_view
 from geometry.fundamental import estimate_fundamental_ransac, refit_fundamental_on_inliers
 from geometry.homography import estimate_homography_ransac
+from geometry.pose import pose_from_fundamental
 
 # Planar check
 def planar_check(mask_F, mask_H, gamma=1.2, min_H_inliers=20): 
@@ -139,7 +140,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # Fundamental RANSAC
     F_num_trials = int(rF["num_trials"])
     F_sample_size = int(rF["sample_size"])
-    F_thr_px = float(rF["threshold_px"])
+    F_thr_px = int(rF["threshold_px"])
     F_min_inliers = int(rF["min_inliers"])
     F_min_inlier_ratio = float(rF["min_inlier_ratio"])
     F_shrink_guard = float(rF["shrink_guard"])
@@ -157,7 +158,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # Parallax check
     min_median_deg = float(par["min_median_deg"])
     # Depth check
-    min_points = int(dep["min_points"])
+    depth_min_points = int(dep["min_points"])
     cheirality_min = float(dep["cheirality_min"])
     depth_max_ratio = float(dep["depth_max_ratio"])
     depth_sanity_min = float(dep["depth_sanity_min"])
@@ -171,8 +172,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     num_trials=F_num_trials,
     sample_size=F_sample_size,
     threshold=F_thr_px,
-    seed=seed,
-    )
+    seed=seed)
     # Refit fundamental
     F_best, F_mask, F_refit_stats = refit_fundamental_on_inliers(
     x1, x2,
@@ -181,8 +181,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     min_inliers=F_min_inliers,
     threshold=F_thr_px,
     shrink_guard=F_shrink_guard,
-    recompute_mask=bool(F_recompute),
-    )
+    recompute_mask=bool(F_recompute))
     aux = {"F_best": F_best, "F_mask": F_mask}
     # Update stats with F mask
     stats.update({"n0":F_refit_stats["n0"]})
@@ -194,7 +193,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # Update stats with refit mask
     stats.update({"n1": F_refit_stats["n1"], "shrink_ratio": F_refit_stats["shrink_ratio"]})
     # Too few inliers
-    nF = F_mask.sum()
+    nF = F_mask.sum() 
     if nF < min_F_inliers_for_test or (nF / N) < F_min_inlier_ratio: 
         ok = False
         stats.update({"nF": nF, "reason": "fundamental_insufficient_inliers"})
@@ -207,8 +206,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     num_trials=H_num_trials,
     threshold=H_thr_px,
     normalise=H_normalise,
-    seed=seed,
-    )
+    seed=seed)
     # Failure to find H
     if H_best is None: 
         if require_H_success: 
@@ -234,8 +232,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
         mask_F=F_mask,
         mask_H=H_mask, 
         gamma=gamma, 
-        min_H_inliers=min_H_inliers,
-        )
+        min_H_inliers=min_H_inliers)
         # Update stats
         stats.update({"H_ratio": planar_stats["ratio"]})
         # Planar degenerate
@@ -243,7 +240,24 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
             ok = False
             stats.update({"reason": "planar_degenerate"})
             return ok, stats, aux
-    # 
+    
+    # --- POSE RECOVERY ---
+    # Recover pose from F
+    R, t, E, cheir_ratio, cheir_mask = pose_from_fundamental(
+    F_best, K1, K2, x1, x2,
+    F_mask=F_mask,
+    enforce_constraints=True)
+    # Update stats and aux
+    aux.update({"R": R, "t": t, "E": E, "cheir_mask": cheir_mask})
+    nC = cheir_mask.sum()
+    stats.update({"cheir_ratio": float(cheir_ratio), "nC": int(nC)})
+    # Mask selection
+    if mask_policy == "F":
+        mask = F_mask
+    elif mask_policy == "cheirality":
+        mask = cheir_mask
+    elif mask_policy == "intersection":
+        mask = F_mask & cheir_mask
 
 
     return ok, stats, aux
