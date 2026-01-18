@@ -31,7 +31,10 @@ bootstrap:
     min_F_inliers_for_test: 30
 
   parallax:
-    min_median_deg: 1.0
+    min_p50_deg: 1.0
+    min_p25_deg: 0.7
+    min_points: 8
+    quartile_trim: [0.1, 0.9]
 
   depth:
     min_points: 20
