@@ -33,9 +33,9 @@ def pose_from_fundamental(F, K1, K2, x1, x2, F_mask=None, enforce_constraints=Tr
     N_full = x1.shape[1]
     check_3x3(K1)
     check_3x3(K2)
+    check_bool_N(F_mask, N_full)
     # Apply mask
     if F_mask is not None: 
-        check_bool_N(F_mask, N_full)
         x1 = x1[:, F_mask]
         x2 = x2[:, F_mask]
     # Essential from fundamental
