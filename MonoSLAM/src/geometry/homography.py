@@ -140,8 +140,8 @@ def estimate_homography_ransac(x1, x2, num_trials, threshold, normalise=True, se
                     best_H = H
                     best_mask = mask
     # Failure
-    if best_H is None: 
-        reason = "homography_estimation_failed"
+    if best_mask is None: 
+        reason = "homography_mask_missing"
     else: 
         reason = None
     # Return
