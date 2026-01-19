@@ -68,7 +68,9 @@ def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0
     check_2xN_pair(x1, x2)
     check_3x3(K1)
     check_3x3(K2)
-    mask = check_bool_N(mask, x1.shape[1])
+    check_3x3(R)
+    N_full = int(x1.shape[1])
+    mask = check_bool_N(mask, N_full)
     t = np.asarray(t, float).reshape(3)
     # Default
     degenerate = False
@@ -77,61 +79,71 @@ def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0
         x1 = x1[:, mask]
         x2 = x2[:, mask]
     # Minimum number of points
-    N = int(x1.shape[1])
-    stats = {"N": N}
-    if N < min_points: 
+    N_mask = int(x1.shape[1])
+    stats = {"N_full": N_full, "N_mask": N_mask}
+    aux = {"mask": None, "X": None, "X_valid": None}
+    if N_mask < min_points: 
         degenerate = True
         stats.update({"reason": "too_few_correspondences"})
-        return degenerate, stats
+        return degenerate, stats, aux
     # Build P
     P1 = K1 @ np.hstack((np.eye(3), np.zeros((3,1))))
     P2 = K2 @ np.hstack((R, t.reshape((3,1))))
     # Triangulate points
     X = triangulate_points(P1, P2, x1, x2)
+    aux["X"] = X
     # Depths
     z1, z2 = depths_two_view(R, t, X)
-    # Cheirality mask
-    cheirality_mask = (z1 > eps) & (z2 > eps)
-    n_cheirality = int(cheirality_mask.sum())
-    # Cheirality ratio
-    cheirality_ratio = float(cheirality_mask.mean())
-    if cheirality_ratio < cheirality_min: 
-        degenerate = True
-        stats.update({"n_cheirality": n_cheirality, "cheirality_ratio": cheirality_ratio, "reason": "cheirality_ratio_too_low"})
-        return degenerate, stats
     # Baseline length
     B = float(np.linalg.norm(t))
     stats.update({"B": B})
+    # Baseline too small
     if B < eps: 
         degenerate = True
         stats.update({"reason": "baseline_too_small"})
-        return degenerate, stats
+        return degenerate, stats, aux
     # Minimum depth of corresponding points
-    min_depths = np.minimum(z1, z2)[cheirality_mask]
-    # Finite depth
-    finite = np.isfinite(min_depths)
-    min_depths = min_depths[finite]
-    # Positive depth 
-    positive = min_depths > eps
-    min_depths = min_depths[positive]
+    min_depths = np.minimum(z1, z2)
+    # Cheirality ratio
+    cheirality_ratio = float(((z1 > eps) & (z2 > eps)).mean())
+    stats.update({"cheirality_ratio": cheirality_ratio})
+    # Valid points
+    valid = (np.isfinite(min_depths) & 
+            (z1 > eps) & (z2 > eps) & 
+            (min_depths <= depth_max_ratio * B))
+    n_valid_depth = int(valid.sum())
+    stats.update({"n_valid_depth": n_valid_depth})
+    # Depth sanity ratio
+    depth_sanity_ratio = float(valid.mean())
+    stats.update({"depth_sanity_ratio": depth_sanity_ratio})
+    # Cheirality ratio too low    
+    if cheirality_ratio < cheirality_min: 
+        degenerate = True
+        stats.update({"reason": "cheirality_ratio_too_low"})
+        return degenerate, stats, aux    
     # Valid depths
-    n_depth_valid = int(min_depths.size)
-    stats.update({"n_depth_valid": n_depth_valid})
-    if n_depth_valid == 0: 
+    if n_valid_depth == 0: 
         degenerate = True
         stats.update({"reason": "too_few_positive_and_finite_depths"})
-        return degenerate, stats
-    # Depth within tolerance
-    depth_mask = min_depths <= depth_max_ratio * B
-    # Depth sanity ratio
-    depth_sanity_ratio = float(depth_mask.mean())
-    stats.update({"depth_sanity_ratio": depth_sanity_ratio})
+        return degenerate, stats, aux
+    # Depth sanity ratio too low
     if depth_sanity_ratio < depth_sanity_min: 
         degenerate = True
         stats.update({"reason": "depth_sanity_ratio_too_low"})
-        return degenerate, stats
+        return degenerate, stats, aux
     else: 
-        return degenerate, stats
+        # Lift to full mask
+        full_mask = np.zeros(N_full, dtype=bool)
+        if mask is None:
+            full_mask[:] = valid
+        else:
+            full_mask[mask] = valid
+        aux["mask"] = full_mask
+        # Include X (valid)
+        X_valid = X[:, valid]
+        aux["X_valid"] = X_valid
+
+        return degenerate, stats, aux
 
 # Validate two-view bootstrap
 def validate_two_view_bootstrap(K1, K2, x1, x2, cfg): 
@@ -313,20 +325,27 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
 
     # --- DEPTH CHECK ---
     # Depth check
-    depth_degen, depth_stats = depth_check(R, t, K1, K2, x1, x2,
+    
+    depth_degen, depth_stats, depth_aux = depth_check(R, t, K1, K2, x1, x2,
     mask=mask,
     min_points=depth_min_points,
     cheirality_min=cheirality_min,
     depth_max_ratio=depth_max_ratio,
     depth_sanity_min=depth_sanity_min,
     eps=eps)
-    # Update stats
+    # Update stats and aux
     stats.update({f"depth_{k}": v for k, v in depth_stats.items() if k!="reason"})
+    aux.update({"depth_mask": depth_aux["mask"], "X": depth_aux["X"], "X_valid": depth_aux["X_valid"]})
     # Depth degenerate
     if depth_degen: 
         ok = False
         stats.update({"reason": depth_stats["reason"]})
         return ok, stats, aux
+    else: 
+        return ok, stats, aux
 
-    return ok, stats, aux
-
+# Bootstrap two-view
+def bootstrap_two_view(...)
+    # Intersection of mask
+        mask0 = stats["mask"] & stats["depth_mask"]
+        stats.update({"mask0": mask0})
