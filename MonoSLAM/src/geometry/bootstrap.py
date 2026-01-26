@@ -71,6 +71,9 @@ def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0
     check_3x3(R)
     N_full = int(x1.shape[1])
     mask = check_bool_N(mask, N_full)
+    idx_mask_full = np.flatnonzero(mask) if mask is not None else np.arange(N_full)
+    stats = {"N_full": N_full}
+    aux = {"mask": None, "X": None, "X_valid": None, "idx_mask_full": idx_mask_full}
     t = np.asarray(t, float).reshape(3)
     # Default
     degenerate = False
@@ -80,8 +83,7 @@ def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0
         x2 = x2[:, mask]
     # Minimum number of points
     N_mask = int(x1.shape[1])
-    stats = {"N_full": N_full, "N_mask": N_mask}
-    aux = {"mask": None, "X": None, "X_valid": None}
+    stats.update({"N_mask": N_mask})
     if N_mask < min_points: 
         degenerate = True
         stats.update({"reason": "too_few_correspondences"})
@@ -111,8 +113,13 @@ def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0
     valid = (np.isfinite(min_depths) & 
             (z1 > eps) & (z2 > eps) & 
             (min_depths <= depth_max_ratio * B))
+    aux.update({"valid_mask": valid})
+    # Number of valid points
     n_valid_depth = int(valid.sum())
     stats.update({"n_valid_depth": n_valid_depth})
+    # Index of valid points
+    idx_valid_full = idx_mask_full[valid]
+    aux.update({"idx_valid_full": idx_valid_full})
     # Depth sanity ratio
     depth_sanity_ratio = float(valid.mean())
     stats.update({"depth_sanity_ratio": depth_sanity_ratio})
@@ -335,7 +342,7 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     eps=eps)
     # Update stats and aux
     stats.update({f"depth_{k}": v for k, v in depth_stats.items() if k!="reason"})
-    aux.update({"depth_mask": depth_aux["mask"], "X": depth_aux["X"], "X_valid": depth_aux["X_valid"]})
+    aux.update({"depth_mask": depth_aux["mask"], "depth_idx_mask_full": depth_aux["idx_mask_full"], "depth_idx_valid_full": depth_aux["idx_valid_full"], "X": depth_aux["X"], "X_valid": depth_aux["X_valid"]})
     # Depth degenerate
     if depth_degen: 
         ok = False
@@ -345,7 +352,33 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
         return ok, stats, aux
 
 # Bootstrap two-view
-def bootstrap_two_view(...)
+def bootstrap_two_view(K1, K2, x1, x2, cfg):
+    # Validate two-view bootstrap
+    ok, stats, aux = validate_two_view_bootstrap(K1, K2, x1, x2, cfg) 
+    # False
+    if not ok:
+        return False, stats, aux, None
     # Intersection of mask
-        mask0 = stats["mask"] & stats["depth_mask"]
-        stats.update({"mask0": mask0})
+    mask_init = aux["mask"] & aux["depth_mask"]
+    aux.update({"mask_init": mask_init})
+    # Pose0 (origin)
+    R0 = np.eye(3)
+    t0 = np.zeros(3)
+    # Pose1
+    R = aux["R"]
+    t = aux["t"]
+    # Landmarks
+    X0 = aux["X_valid"]
+    # Number of landmarks
+    N0 = X0.shape[1]
+    # For each landmark, connect 3D point and 2D feature idx
+    landmarks = []
+    idx_full = aux["depth_idx_valid_full"]
+    for i, j in enumerate(idx_full):
+        landmarks.append({
+            "X": X0[:, i],
+            "obs": [
+                {"kf": 0, "feat": int(j), "xy": x1[:, j]},
+                {"kf": 1, "feat": int(j), "xy": x2[:, j]},
+            ],
+        })
