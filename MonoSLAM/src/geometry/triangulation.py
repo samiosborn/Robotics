@@ -1,4 +1,4 @@
-# src/geometry/triangulation.py
+# geometry/triangulation.py
 import numpy as np
 from geometry.homogeneous import homogenise, dehomogenise
 
@@ -18,6 +18,10 @@ def triangulate_point(P1, P2, x1, x2):
     _, _, Vt = np.linalg.svd(A)
     # X
     X_h = Vt[-1]
+    # Avoid near degenerate points
+    w = X_h[-1]
+    if abs(w) < 1e-12: 
+        return np.array([np.nan, np.nan, np.nan])
     # Dehomogenise
     X = dehomogenise(X_h).reshape(3, )
     return X
@@ -99,7 +103,7 @@ def disambiguate_pose_cheirality(candidates, K1, K2, x1, x2):
     # Loop over candidates
     for i, (R, t) in enumerate(candidates): 
         # Cheirality count for pose
-        mask, _ = cheirality_count_for_pose(R, t, P1, K2, x1, x2)
+        mask, _ = cheirality_mask_for_pose(R, t, P1, K2, x1, x2)
         count = int(np.sum(mask))
         # Counts
         if count > best_count: 
