@@ -1,0 +1,45 @@
+# src/config/features.yaml
+
+features:
+  image:
+    # Expect RGB image input; convert to grayscale and float64 in [0, 1]
+    grayscale: true
+    dtype: float64
+    normalize_01: true
+
+  border:
+    # Padding policy for convolution / filtering
+    mode: reflect
+
+  gaussian:
+    # Used for pre-smoothing (derivatives) and integration (structure tensor)
+    # Kernel size will be computed from sigma via radius = ceil(truncate * sigma)
+    truncate: 3.0
+
+  gradients:
+    # Pre-smoothing before Sobel
+    sigma_d: 1.0
+    # Sobel derivative kernel size (3 is standard)
+    sobel_ksize: 3
+
+  harris:
+    # Integration scale for the second-moment matrix (structure tensor)
+    sigma_i: 1.5
+
+    # Harris response parameter (standard)
+    k: 0.04
+
+    # Thresholding (relative to max response is robust across images)
+    threshold:
+      type: relative
+      rel: 0.01
+
+    # Non-maximum suppression window (odd size)
+    nms:
+      window: 3
+
+    # Keep corners away from borders (for patch descriptors)
+    border_margin: 16
+
+    # Cap on number of returned keypoints / corners (sorted by response desc)
+    max_keypoints: 1000
