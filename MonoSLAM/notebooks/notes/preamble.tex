@@ -1,14 +1,44 @@
-% preamble.tex
-\usepackage[margin=1in]{geometry}
-\usepackage{amsmath, amsthm, amssymb, amsfonts, bm}
-\usepackage{graphicx}
+% notebooks/notes/preamble.tex
+
+% --- Page/layout ---
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{microtype}
+
+% --- Maths ---
+\usepackage{amsmath,amssymb,amsthm,mathtools,bm}
 \usepackage{physics}
-\usepackage{hyperref}
+
+% --- Figures / lists ---
+\usepackage{graphicx}
 \usepackage{enumitem}
 \usepackage{titlesec}
 
+% --- Links ---
+\usepackage{hyperref}
+
+% --- Paragraph formatting ---
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{6pt}
 
+% --- Theorem environments ---
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}[section]
+\newtheorem{theorem}[proposition]{Theorem}
+\newtheorem{lemma}[proposition]{Lemma}
+\newtheorem{corollary}[proposition]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[proposition]{Definition}
+\newtheorem{assumption}[proposition]{Assumption}
+
+\theoremstyle{remark}
+\newtheorem{remark}[proposition]{Remark}
+
+% --- Notation helpers ---
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\I}{\mathcal{I}}
+\newcommand{\img}{I}
+\newcommand{\T}{\mathsf{T}}
+
 \author{Sami Osborn}
-\date{2025}
