@@ -1,0 +1,324 @@
+% notebooks/notes/05_feature_detection.tex
+\documentclass[11pt]{article}
+
+\input{preamble.tex}
+
+\title{Feature Detection for SLAM}
+\date{January 2026}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+% ====
+\section{Notation, Conventions, and Basic Models}
+% ====
+
+\subsection{Discrete image model and coordinates}
+
+\begin{definition}[Image as a discrete signal]
+An image is a function
+\[
+\img : \Omega \subset \Z^2 \to \R
+\]
+Mapping pixel coordinates $x=(u,v)\in\Omega$ to an intensity value $\img(x)$.
+In practice, $\img$ may be single-channel (grayscale) or a vector-valued map (colour); in these notes we will work with a scalar field.
+\end{definition}
+
+\begin{remark}
+Although $\img$ is discrete, most derivations become cleaner by passing to a smooth interpolation (e.g.\ bilinear) and treating $\img$ locally as a differentiable function on $\R^2$. We will state explicitly when we make this transition.
+\end{remark}
+
+\subsection{Local patches and windows}
+
+\begin{definition}[Patch / window]
+Let $x\in\Omega$ and let $\mathcal{W}\subset\Z^2$ be a finite, symmetric index set (e.g.\ a square).
+
+The patch of $\img$ centred at $x$ over $\mathcal{W}$ is the collection
+\[
+\{\img(x+r) : r\in\mathcal{W}\}
+\]
+We will write sums over a window as: $\sum_{r\in\mathcal{W}}$
+\end{definition}
+
+\subsection{Interpolation and gradients}
+
+\begin{assumption}[Differentiable local model]
+When deriving gradient-based identities, we assume $\img$ is extended to a differentiable function $\tilde{\img}:\R^2\to\R$ via an interpolation operator (e.g.\ bilinear or bicubic), and write $\img$ for $\tilde{\img}$ by assumption.
+\end{assumption}
+
+\begin{definition}[Spatial gradient]
+The (continuous) spatial gradient of $\img$ at $x\in\R^2$ is
+\[
+\grad \img(x) \coloneqq
+\begin{bmatrix}
+\partial_u \img(x)\\
+\partial_v \img(x)
+\end{bmatrix}\in\R^2
+\]
+In discrete implementations, $\partial_u,\partial_v$ are approximated by finite differences or derivative-of-Gaussian filters.
+\end{definition}
+
+\subsection{Photometric assumptions for tracking}
+
+\begin{assumption}[Brightness constancy]
+Let $x_t$ denote a physical scene point projected at time $t$ to image coordinate $x_t\in\R^2$. Over a short time interval, the observed intensity is approximately constant:
+\[
+\img_t(x_t)\approx \img_{t+\Delta t}(x_{t+\Delta t})
+\]
+\end{assumption}
+
+\begin{remark}
+Brightness constancy is violated by exposure changes, specularities, motion blur, rolling shutter, for example. 
+For MonoSLAM-style front-ends, it remains an effective local model when combined with robust feature selection and outlier rejection.
+\end{remark}
+
+\subsection{Small-displacement linearisation}
+
+\begin{proposition}[First-order Taylor approximation under translation]\label{prop:taylor-translation}
+Let $\img:\R^2\to\R$ be differentiable. For a fixed point $x\in\R^2$ and a small displacement $\delta\in\R^2$ we have 
+\[
+\img(x+\delta) \;=\; \img(x) + \grad \img(x)^\T \delta \;+\; O(\norm{\delta}^2)
+\]
+\end{proposition}
+
+\begin{proof}
+This is the standard multivariate Taylor expansion of $\img$ about $x$:
+\[
+\img(x+\delta)=\img(x)+D\img(x)[\delta]+\frac{1}{2}D^2\img(x)[\delta,\delta]+\cdots
+\]
+Where the first differential satisfies $D\img(x)[\delta]=\grad \img(x)^\T \delta$ and the remainder is $O(\norm{\delta}^2)$ as $\norm{\delta}\to 0$
+\end{proof}
+
+% ====
+\section{Image Formation and Pre-processing}
+% ====
+
+\subsection{A simple acquisition model}
+
+\begin{assumption}[Additive noise model]
+We model an observed image $\img$ as
+\[
+\img(x) = \img^\star(x) + \eta(x)
+\]
+Where $\img^\star$ is an ideal noise-free image, and $\eta$ is random noise with $\mathbb{E}[\eta(x)]=0$ and $\mathrm{Var}(\eta(x))=\sigma^2$.
+\end{assumption}
+
+\begin{remark}
+This is not a complete model of camera noise (i.e. image shot noise is signal-dependent, and read noise is not i.i.d. Gaussian), but it's a sufficient approximation to justify smoothing and to quantify variance reduction.
+\end{remark}
+
+\subsection{Smoothing as convolution}
+
+\begin{definition}[Discrete convolution with a kernel]
+Let $k:\Z^2\to\R$ be a finite-support kernel. The convolution $(k * \img)$ is defined by
+\[
+(k * \img)(x) \coloneqq \sum_{r\in\Z^2} k(r)\,\img(x-r)
+\]
+Where the sum is effectively over the support of $k$. 
+\end{definition}
+
+\begin{definition}[Gaussian kernel]
+For $\sigma>0$, the (continuous) isotropic Gaussian is
+\[
+G_\sigma(\xi) \coloneqq \frac{1}{2\pi\sigma^2}\exp\!\Big(-\frac{\norm{\xi}^2}{2\sigma^2}\Big),\qquad \xi\in\R^2
+\]
+
+Isotropic means rotation-invariant: $G_\sigma(\xi)$ depends only on the radius $\|\xi\|$, so its level sets are circles.
+\end{definition}
+
+\begin{remark}
+A discrete kernel is formed by sampling $G_\sigma$ on $\Z^2$ over a finite window (e.g.\ $\{-r,\dots,r\}^2$) and renormalising the sampled weights to sum to $1$, so that convolution preserves average intensity.
+\end{remark}
+
+\begin{proposition}[Gaussian separability]\label{prop:gaussian-separable}
+The 2D Gaussian factorises into a product of 1D Gaussians:
+\[
+G_\sigma(u,v) = g_\sigma(u)\,g_\sigma(v),
+\qquad
+g_\sigma(t)\coloneqq \frac{1}{\sqrt{2\pi}\sigma}\exp\!\Big(-\frac{t^2}{2\sigma^2}\Big)
+\]
+\end{proposition}
+
+\begin{proof}
+By direct algebra,
+\[
+G_\sigma(u,v)
+=\frac{1}{2\pi\sigma^2}\exp\!\Big(-\frac{u^2+v^2}{2\sigma^2}\Big)
+=\Big(\frac{1}{\sqrt{2\pi}\sigma}\exp\!\Big(-\frac{u^2}{2\sigma^2}\Big)\Big)
+ \Big(\frac{1}{\sqrt{2\pi}\sigma}\exp\!\Big(-\frac{v^2}{2\sigma^2}\Big)\Big)
+=g_\sigma(u)\,g_\sigma(v)
+\]
+\end{proof}
+
+\begin{remark}
+For convolution, Fubini's theorem yields $(G_\sigma * \img) = g_\sigma * (g_\sigma * \img)$, where the inner convolution is along one axis and the outer along the other. 
+\end{remark}
+
+\subsection{Variance reduction under smoothing}
+
+\begin{proposition}[Smoothing reduces noise variance]\label{prop:variance-reduction}
+Assume $\img=\img^\star+\eta$ and consider a linear filter with kernel $k$ satisfying $\sum_{r} k(r)=1$.
+If $\{\eta(x)\}$ are independent with $\mathbb{E}[\eta(x)]=0$ and $\mathrm{Var}(\eta(x))=\sigma^2$, then the filtered noise
+\[
+\eta_k(x)\coloneqq (k*\eta)(x) = \sum_r k(r)\,\eta(x-r)
+\]
+satisfies
+\[
+\mathbb{E}[\eta_k(x)] = 0,
+\qquad
+\mathrm{Var}(\eta_k(x)) = \sigma^2 \sum_r k(r)^2 \;\le\; \sigma^2
+\]
+\end{proposition}
+
+\begin{proof}
+Linearity implies $\mathbb{E}[\eta_k(x)] = \sum_r k(r)\mathbb{E}[\eta(x-r)] = 0$
+
+Independence gives
+\[
+\mathrm{Var}(\eta_k(x)) = \sum_r k(r)^2\,\mathrm{Var}(\eta(x-r)) = \sigma^2\sum_r k(r)^2
+\]
+Since $\sum_r k(r)=1$, the Jensen/Cauchy--Schwarz inequality implies $\sum_r k(r)^2 \le (\sum_r |k(r)|)^2 = 1$ when $k(r)\ge 0$ (as for Gaussian kernels), hence $\mathrm{Var}(\eta_k(x))\le \sigma^2$
+\end{proof}
+
+\begin{remark}
+Variance reduction is only one part of the story: smoothing also attenuates high-frequency structure, which can degrade localisation.
+MonoSLAM front-ends therefore smooth mildly (often implicitly via derivative-of-Gaussian gradients) rather than aggressively.
+\end{remark}
+
+\subsection{Aliasing and blur-before-subsample}
+
+\begin{definition}[Downsampling by an integer factor]
+Let $s\in\{2,3,\dots\}$. The downsampled image $\img^{\downarrow s}$ is defined on the grid $\Omega^{\downarrow s}$ by
+\[
+\img^{\downarrow s}(x) \coloneqq \img(sx),
+\qquad x\in\Omega^{\downarrow s}\subset\Z^2
+\]
+\end{definition}
+
+\begin{proposition}[Anti-aliasing (pre-blur)]\label{prop:anti-alias}
+Downsampling by factor $s$ folds high-frequency content into low frequencies (aliasing). Applying a low-pass filter (e.g.\ Gaussian smoothing) with cutoff adapted to $s$ before downsampling reduces aliasing artefacts.
+\end{proposition}
+
+\begin{proof}
+A complete proof uses discrete-time Fourier analysis: downsampling corresponds to periodic replication and overlap in the frequency domain. When the original spectrum is not band-limited to the Nyquist region of the downsampled grid, these replications overlap, producing aliasing. Pre-filtering attenuates energy outside the admissible band, reducing overlap. 
+\end{proof}
+
+\begin{remark}
+High-frequency components are regions where intensity changes significantly. For example, edges, corners, and fine texture. 
+\end{remark}
+
+\subsection{Gaussian pyramids}
+
+\begin{definition}[Gaussian pyramid]
+Fix a smoothing kernel $G_{\sigma}$ and a downsampling factor $s=2$. Define
+\[
+\img^{(0)} \coloneqq \img,
+\qquad
+\img^{(\ell+1)} \coloneqq \Big(G_{\sigma} * \img^{(\ell)}\Big)^{\downarrow 2},
+\qquad \ell=0,1,2,\dots
+\]
+The sequence $\{\img^{(\ell)}\}$ is called a Gaussian pyramid.
+\end{definition}
+
+\begin{remark}
+For tracking (Lucas--Kanade / KLT), pyramids enable coarse-to-fine optimisation, effectively enlarging the basin of convergence for small-motion linearisations such as Proposition~\ref{prop:taylor-translation}.
+\end{remark}
+
+% ====
+\section{Feature Detection}
+% ===
+
+\subsection{Repeatability, localisation, and trackability}
+
+\begin{definition}[Repeatability (operational)]
+A detector is repeatable if, under admissible changes in viewpoint and photometry, it selects corresponding physical points across frames with high probability.
+\end{definition}
+
+\begin{definition}[Localisation accuracy]
+A feature is well-localised if its estimated position $\hat{x}$ has small uncertainty (e.g.\ subpixel) and small bias relative to the true image position.
+\end{definition}
+
+\begin{definition}[Trackability]
+A feature at location $x$ is trackable if small inter-frame motion can be estimated reliably from local image content (typically from a patch around $x$).
+\end{definition}
+
+\subsection{Lucas--Kanade optical flow as local least squares}\label{sec:lk}
+
+\begin{assumption}[Brightness constancy on a window]\label{ass:bc-window}
+Let $W$ be a finite window of pixels around $x$. Assume that for a small displacement $u\in\R^2$,
+\[
+\img(p + u) \approx \img(p), \qquad \forall p\in W
+\]
+\end{assumption}
+
+\begin{definition}[Lucas--Kanade local displacement estimate]\label{def:lk}
+Under Assumption~\ref{ass:bc-window} and the first-order Taylor approximation
+(Proposition~\ref{prop:taylor-translation}), define the residual at pixel $p\in W$ by
+\[
+r_p(u) \coloneqq \img(p+u) - \img(p) \approx \grad \img(p)^\T u 
+\]
+The Lucas--Kanade estimate is the least-squares minimiser
+\[
+\hat u \in \arg\min_{u\in\R^2} \sum_{p\in W} \big(\grad \img(p)^\T u\big)^2
+\]
+\end{definition}
+
+\begin{proposition}[Normal equations and the structure tensor]\label{prop:lk-normal}
+The minimiser in Definition~\ref{def:lk} satisfies the normal equations
+\[
+G\,u = 0,\qquad 
+G \coloneqq \sum_{p\in W} \grad \img(p)\,\grad \img(p)^\T \in \R^{2\times 2}
+\]
+More generally, in the presence of a temporal term $\img_t$ (optical flow),
+\[
+G\,u = b,\qquad 
+b \coloneqq -\sum_{p\in W} \grad \img(p)\,\img_t(p)
+\]
+\end{proposition}
+
+\subsection{Aperture problem and conditioning}
+
+\begin{proposition}[Edge ambiguity (aperture problem, local statement)]\label{prop:aperture}
+Suppose that in a neighbourhood of $x$, the image intensity varies only along a single direction, i.e.\ $\grad \img(x)$ is nonzero but nearly constant and rank-1 information dominates. Then, using only local brightness constancy over a small window, the displacement component orthogonal to $\grad \img(x)$ is weakly constrained, leading to ambiguous motion estimates.
+\end{proposition}
+
+\begin{proof}
+Under brightness constancy and the first-order approximation (Proposition~\ref{prop:taylor-translation}), the change in intensity for a small displacement $\delta$ is approximately $\grad \img(x)^\T \delta$.
+If local gradients within a window span essentially a 1D subspace, then the data term depends primarily on the projection of $\delta$ onto that subspace, leaving the orthogonal component poorly observed. Formally, the normal equations in Lucas--Kanade involve a matrix of summed outer products of gradients; when these are nearly rank-1, the system is ill-conditioned and the solution is not stable to noise.
+\end{proof}
+
+\subsection{The second-moment matrix (structure tensor) viewpoint}
+
+\begin{definition}[Second-moment matrix / structure tensor]
+Given a window $\mathcal{W}$ and nonnegative weights $w(r)$, define the structure tensor
+\[
+M(x) \coloneqq \sum_{r\in\mathcal{W}} w(r)\,
+\grad \img(x+r)\,\grad \img(x+r)^\T
+\;\in\; \R^{2\times 2}
+\]
+\end{definition}
+
+\begin{proposition}[Interpretation via eigenvalues]\label{prop:eigs-interpretation}
+Let $\lambda_1(x)\ge \lambda_2(x)\ge 0$ denote the eigenvalues of $M(x)$.
+Then:
+\begin{itemize}
+\item If $\lambda_1\approx \lambda_2 \approx 0$, the region is locally flat (little texture).
+\item If $\lambda_1 \gg \lambda_2 \approx 0$, the region resembles an edge (1D texture).
+\item If $\lambda_1$ and $\lambda_2$ are both large, the region is corner-like (2D texture), and local motion estimation is well-conditioned.
+\end{itemize}
+\end{proposition}
+
+\begin{proof}
+Each term $\grad \img , \grad \img^\T$ is positive semidefinite, so $M(x)$ is positive semidefinite and has nonnegative eigenvalues.
+If all gradients are near zero within the window, then $M(x)\approx 0$ and both eigenvalues are small.
+If gradients are nonzero but all aligned with a single direction $g$, then $M(x)\approx c\,gg^\T$ for some $c>0$, which is rank-1, hence one eigenvalue is large and the other near zero.
+If gradients span two independent directions with substantial energy, then $M(x)$ is full-rank and both eigenvalues are large.
+\end{proof}
+
+\begin{remark}[SLAM relevance]
+In MonoSLAM-style EKF updates or bundle adjustment, poorly conditioned features (small $\lambda_2$) behave like ``sliding'' constraints and degrade robustness. Hence a practical policy is to favour points with large minimum eigenvalue (Shi--Tomasi criterion), subject to spatial distribution constraints - like corners.
+\end{remark}
+
+\end{document}
