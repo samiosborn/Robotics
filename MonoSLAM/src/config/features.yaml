@@ -1,45 +1,68 @@
 # src/config/features.yaml
 
+# Epsilon
+eps: 1e-12
+
 features:
   image:
-    # Expect RGB image input; convert to grayscale and float64 in [0, 1]
-    grayscale: true
+    # Luminance weights (bt709 standard)
+    luminance_weights:
+      r: 0.2126
+      g: 0.7152
+      b: 0.0722
+    # Datatype (np.float64) 
     dtype: float64
-    normalize_01: true
+    # Normalise to [0, 1]
+    normalise_01: true
 
   border:
-    # Padding policy for convolution / filtering
+    # Padding policy for 1D/2D filtering (NumPy)
     mode: reflect
 
   gaussian:
-    # Used for pre-smoothing (derivatives) and integration (structure tensor)
-    # Kernel size will be computed from sigma via radius = ceil(truncate * sigma)
+    # Build 1D Gaussian kernels; radius = truncate * sigma
     truncate: 3.0
+    # Force odd kernel length
+    force_odd: true
 
   gradients:
-    # Pre-smoothing before Sobel
+    # Gradient method
+    # "dog" = derivative-of-Gaussian via separable 1D filtering
+    # "sobel" = smooth then apply Sobel
+    method: dog
+
+    # Pre-smoothing / derivative scale (pixels)
     sigma_d: 1.0
-    # Sobel derivative kernel size (3 is standard)
+
+    # Settings for "sobel"
     sobel_ksize: 3
+    sobel_scale: 0.125
+
+    # Outputs
+    return:
+      Ix: true
+      Iy: true
+      mag: true
+      ori: true
 
   harris:
-    # Integration scale for the second-moment matrix (structure tensor)
+    # Integration scale for structure tensor (pixels)
     sigma_i: 1.5
 
-    # Harris response parameter (standard)
+    # Harris parameter
     k: 0.04
 
-    # Thresholding (relative to max response is robust across images)
     threshold:
+      # Relative to max response
       type: relative
       rel: 0.01
 
-    # Non-maximum suppression window (odd size)
     nms:
+      # Non-maximum suppression window (odd size)
       window: 3
 
     # Keep corners away from borders (for patch descriptors)
     border_margin: 16
 
-    # Cap on number of returned keypoints / corners (sorted by response desc)
+    # Cap on number of returned keypoints / corners
     max_keypoints: 1000
