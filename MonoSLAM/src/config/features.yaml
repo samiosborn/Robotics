@@ -14,6 +14,8 @@ features:
     dtype: float64
     # Normalise to [0, 1]
     normalise_01: true
+    # Assume sRGB
+    assume_srgb: true
 
   border:
     # Padding policy for 1D/2D filtering (NumPy)
