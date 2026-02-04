@@ -3,16 +3,21 @@ import numpy as np
 from PIL import Image
 
 # Image to greyscale
-def img_to_grey(img, luminance_weights, assume_srgb=True, normalise_01=True, dtype=np.float64, eps=1e-8):
+def img_to_grey(img, luminance_weights, eotf_params, assume_srgb=True, normalise_01=True, dtype=np.float64, eps=1e-8):
     # If PIL.Image 
     if isinstance(img, Image.Image): 
         if img.mode == "RGBA": 
             # Drop A from RGBA 
             img = img.convert("RGB")
+        # Other supported types
+        elif img.mode in {"I;16", "L", "RGB"}: 
+            pass
+        else: 
+            raise ValueError("PIL modes supported only I;16, L, RGB, RGBA")
         # Convert to NumPy
         img = np.array(img)
     # If NumPy array
-    if isinstance(img, np.array): 
+    if isinstance(img, np.ndarray): 
         # Validate shape
         if img.ndim == 2: 
             # Fine
@@ -30,9 +35,9 @@ def img_to_grey(img, luminance_weights, assume_srgb=True, normalise_01=True, dty
         # Normalise to [0,1]
         if normalise_01: 
             img = to_unit_interval(img, dtype, eps)
-        # Inverse gamma
+        # Electro-optical transfer function
         if assume_srgb: 
-            img = inv_gamma(img, dtype)
+            img = eotf(img, eotf_params, dtype)
         # If 3D, convert to greyscale 
         if img.ndim == 3 and img.shape[2] == 3: 
             img = rgb_to_grey(img, luminance_weights)
@@ -40,14 +45,24 @@ def img_to_grey(img, luminance_weights, assume_srgb=True, normalise_01=True, dty
         img = np.array(img, dtype=dtype)
         # Return 2D array (H, W)
         return img
-    else: 
-        # Not NumPy or accepted PIL.Image
-        raise ValueError("Image: Only accepts PIL.Image or NumPy as array")
+
+    # Not NumPy or accepted PIL.Image
+    raise ValueError("Image: Only accepts PIL.Image or NumPy as array")
 
 # RGB to greyscale
-def rgb_to_grey(img, luminance_weights): 
+def rgb_to_grey(img, luminance_weights, dtype=np.float64, eps=1e-8): 
+    # Unpack luminance_weights
+    wR = luminance_weights["r"]
+    wG = luminance_weights["g"]
+    wB = luminance_weights["b"]
+    # Pack
+    w = np.array([wR, wG, wB], dtype=dtype)
+    # Check
+    s = float(w.sum())
+    if s > (1 + eps) or s < (1 - eps): 
+        raise ValueError("Luminance weights do not sum to 1")
     # Dot product
-    raise NotImplementedError
+    return np.tensordot(img, w, axes=([-1],[0]))
 
 # Normalise to unit interval [0, 1]
 def to_unit_interval(img, dtype=np.float64, eps=1e-8): 
@@ -61,17 +76,29 @@ def to_unit_interval(img, dtype=np.float64, eps=1e-8):
         vmax = np.max(img)
         vmin = np.min(img)
         if vmin < -eps or vmax > (1 + eps): 
-            raise ValueError("Image dtype float64 values are out of [0, 1] bounds")
+            raise ValueError("Float image values out of [0,1] bounds")
         else: 
-            return np.array(np.min(1, np.max(0, img)), dtype=dtype)
+            return np.array(np.clip(img, 0.0, 1.0), dtype=dtype)
         # Raise error if some data is beyond tolerance
     else:
         raise ValueError("Unsupported NumPy dtype, must be unsigned integer or float")
 
-# Inverse gamma 
-def inv_gamma(img, dtype=np.float64): 
-    # Per channel inverse gamma 
-    raise NotImplementedError
+# Electro-optical transfer function (inverse gamma) 
+def eotf(img, eotf_params, dtype=np.float64): 
+    # Unpack
+    b = float(eotf_params["breakpoint"])
+    d = float(eotf_params["linear_divisor"])
+    a = float(eotf_params["offset"]) 
+    g = float(eotf_params["gamma"]) 
+    # Copy
+    img_copy = np.asarray(img, dtype=dtype).copy()
+    # Linear part
+    lin = img_copy <= b
+    img_copy[lin] = img_copy[lin] / d
+    # Non-linear
+    img_copy[~lin] = ((img_copy[~lin] + a) / (1 + a))**g
+    # Return
+    return img_copy
 
 # Gaussian kernel 1D
 def gaussian_kernel_1d(sigma, truncate=3.0, force_odd=True):
