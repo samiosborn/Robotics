@@ -3,40 +3,70 @@ import numpy as np
 from PIL import Image
 
 # Image to greyscale
-def img_to_grey(img, luminance_weights, assume_srgb=True, normalise_01=True, dtype=np.float64):
+def img_to_grey(img, luminance_weights, assume_srgb=True, normalise_01=True, dtype=np.float64, eps=1e-8):
     # If PIL.Image 
     if isinstance(img, Image.Image): 
-        if img.mode == "L": 
-            # Convert to NumPy array (H, W)
-        elif img.mode == "I;16":
-            # Convert to NumPy array (H, W) 
-        elif img.mode == "RGB": 
-            # Convert to NumPy array (H, W, 3) 
-        elif img.mode == "RGBA": 
-            # Convert to RGB (drop alpha (A))
-            # Convert to NumPy array (H, W, 3) 
+        if img.mode == "RGBA": 
+            # Drop A from RGBA 
+            img = img.convert("RGB")
+        # Convert to NumPy
+        img = np.array(img)
+    # If NumPy array
+    if isinstance(img, np.array): 
+        # Validate shape
+        if img.ndim == 2: 
+            # Fine
+            pass
+        elif img.ndim == 3: 
+            if img.shape[2] == 3: 
+                pass
+            elif img.shape[2] == 4: 
+                # Drop A if RGBA
+                img = img[:, :, :3]
+            else: 
+                raise ValueError("NumPy Image must be dim (H,W), (H,W,3) or (H,W,4)")
         else: 
-            # Not accepted PIL.Image mode 
-            raise ValueError("Image: Only accepts PIL.Image as modes L, I;16, RGB, or RGBA")
-    # If NumPy array or PIL.Image converted to NumPy
-    if isinstance(img, np.ndarray): 
-        # Validate shape (if RGBA, drop A)
+            raise ValueError("NumPy Image must be dim (H,W), (H,W,3) or (H,W,4)")
         # Normalise to [0,1]
+        if normalise_01: 
+            img = to_unit_interval(img, dtype, eps)
         # Inverse gamma
+        if assume_srgb: 
+            img = inv_gamma(img, dtype)
         # If 3D, convert to greyscale 
+        if img.ndim == 3 and img.shape[2] == 3: 
+            img = rgb_to_grey(img, luminance_weights)
         # Cast to float64
+        img = np.array(img, dtype=dtype)
         # Return 2D array (H, W)
-    raise NotImplementedError
-
+        return img
     else: 
         # Not NumPy or accepted PIL.Image
         raise ValueError("Image: Only accepts PIL.Image or NumPy as array")
 
+# RGB to greyscale
+def rgb_to_grey(img, luminance_weights): 
+    # Dot product
+    raise NotImplementedError
+
 # Normalise to unit interval [0, 1]
 def to_unit_interval(img, dtype=np.float64, eps=1e-8): 
-    # For uint8, uint16: divide by max representable
-    # For floats: clip to [0,1] (allow tiny tolerance) - raise error otherwise
-    raise NotImplementedError
+    # Unsigned integers
+    if img.dtype in {np.uint8, np.uint16, np.uint32}: 
+        # Divide by max representable
+        return np.array(img / np.iinfo(img.dtype).max, dtype=dtype)
+    # Floats
+    elif img.dtype in {np.float32, np.float64}: 
+        # Clip to [0,1] (allow tiny tolerance)
+        vmax = np.max(img)
+        vmin = np.min(img)
+        if vmin < -eps or vmax > (1 + eps): 
+            raise ValueError("Image dtype float64 values are out of [0, 1] bounds")
+        else: 
+            return np.array(np.min(1, np.max(0, img)), dtype=dtype)
+        # Raise error if some data is beyond tolerance
+    else:
+        raise ValueError("Unsupported NumPy dtype, must be unsigned integer or float")
 
 # Inverse gamma 
 def inv_gamma(img, dtype=np.float64): 
