@@ -1,70 +1,78 @@
 # src/config/features.yaml
 
-# Epsilon
-eps: 1e-12
+image:
+  # Epsilon
+  eps: 1e-8
+  # Luminance weights (bt709 standard)
+  luminance_weights:
+    r: 0.2126
+    g: 0.7152
+    b: 0.0722
+  # Datatype (np.float64) 
+  dtype: float64
+  # Normalise to [0, 1]
+  normalise_01: true
+  # Assume sRGB
+  assume_srgb: true
+  # Electro-optical transfer function (EOTF) parameters
+  eotf: 
+    # Breakpoint (b)
+    breakpoint: 0.04045
+    # Linear divisor (d)
+    linear_divisor: 12.92
+    # Offset (a)
+    offset: 0.055
+    # Gamma (g)
+    gamma: 2.4
 
-features:
-  image:
-    # Luminance weights (bt709 standard)
-    luminance_weights:
-      r: 0.2126
-      g: 0.7152
-      b: 0.0722
-    # Datatype (np.float64) 
-    dtype: float64
-    # Normalise to [0, 1]
-    normalise_01: true
-    # Assume sRGB
-    assume_srgb: true
+border:
+  # Padding policy for 1D/2D filtering (NumPy)
+  mode: reflect
 
-  border:
-    # Padding policy for 1D/2D filtering (NumPy)
-    mode: reflect
+gaussian:
+  # Build 1D Gaussian kernels; radius = truncate * sigma
+  truncate: 3.0
+  # Force odd kernel length
+  force_odd: true
 
-  gaussian:
-    # Build 1D Gaussian kernels; radius = truncate * sigma
-    truncate: 3.0
-    # Force odd kernel length
-    force_odd: true
+gradients:
+  # Gradient method
+  # "dog" = derivative-of-Gaussian via separable 1D filtering
+  # "sobel" = smooth then apply Sobel
+  method: dog
 
-  gradients:
-    # Gradient method
-    # "dog" = derivative-of-Gaussian via separable 1D filtering
-    # "sobel" = smooth then apply Sobel
-    method: dog
+  # Pre-smoothing / derivative scale (pixels)
+  sigma_d: 1.0
 
-    # Pre-smoothing / derivative scale (pixels)
-    sigma_d: 1.0
+  # Settings for "sobel"
+  sobel_ksize: 3
+  sobel_scale: 0.125
 
-    # Settings for "sobel"
-    sobel_ksize: 3
-    sobel_scale: 0.125
+  # Outputs
+  return:
+    Ix: true
+    Iy: true
+    mag: true
+    ori: true
 
-    # Outputs
-    return:
-      Ix: true
-      Iy: true
-      mag: true
-      ori: true
+harris:
+  # Integration scale for structure tensor (pixels)
+  sigma_i: 1.5
 
-  harris:
-    # Integration scale for structure tensor (pixels)
-    sigma_i: 1.5
+  # Harris parameter
+  k: 0.04
 
-    # Harris parameter
-    k: 0.04
+  threshold:
+    # Relative to max response
+    type: relative
+    rel: 0.01
 
-    threshold:
-      # Relative to max response
-      type: relative
-      rel: 0.01
+  nms:
+    # Non-maximum suppression window (odd size)
+    window: 3
 
-    nms:
-      # Non-maximum suppression window (odd size)
-      window: 3
+  # Keep corners away from borders (for patch descriptors)
+  border_margin: 16
 
-    # Keep corners away from borders (for patch descriptors)
-    border_margin: 16
-
-    # Cap on number of returned keypoints / corners
-    max_keypoints: 1000
+  # Cap on number of returned keypoints / corners
+  max_keypoints: 1000
