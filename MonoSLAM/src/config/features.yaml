@@ -29,17 +29,17 @@ border:
   # Padding policy for 1D/2D filtering (NumPy)
   mode: reflect
 
-gaussian:
-  # Build 1D Gaussian kernels; radius = truncate * sigma
-  truncate: 3.0
-  # Force odd kernel length
-  force_odd: true
-
 gradients:
   # Gradient method
   # "dog" = derivative-of-Gaussian via separable 1D filtering
   # "sobel" = smooth then apply Sobel
   method: dog
+
+  gaussian:
+    # Truncate support of 1D Gaussian kernel (radius = ceil(truncate * sigma))
+    truncate: 3.0
+    # Enforce Gaussian derivative sums to 0
+    enforce_zero_sum: true
 
   # Pre-smoothing / derivative scale (pixels)
   sigma_d: 1.0
