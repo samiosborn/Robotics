@@ -1,4 +1,5 @@
 # src/features/gradients.py
+import math
 import numpy as np
 from PIL import Image
 
@@ -17,37 +18,38 @@ def img_to_grey(img, luminance_weights, eotf_params, assume_srgb=True, normalise
         # Convert to NumPy
         img = np.array(img)
     # If NumPy array
-    if isinstance(img, np.ndarray): 
-        # Validate shape
-        if img.ndim == 2: 
-            # Fine
+    elif isinstance(img, np.ndarray): 
+        pass
+    else: 
+        # Not NumPy or accepted PIL.Image
+        raise ValueError("Image: Only accepts PIL.Image or NumPy as array")
+    # Validate shape
+    if img.ndim == 2: 
+        # Fine
+        pass
+    elif img.ndim == 3: 
+        if img.shape[2] == 3: 
             pass
-        elif img.ndim == 3: 
-            if img.shape[2] == 3: 
-                pass
-            elif img.shape[2] == 4: 
-                # Drop A if RGBA
-                img = img[:, :, :3]
-            else: 
-                raise ValueError("NumPy Image must be dim (H,W), (H,W,3) or (H,W,4)")
+        elif img.shape[2] == 4: 
+            # Drop A if RGBA
+            img = img[:, :, :3]
         else: 
             raise ValueError("NumPy Image must be dim (H,W), (H,W,3) or (H,W,4)")
-        # Normalise to [0,1]
-        if normalise_01: 
-            img = to_unit_interval(img, dtype, eps)
-        # Electro-optical transfer function
-        if assume_srgb: 
-            img = eotf(img, eotf_params, dtype)
-        # If 3D, convert to greyscale 
-        if img.ndim == 3 and img.shape[2] == 3: 
-            img = rgb_to_grey(img, luminance_weights)
-        # Cast to float64
-        img = np.array(img, dtype=dtype)
-        # Return 2D array (H, W)
-        return img
-
-    # Not NumPy or accepted PIL.Image
-    raise ValueError("Image: Only accepts PIL.Image or NumPy as array")
+    else: 
+        raise ValueError("NumPy Image must be dim (H,W), (H,W,3) or (H,W,4)")
+    # Normalise to [0,1]
+    if normalise_01: 
+        img = to_unit_interval(img, dtype, eps)
+    # Electro-optical transfer function
+    if assume_srgb: 
+        img = eotf(img, eotf_params, dtype)
+    # If 3D, convert to greyscale 
+    if img.ndim == 3 and img.shape[2] == 3: 
+        img = rgb_to_grey(img, luminance_weights)
+    # Cast to float64
+    img = np.array(img, dtype=dtype)
+    # Return 2D array (H, W)
+    return img
 
 # RGB to greyscale
 def rgb_to_grey(img, luminance_weights, dtype=np.float64, eps=1e-8): 
@@ -58,8 +60,8 @@ def rgb_to_grey(img, luminance_weights, dtype=np.float64, eps=1e-8):
     # Pack
     w = np.array([wR, wG, wB], dtype=dtype)
     # Check
-    s = float(w.sum())
-    if s > (1 + eps) or s < (1 - eps): 
+    s = float(np.sum(w))
+    if abs(s - 1) > eps: 
         raise ValueError("Luminance weights do not sum to 1")
     # Dot product
     return np.tensordot(img, w, axes=([-1],[0]))
@@ -83,7 +85,7 @@ def to_unit_interval(img, dtype=np.float64, eps=1e-8):
     else:
         raise ValueError("Unsupported NumPy dtype, must be unsigned integer or float")
 
-# Electro-optical transfer function (inverse gamma) 
+# Electro-optical transfer function 
 def eotf(img, eotf_params, dtype=np.float64): 
     # Unpack
     b = float(eotf_params["breakpoint"])
@@ -101,23 +103,43 @@ def eotf(img, eotf_params, dtype=np.float64):
     return img_copy
 
 # Gaussian kernel 1D
-def gaussian_kernel_1d(sigma, truncate=3.0, force_odd=True):
+def gaussian_kernel_1d(sigma, truncate=3.0, dtype=np.float64, eps=1e-8):
     # Validate sigma > 0
-    # Compute radius = ceil(truncate * sigma)
-    # Build x = [-radius, ..., +radius]
-    # Compute kernel g[x] = exp(-x^2/(2*sigma^2))
-    # Normalise sum(g)=1
-    # Return g as float64 1D array
-    raise NotImplementedError
+    if sigma <= eps: 
+        raise ValueError("Sigma must be > 0")
+    # Compute radius
+    r = math.ceil(truncate * sigma)
+    # Build integer support x = [-r, ..., 0, ..., +r]
+    x = np.arange(-r, r+1)
+    # Compute kernel g(x)
+    g = np.exp(-x**2 / (2*sigma**2))
+    # Normalise g to 1
+    s = np.sum(g)
+    g = g / s
+    # Return as NumPy array in dtype
+    return np.array(g, dtype=dtype)
 
 # Gaussian derivative kernel 1D
-def gaussian_derivative_kernel_1d(sigma, truncate=3.0, force_odd=True):
+def gaussian_derivative_kernel_1d(sigma, truncate=3.0, dtype=np.float64, eps=1e-8, enforce_zero_sum=True): 
     # Validate sigma > 0
-    # Build same support x as gaussian_kernel_1d
-    # Compute derivative kernel dg[x] = -(x/sigma^2) * g[x]
-    # Enforce sum(dg)=0 numerically
-    # Return dg as float64 1D array
-    raise NotImplementedError
+    if sigma <= eps: 
+        raise ValueError("Sigma must be > 0")
+    # Compute radius
+    r = math.ceil(truncate * sigma)
+    # Build integer support x = [-r, ..., 0, ..., +r]
+    x = np.arange(-r, r+1)
+    # Compute kernel g(x)
+    g = np.exp(-x**2 / (2*sigma**2))
+    # Normalise g to 1
+    s = np.sum(g)
+    g = g / s
+    # Compute derivative dg(x)
+    dg = -(x / sigma**2) * g
+    # If enforce_zero_sum: dg = dg - mean(dg)
+    if enforce_zero_sum: 
+        dg -= dg.mean()
+    # Return as NumPy array in dtype
+    return np.array(dg, dtype=dtype)
 
 # Convolution 1D
 def convolve1d(im, k, axis, border_mode="reflect"):
