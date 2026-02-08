@@ -27,26 +27,34 @@ image:
 
 border:
   # Padding policy for 1D/2D filtering (NumPy)
+  # "reflect" = mirrors the boundary
+  # "constant" = pads with a constant (0)
+  # "edge" = extends the boundary value outwards
   mode: reflect
+  # Constant pad value (only used if mode: constant)
+  constant_value: 0.0
 
 gradients:
   # Gradient method
   # "dog" = derivative-of-Gaussian via separable 1D filtering
-  # "sobel" = smooth then apply Sobel
+  # "sobel" = smooth then apply Sobel kernels
   method: dog
 
   gaussian:
     # Truncate support of 1D Gaussian kernel (radius = ceil(truncate * sigma))
     truncate: 3.0
-    # Enforce Gaussian derivative sums to 0
-    enforce_zero_sum: true
 
-  # Pre-smoothing / derivative scale (pixels)
-  sigma_d: 1.0
+  dog: 
+    # Sigma derivative scale (pixels)
+    sigma_d: 1.0
 
-  # Settings for "sobel"
-  sobel_ksize: 3
-  sobel_scale: 0.125
+  sobel: 
+    # Sigma pre-smoothing (pixels)
+    sigma_pre: 1.0
+    # Kernel size
+    ksize: 3
+    # Rescale
+    scale: 0.125
 
   # Outputs
   return:
