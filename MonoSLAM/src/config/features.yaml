@@ -64,15 +64,20 @@ gradients:
     ori: true
 
 harris:
+  # Detector method
+  # "harris" or "shi_tomasi"
+  method: harris
+
   # Integration scale for structure tensor (pixels)
   sigma_i: 1.5
 
-  # Harris parameter
+  # Harris parameter (ignored if shi_tomasi)
   k: 0.04
 
   threshold:
-    # Relative to max response
+    # Relative to max response (positive)
     type: relative
+    # Keep points above rel * max response
     rel: 0.01
 
   nms:
