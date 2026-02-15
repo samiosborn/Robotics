@@ -2,6 +2,7 @@
 
 import numpy as np
 
+
 # Check 2D image
 def check_2d_image(im, name="im", finite=False):
     # Convert to NumPy
@@ -9,7 +10,7 @@ def check_2d_image(im, name="im", finite=False):
     # Must be 2D
     if im.ndim != 2:
         raise ValueError(f"{name} must be a 2D greyscale image; got shape {im.shape}")
-    # Optionally enforce finite values (useful for score maps / gradients)
+    # Enforce finite values
     if finite:
         if not np.isfinite(im).all():
             raise ValueError(f"{name} must contain only finite values")
@@ -18,6 +19,11 @@ def check_2d_image(im, name="im", finite=False):
 
 # Check axis label is 0 (y-axis) or 1 (x-axis)
 def check_axis_01(axis, name="axis"):
+    # Accept Python int or NumPy int
+    if not isinstance(axis, (int, np.integer)):
+        raise ValueError(f"{name} must be 0 or 1; got {type(axis)}")
+    # Cast to int
+    axis = int(axis)
     # Axis must be 0 or 1
     if axis not in (0, 1):
         raise ValueError(f"{name} must be 0 or 1; got {axis}")
@@ -37,7 +43,7 @@ def check_kernel_1d_odd(k, name="k", finite=False):
     # Must be odd length
     if (k.size % 2) == 0:
         raise ValueError(f"{name} length must be odd; got {k.size}")
-    # Optionally enforce finite entries
+    # Enforce finite entries
     if finite:
         if not np.isfinite(k).all():
             raise ValueError(f"{name} must contain only finite values")
@@ -82,7 +88,7 @@ def check_int_ge0(x, name="value"):
     # Must be int-like
     if not isinstance(x, (int, np.integer)):
         raise ValueError(f"{name} must be an integer; got {type(x)}")
-    # Cast to plain int
+    # Cast to int
     xi = int(x)
     # Must be >= 0
     if xi < 0:
@@ -95,7 +101,7 @@ def check_int_gt0(x, name="value"):
     # Must be int-like
     if not isinstance(x, (int, np.integer)):
         raise ValueError(f"{name} must be an integer; got {type(x)}")
-    # Cast to plain int
+    # Cast to int
     xi = int(x)
     # Must be > 0
     if xi <= 0:
@@ -108,7 +114,7 @@ def check_int_odd_ge1(x, name="value"):
     # Must be int-like
     if not isinstance(x, (int, np.integer)):
         raise ValueError(f"{name} must be an integer; got {type(x)}")
-    # Cast to plain int
+    # Cast to int
     xi = int(x)
     # Must be >= 1
     if xi < 1:
@@ -155,18 +161,72 @@ def check_keypoints_xy(kps, name="kps", finite=True):
     # Must have at least x,y columns
     if kps.shape[1] < 2:
         raise ValueError(f"{name} must have at least 2 columns (x,y); got shape {kps.shape}")
-    # Optionally enforce finite values in x,y
+    # Optionally enforce finite values in x, y
     if finite:
         if not np.isfinite(kps[:, :2]).all():
             raise ValueError(f"{name} first two columns (x,y) must be finite")
     return kps
 
 
+# Check a value is one of allowed choices
+def check_choice(x, choices, name="value"):
+    # Convert to string
+    s = str(x)
+    # Normalise to lowercase
+    sl = s.lower()
+    # Build normalised set
+    allowed = {str(c).lower() for c in choices}
+    # Validate membership
+    if sl not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(list(allowed))}; got '{x}'")
+    return sl
+
+
 # Check border mode is supported
 def check_border_mode(mode, name="border_mode"):
-    # Convert to lowercase string
-    m = str(mode).lower()
     # Validate supported modes
-    if m not in {"reflect", "constant", "edge"}:
-        raise ValueError(f"{name} must be one of: reflect, constant, edge; got '{mode}'")
-    return m
+    return check_choice(mode, {"reflect", "constant", "edge"}, name=name)
+
+
+# Check values are in [0, 1]
+def check_in_01(x, name="value", eps=1e-8):
+    # Convert to NumPy
+    a = np.asarray(x)
+    # Get min/max
+    vmin = float(np.min(a))
+    vmax = float(np.max(a))
+    # Validate range with small tolerance
+    if vmin < -float(eps) or vmax > (1.0 + float(eps)):
+        raise ValueError(f"{name} must be in [0,1] (within eps={eps}); got min={vmin}, max={vmax}")
+    return x
+
+
+# Check 3D patches tensor (N, P, P)
+def check_3d_patches(patches, name="patches", finite=False):
+    # Convert to NumPy
+    patches = np.asarray(patches)
+    # Must be 3D
+    if patches.ndim != 3:
+        raise ValueError(f"{name} must be 3D with shape (N,P,P); got shape {patches.shape}")
+    # Must be square patches
+    if patches.shape[1] != patches.shape[2]:
+        raise ValueError(f"{name} must have square patches; got shape {patches.shape}")
+    # Optionally enforce finite values
+    if finite:
+        if not np.isfinite(patches).all():
+            raise ValueError(f"{name} must contain only finite values")
+    return patches
+
+
+# Check two arrays share the same first dimension
+def check_same_first_dim(A, B, nameA="A", nameB="B"):
+    # Convert to NumPy
+    A = np.asarray(A)
+    B = np.asarray(B)
+    # Must be at least 1D
+    if A.ndim < 1 or B.ndim < 1:
+        raise ValueError(f"{nameA} and {nameB} must be at least 1D")
+    # First dimension must match
+    if A.shape[0] != B.shape[0]:
+        raise ValueError(f"{nameA} and {nameB} must have same first dim; got {A.shape[0]} and {B.shape[0]}")
+    return A, B
