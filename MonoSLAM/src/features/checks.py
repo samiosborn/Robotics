@@ -1,46 +1,172 @@
 # src/features/checks.py
+
 import numpy as np
 
 # Check 2D image
-def check_2d_image(im, name="im"):
+def check_2d_image(im, name="im", finite=False):
+    # Convert to NumPy
     im = np.asarray(im)
+    # Must be 2D
     if im.ndim != 2:
         raise ValueError(f"{name} must be a 2D greyscale image; got shape {im.shape}")
+    # Optionally enforce finite values (useful for score maps / gradients)
+    if finite:
+        if not np.isfinite(im).all():
+            raise ValueError(f"{name} must contain only finite values")
     return im
+
 
 # Check axis label is 0 (y-axis) or 1 (x-axis)
 def check_axis_01(axis, name="axis"):
+    # Axis must be 0 or 1
     if axis not in (0, 1):
         raise ValueError(f"{name} must be 0 or 1; got {axis}")
     return axis
 
+
 # Check 1D kernel is 1D and odd length
-def check_kernel_1d_odd(k, name="k"):
+def check_kernel_1d_odd(k, name="k", finite=False):
+    # Convert to NumPy
     k = np.asarray(k)
+    # Must be 1D
     if k.ndim != 1:
         raise ValueError(f"{name} must be a 1D array; got ndim={k.ndim} with shape {k.shape}")
+    # Must not be empty
     if k.size == 0:
         raise ValueError(f"{name} is empty")
+    # Must be odd length
     if (k.size % 2) == 0:
         raise ValueError(f"{name} length must be odd; got {k.size}")
+    # Optionally enforce finite entries
+    if finite:
+        if not np.isfinite(k).all():
+            raise ValueError(f"{name} must contain only finite values")
     return k
 
+
 # Check two 2D arrays, same shape
-def check_2d_pair_same_shape(A, B, nameA="A", nameB="B"):
+def check_2d_pair_same_shape(A, B, nameA="A", nameB="B", finite=False):
+    # Convert to NumPy
     A = np.asarray(A)
     B = np.asarray(B)
+    # Must both be 2D
     if A.ndim != 2 or B.ndim != 2:
         raise ValueError(f"{nameA} and {nameB} must be 2D; got {A.ndim}D and {B.ndim}D")
+    # Must match shape
     if A.shape != B.shape:
         raise ValueError(f"{nameA} and {nameB} must have same shape; got {A.shape} and {B.shape}")
+    # Optionally enforce finite values
+    if finite:
+        if not np.isfinite(A).all():
+            raise ValueError(f"{nameA} must contain only finite values")
+        if not np.isfinite(B).all():
+            raise ValueError(f"{nameB} must contain only finite values")
     return A, B
+
 
 # Check strictly positive (with epsilon)
 def check_positive(x, name="value", eps=1e-8):
+    # Convert to float if possible
     try:
         xf = float(x)
     except Exception:
         raise ValueError(f"{name} must be a real number; got {type(x)}") from None
+    # Must be > eps
     if xf <= eps:
         raise ValueError(f"{name} must be > {eps}; got {x}")
     return xf
+
+
+# Check non-negative integer
+def check_int_ge0(x, name="value"):
+    # Must be int-like
+    if not isinstance(x, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer; got {type(x)}")
+    # Cast to plain int
+    xi = int(x)
+    # Must be >= 0
+    if xi < 0:
+        raise ValueError(f"{name} must be >= 0; got {xi}")
+    return xi
+
+
+# Check positive integer
+def check_int_gt0(x, name="value"):
+    # Must be int-like
+    if not isinstance(x, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer; got {type(x)}")
+    # Cast to plain int
+    xi = int(x)
+    # Must be > 0
+    if xi <= 0:
+        raise ValueError(f"{name} must be > 0; got {xi}")
+    return xi
+
+
+# Check odd integer >= 1
+def check_int_odd_ge1(x, name="value"):
+    # Must be int-like
+    if not isinstance(x, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer; got {type(x)}")
+    # Cast to plain int
+    xi = int(x)
+    # Must be >= 1
+    if xi < 1:
+        raise ValueError(f"{name} must be >= 1; got {xi}")
+    # Must be odd
+    if (xi % 2) != 1:
+        raise ValueError(f"{name} must be odd; got {xi}")
+    return xi
+
+
+# Check finite scalar
+def check_finite_scalar(x, name="value"):
+    # Convert to float
+    try:
+        xf = float(x)
+    except Exception:
+        raise ValueError(f"{name} must be a real number; got {type(x)}") from None
+    # Must be finite
+    if not np.isfinite(xf):
+        raise ValueError(f"{name} must be finite; got {x}")
+    return xf
+
+
+# Check a 2D score map
+def check_score_map(score, name="score"):
+    # Must be 2D
+    score = check_2d_image(score, name=name)
+    # Must be finite
+    if not np.isfinite(score).all():
+        raise ValueError(f"{name} must contain only finite values")
+    # Must not be boolean
+    if score.dtype == np.bool_:
+        raise ValueError(f"{name} must be numeric, not bool")
+    return score
+
+
+# Check keypoints array shape (N,2) or (N,3)+
+def check_keypoints_xy(kps, name="kps", finite=True):
+    # Must be numpy array
+    kps = np.asarray(kps)
+    # Must be 2D
+    if kps.ndim != 2:
+        raise ValueError(f"{name} must be 2D array; got shape {kps.shape}")
+    # Must have at least x,y columns
+    if kps.shape[1] < 2:
+        raise ValueError(f"{name} must have at least 2 columns (x,y); got shape {kps.shape}")
+    # Optionally enforce finite values in x,y
+    if finite:
+        if not np.isfinite(kps[:, :2]).all():
+            raise ValueError(f"{name} first two columns (x,y) must be finite")
+    return kps
+
+
+# Check border mode is supported
+def check_border_mode(mode, name="border_mode"):
+    # Convert to lowercase string
+    m = str(mode).lower()
+    # Validate supported modes
+    if m not in {"reflect", "constant", "edge"}:
+        raise ValueError(f"{name} must be one of: reflect, constant, edge; got '{mode}'")
+    return m
