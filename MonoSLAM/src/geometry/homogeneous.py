@@ -1,34 +1,39 @@
 # src/geometry/homogeneous.py
 import numpy as np
 
-# Homogenise
-def homogenise(X):
-    # Convert
-    X = np.asarray(X, dtype=float)
-    # Reshape
-    if X.ndim == 1: 
-        X = X.reshape(-1, 1)
-    # Error
-    if X.ndim != 2:
-        raise ValueError(f"Expected array of shape (d, N), got {X.shape}")
-    # Homogenise
-    ones = np.ones((1, X.shape[1]))
-    return np.vstack((X, ones))
 
-# Dehomogenise
-def dehomogenise(X_h): 
-    # Convert
-    X_h = np.asarray(X_h, dtype=float)
-    # Reshape
-    if X_h.ndim == 1: 
-        X_h = X_h.reshape(-1, 1)
-    # Error
-    if X_h.ndim != 2 or X_h.shape[0] < 2:
-        raise ValueError(f"Expected array of shape (d+1, N), got {X_h.shape}")
-    # Weight
+# Homogenise (2xN -> 3xN) or (DxN -> (D+1)xN)
+def homogenise(X):
+    # Convert to array
+    X = np.asarray(X)
+    # Validate 2D
+    if X.ndim != 2:
+        raise ValueError(f"X must be 2D (D,N); got {X.shape}")
+    # Append ones row
+    ones = np.ones((1, X.shape[1]), dtype=X.dtype)
+    # Stack
+    return np.vstack([X, ones])
+
+
+# Dehomogenise ((D+1)xN -> DxN) safely
+def dehomogenise(X_h, *, eps=1e-12):
+    # Convert to array
+    X_h = np.asarray(X_h)
+    # Validate 2D
+    if X_h.ndim != 2:
+        raise ValueError(f"X_h must be 2D (D+1,N); got {X_h.shape}")
+    # Require at least 2 rows (so there is a w row)
+    if X_h.shape[0] < 2:
+        raise ValueError(f"X_h must have at least 2 rows; got {X_h.shape}")
+    # Read scale row
     w = X_h[-1]
-    # Error
-    if np.any(np.abs(w)) < 1e-12: 
-        raise ValueError("Cannot dehomogenise point at infinity")
-    # Divide all but last by weight
-    return X_h[:-1] / w
+    # Prepare output
+    Y = np.empty_like(X_h[:-1], dtype=float)
+    # Mark valid scales
+    ok = np.abs(w) > float(eps)
+    # Default everything to +inf (points at infinity / invalid)
+    Y[...] = np.inf
+    # Safe divide only where ok (avoids RuntimeWarning)
+    np.divide(X_h[:-1], w[None, :], out=Y, where=ok[None, :])
+    # Return
+    return Y
