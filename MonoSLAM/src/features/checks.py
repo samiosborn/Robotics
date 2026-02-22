@@ -168,6 +168,23 @@ def check_keypoints_xy(kps, name="kps", finite=True):
     return kps
 
 
+# Check an array is (N,2) of xy points (strict)
+def check_xy(points, name="points", finite=True):
+    # Convert to NumPy
+    points = np.asarray(points)
+    # Must be 2D
+    if points.ndim != 2:
+        raise ValueError(f"{name} must be a 2D array with shape (N,2); got shape {points.shape}")
+    # Must be exactly (N,2)
+    if points.shape[1] != 2:
+        raise ValueError(f"{name} must have shape (N,2); got shape {points.shape}")
+    # Optionally enforce finite values
+    if finite:
+        if not np.isfinite(points).all():
+            raise ValueError(f"{name} must contain only finite values")
+    return points
+
+
 # Check a value is one of allowed choices
 def check_choice(x, choices, name="value"):
     # Convert to string
