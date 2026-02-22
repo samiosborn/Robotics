@@ -75,23 +75,30 @@ def rgb_to_grey(img, luminance_weights, dtype=np.float64, eps=1e-8):
     return np.tensordot(img, w, axes=([-1],[0]))
 
 # Normalise to unit interval [0, 1]
-def to_unit_interval(img, dtype=np.float64, eps=1e-8): 
-    # Unsigned integers
-    if img.dtype in {np.uint8, np.uint16, np.uint32}: 
+def to_unit_interval(img, dtype=np.float64, eps=1e-8):
+    # Convert to NumPy
+    img = np.asarray(img)
+    # Unsigned integers (uint8/uint16/uint32/uint64)
+    if np.issubdtype(img.dtype, np.unsignedinteger):
+        # Divide by max representable
+        return np.array(img / np.iinfo(img.dtype).max, dtype=dtype)
+    # Signed integers (rare for images, but handle safely)
+    if np.issubdtype(img.dtype, np.signedinteger):
+        # Reject negative values (ambiguous scaling)
+        if np.min(img) < 0:
+            raise ValueError("Signed integer image has negative values; cannot normalise safely")
         # Divide by max representable
         return np.array(img / np.iinfo(img.dtype).max, dtype=dtype)
     # Floats
-    elif img.dtype in {np.float32, np.float64}: 
+    if np.issubdtype(img.dtype, np.floating):
         # Clip to [0,1] (allow tiny tolerance)
-        vmax = np.max(img)
-        vmin = np.min(img)
-        if vmin < -eps or vmax > (1 + eps): 
+        vmax = float(np.max(img))
+        vmin = float(np.min(img))
+        if vmin < -eps or vmax > (1.0 + eps):
             raise ValueError("Float image values out of [0,1] bounds")
-        else: 
-            return np.array(np.clip(img, 0.0, 1.0), dtype=dtype)
-        # Raise error if some data is beyond tolerance
-    else:
-        raise ValueError("Unsupported NumPy dtype, must be unsigned integer or float")
+        return np.array(np.clip(img, 0.0, 1.0), dtype=dtype)
+
+    raise ValueError(f"Unsupported NumPy dtype {img.dtype}; must be integer or float")
 
 # Electro-optical transfer function 
 def eotf(img, eotf_params, dtype=np.float64): 
