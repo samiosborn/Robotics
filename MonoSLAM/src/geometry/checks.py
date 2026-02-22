@@ -35,3 +35,20 @@ def check_bool_N(mask, N):
     if mask.ndim != 1 or mask.size != N: 
         raise ValueError(f"Must be shape (N, ), got {mask.shape} for N={N}")
     return mask
+
+# Convert (N,2) or (N,>=2) keypoints array into (2,N) points matrix
+def as_2xN_points(xy, name="xy", finite=True):
+    # Convert to NumPy
+    xy = np.asarray(xy)
+    # Must be 2D
+    if xy.ndim != 2:
+        raise ValueError(f"{name} must be a 2D array; got shape {xy.shape}")
+    # Must have at least 2 columns (x,y)
+    if xy.shape[1] < 2:
+        raise ValueError(f"{name} must have at least 2 columns (x,y); got shape {xy.shape}")
+    # Enforce finite x,y
+    if finite:
+        if not np.isfinite(xy[:, :2]).all():
+            raise ValueError(f"{name} first two columns (x,y) must be finite")
+    # Stack into (2,N)
+    return np.vstack([xy[:, 0], xy[:, 1]])
