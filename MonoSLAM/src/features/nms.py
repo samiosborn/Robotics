@@ -20,7 +20,14 @@ class NMSResult:
 
 
 # Non-maximum suppression (NMS) for a 2D score map
-def nms_2d(score_map: np.ndarray, radius: int = 1, threshold: float, border_margin: int = 0, max_points: int = None) -> NMSResult:
+def nms_2d(
+    score_map: np.ndarray,
+    *,
+    radius: int = 1,
+    threshold: float | None = None,
+    border_margin: int = 0,
+    max_points: int | None = None,
+) -> NMSResult:
     
     # --- CHECKS ---
     # Validate shape
