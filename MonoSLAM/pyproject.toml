@@ -1,5 +1,9 @@
 # pyproject.toml
 
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "MonoSLAM"
 version = "0.1.0"
@@ -10,4 +14,14 @@ requires-python = ">=3.10"
 # Direct runtime dependencies
 dependencies = [
     "numpy",
+    "Pillow",
+    "PyYAML",
 ]
+
+[tool.setuptools]
+# Use the common src/ layout
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+# Discover packages under src/
+where = ["src"]
