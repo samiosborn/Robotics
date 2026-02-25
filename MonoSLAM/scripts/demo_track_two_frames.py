@@ -20,13 +20,129 @@ from features.patches import extract_patches
 
 from features.matching import match_patches_ncc
 from features.matching import hamming_distance_matrix
+from features.matching import match_brief_hamming_with_scale_gate
 from features.descriptors import brief_make_pairs
 from features.descriptors import brief_from_patches
+from features.descriptors import brief_orientations_from_patches
+from features.orientation import keypoint_orientations
 
 from geometry.checks import as_2xN_points
 from geometry.homography import apply_homography
 from geometry.homography import estimate_homography
 from geometry.homography import estimate_homography_ransac
+
+
+# Print descriptor quality diagnostics for packed BRIEF descriptors.
+def _print_brief_descriptor_stats(desc: np.ndarray, *, name: str, n_bits: int) -> None:
+
+    # Guard empty descriptors
+    if desc.size == 0:
+        print(f"brief_diag[{name}]: empty descriptors")
+        return
+
+    # Descriptor uniqueness / duplication
+    uniq, counts = np.unique(desc, axis=0, return_counts=True)
+    n_desc = int(desc.shape[0])
+    n_unique = int(uniq.shape[0])
+    n_dup = int(n_desc - n_unique)
+    max_mult = int(counts.max()) if counts.size > 0 else 0
+
+    # Bit statistics
+    bits = np.unpackbits(desc, axis=1, bitorder="little")
+    bits = bits[:, : int(n_bits)]
+    p_global = float(bits.mean())
+    p_bit = bits.mean(axis=0)
+    dead_bits = int(np.sum((p_bit < 0.01) | (p_bit > 0.99)))
+
+    # Entropy at global one-rate (max is 1.0 at p=0.5)
+    p = min(max(p_global, 1e-12), 1.0 - 1e-12)
+    ent = float(-(p * np.log2(p) + (1.0 - p) * np.log2(1.0 - p)))
+
+    print(
+        f"brief_diag[{name}]: n={n_desc} unique={n_unique} dup={n_dup} "
+        f"dup_ratio={n_dup / max(1, n_desc):.3f} max_mult={max_mult}"
+    )
+    print(
+        f"brief_diag[{name}]: bit_one_rate={p_global:.4f} "
+        f"bit_entropy={ent:.4f} dead_bits={dead_bits}/{int(n_bits)}"
+    )
+
+
+# Print NN / NN2 Hamming diagnostics under level-gated matching.
+def _print_brief_hamming_diagnostics(
+    descA: np.ndarray,
+    levelsA: np.ndarray,
+    descB: np.ndarray,
+    levelsB: np.ndarray,
+    *,
+    scale_gate: int,
+    n_bits: int,
+) -> None:
+
+    # Guard empties
+    if descA.shape[0] == 0 or descB.shape[0] == 0:
+        print("brief_diag[hamming]: empty descriptors")
+        return
+
+    # Full Hamming matrix
+    D = hamming_distance_matrix(descA, descB).astype(np.float64, copy=False)
+
+    # Gate by level consistency
+    M = (np.abs(levelsA[:, None].astype(np.int64) - levelsB[None, :].astype(np.int64)) <= int(scale_gate))
+    Dg = np.where(M, D, np.inf)
+
+    # Rows with at least one / two valid candidates
+    row_valid_1 = np.isfinite(Dg).any(axis=1)
+    row_valid_2 = (np.isfinite(Dg).sum(axis=1) >= 2)
+
+    if not np.any(row_valid_1):
+        print("brief_diag[hamming]: no valid candidates after scale gating")
+        return
+
+    # Best NN distance per A
+    Dv1 = Dg[row_valid_1]
+    j1 = np.argmin(Dv1, axis=1)
+    d1 = Dv1[np.arange(Dv1.shape[0]), j1]
+
+    # Second-best distance for rows that have at least two candidates
+    d2 = np.full((d1.shape[0],), np.inf, dtype=np.float64)
+    if np.any(row_valid_2):
+        Dv2 = Dg[row_valid_2]
+        two = np.partition(Dv2, kth=1, axis=1)[:, :2]
+        two.sort(axis=1)
+        d2_vals = two[:, 1]
+        d2[row_valid_2[row_valid_1]] = d2_vals
+
+    # Ratio stats only where d2 is finite
+    ratio_ok = np.isfinite(d2)
+    ratio = d1[ratio_ok] / np.maximum(d2[ratio_ok], 1.0)
+
+    # Distance quantiles
+    q_d1 = np.quantile(d1, [0.1, 0.5, 0.9])
+    print(
+        f"brief_diag[hamming]: nn_d q10={q_d1[0]:.1f} q50={q_d1[1]:.1f} q90={q_d1[2]:.1f} "
+        f"(valid_rows={int(row_valid_1.sum())}/{int(descA.shape[0])})"
+    )
+
+    if ratio.size > 0:
+        q_r = np.quantile(ratio, [0.1, 0.5, 0.9])
+        print(
+            f"brief_diag[hamming]: nn/nn2 q10={q_r[0]:.3f} q50={q_r[1]:.3f} q90={q_r[2]:.3f} "
+            f"(rows_with_nn2={int(ratio.size)})"
+        )
+    else:
+        print("brief_diag[hamming]: nn/nn2 unavailable (insufficient gated candidates)")
+
+    # Compact histogram of NN distances
+    step = 8
+    bins = np.arange(0, int(n_bits) + step, step, dtype=np.int64)
+    hist, edges = np.histogram(d1, bins=bins)
+    parts = []
+    for i in range(hist.shape[0]):
+        if hist[i] > 0:
+            parts.append(f"[{int(edges[i])},{int(edges[i + 1])}):{int(hist[i])}")
+    if len(parts) > 0:
+        print("brief_diag[hamming]: nn_hist " + " ".join(parts))
 
 
 # Only run when executed as a script
@@ -50,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument("--match", type=str, default="ncc", choices=["ncc", "brief"])
 
     # Patch size (odd)
-    parser.add_argument("--patch", type=int, default=11)
+    parser.add_argument("--patch", type=int, default=21)
 
     # NCC threshold
     parser.add_argument("--min_score", type=float, default=0.7)
@@ -59,18 +175,21 @@ if __name__ == "__main__":
     parser.add_argument("--brief_bits", type=int, default=256)
     parser.add_argument("--brief_seed", type=int, default=0)
 
-    # BRIEF orientation (rotate patches into a canonical frame before BRIEF)
+    # BRIEF orientation compensation (rotate BRIEF sampling pairs per keypoint)
     parser.add_argument("--brief_orient", action="store_true")
+    parser.add_argument("--brief_orient_method", type=str, default="ic", choices=["ic", "grad"])
 
     # BRIEF matching controls (NN + max_dist baseline)
-    parser.add_argument("--brief_max_dist", type=int, default=85)
+    parser.add_argument("--brief_max_dist", type=int, default=72)
 
     # BRIEF ratio test option (not default; usually stricter)
     parser.add_argument("--brief_mode", type=str, default="nn", choices=["nn", "ratio"])
     parser.add_argument("--brief_ratio", type=float, default=0.8)
 
     # Mutual cross-check
-    parser.add_argument("--brief_mutual", action="store_true")
+    parser.add_argument("--brief_mutual", dest="brief_mutual", action="store_true")
+    parser.add_argument("--no_brief_mutual", dest="brief_mutual", action="store_false")
+    parser.set_defaults(brief_mutual=True)
 
     # Multiscale BRIEF via pyramid
     parser.add_argument("--brief_multiscale", action="store_true")
@@ -90,6 +209,9 @@ if __name__ == "__main__":
 
     # Drawing options
     parser.add_argument("--max_draw", type=int, default=200)
+
+    # BRIEF diagnostics
+    parser.add_argument("--debug_brief", action="store_true")
 
     # Parse args
     args = parser.parse_args()
@@ -158,11 +280,15 @@ if __name__ == "__main__":
     pyr0_imgs = []
     pyr1_imgs = []
     pyr_scales = []
+    pyr_map0 = []
+    pyr_map1 = []
 
     # Level 0 is original
     pyr0_imgs.append(img0)
     pyr1_imgs.append(img1)
     pyr_scales.append(1.0)
+    pyr_map0.append((1.0, 1.0))
+    pyr_map1.append((1.0, 1.0))
 
     # Build downsampled levels
     for lvl in range(1, n_levels):
@@ -174,6 +300,9 @@ if __name__ == "__main__":
         pyr0_imgs.append(img0.resize((w0, h0), resample=Image.BILINEAR))
         pyr1_imgs.append(img1.resize((w1, h1), resample=Image.BILINEAR))
         pyr_scales.append(s)
+        # Exact mapping factors (account for rounding in resized dimensions)
+        pyr_map0.append((float(W0) / float(w0), float(H0) / float(h0)))
+        pyr_map1.append((float(W1) / float(w1), float(H1) / float(h1)))
 
     # ---------------------------------
     # Detect + describe across the pyramid
@@ -291,84 +420,65 @@ if __name__ == "__main__":
             if pr0.patches.shape[0] == 0 or pr1.patches.shape[0] == 0:
                 continue
 
-            # Compute orientations from intensity centroid (ORB-style) if requested
+            # Compute orientations if requested, otherwise keep axis-aligned BRIEF
             if bool(args.brief_orient):
+                ori_method = str(args.brief_orient_method).lower().strip()
+                if ori_method == "ic":
+                    a0 = brief_orientations_from_patches(pr0.patches, dtype=np.float64)
+                    a1 = brief_orientations_from_patches(pr1.patches, dtype=np.float64)
+                elif ori_method == "grad":
+                    a0 = keypoint_orientations(
+                        im0_lvl,
+                        pr0.kps,
+                        sigma_d=1.0,
+                        truncate=3.0,
+                        window_radius=max(4, int(args.patch) // 2),
+                        dtype=np.float64,
+                        eps=float(eps),
+                    )
+                    a1 = keypoint_orientations(
+                        im1_lvl,
+                        pr1.kps,
+                        sigma_d=1.0,
+                        truncate=3.0,
+                        window_radius=max(4, int(args.patch) // 2),
+                        dtype=np.float64,
+                        eps=float(eps),
+                    )
+                else:
+                    raise ValueError(f"Unknown brief_orient_method '{ori_method}'")
 
-                # Read patch size
-                P = int(pr0.patches.shape[1])
+                # Rotate BRIEF sampling pairs analytically per keypoint (no patch warping)
+                d0 = brief_from_patches(pr0.patches, pairs, angles=a0, packbits=True, bitorder="little")
+                d1 = brief_from_patches(pr1.patches, pairs, angles=a1, packbits=True, bitorder="little")
 
-                # Build centred coordinate grids (dx, dy)
-                c = (P - 1) * 0.5
-                xs = np.arange(P, dtype=np.float64) - c
-                ys = np.arange(P, dtype=np.float64) - c
-                dx = xs[None, :].repeat(P, axis=0)
-                dy = ys[:, None].repeat(P, axis=1)
-
-                # Compute angles for image0 patches
-                a0 = []
-                for i in range(pr0.patches.shape[0]):
-                    patch = np.asarray(pr0.patches[i], dtype=np.float64)
-                    m10 = float(np.sum(dx * patch))
-                    m01 = float(np.sum(dy * patch))
-                    a0.append(np.arctan2(m01, m10))
-                a0 = np.asarray(a0, dtype=np.float64)
-
-                # Compute angles for image1 patches
-                a1 = []
-                for i in range(pr1.patches.shape[0]):
-                    patch = np.asarray(pr1.patches[i], dtype=np.float64)
-                    m10 = float(np.sum(dx * patch))
-                    m01 = float(np.sum(dy * patch))
-                    a1.append(np.arctan2(m01, m10))
-                a1 = np.asarray(a1, dtype=np.float64)
-
-                # Rotate patches into canonical orientation (rotate by -angle)
-                rp0 = np.empty_like(pr0.patches, dtype=np.float64)
-                rp1 = np.empty_like(pr1.patches, dtype=np.float64)
-
-                # Rotate patches for image0
-                for i in range(pr0.patches.shape[0]):
-                    patch = np.asarray(pr0.patches[i], dtype=np.float64)
-                    patch_u8 = np.clip(patch, 0.0, 1.0)
-                    patch_u8 = (patch_u8 * 255.0).round().astype(np.uint8)
-                    pilp = Image.fromarray(patch_u8, mode="L")
-                    deg = float(-a0[i] * 180.0 / np.pi)
-                    pilr = pilp.rotate(deg, resample=Image.BILINEAR, expand=False, fillcolor=0)
-                    arr = np.asarray(pilr, dtype=np.float64) / 255.0
-                    rp0[i] = arr
-
-                # Rotate patches for image1
-                for i in range(pr1.patches.shape[0]):
-                    patch = np.asarray(pr1.patches[i], dtype=np.float64)
-                    patch_u8 = np.clip(patch, 0.0, 1.0)
-                    patch_u8 = (patch_u8 * 255.0).round().astype(np.uint8)
-                    pilp = Image.fromarray(patch_u8, mode="L")
-                    deg = float(-a1[i] * 180.0 / np.pi)
-                    pilr = pilp.rotate(deg, resample=Image.BILINEAR, expand=False, fillcolor=0)
-                    arr = np.asarray(pilr, dtype=np.float64) / 255.0
-                    rp1[i] = arr
-
-                # Use rotated patches for BRIEF
-                use_patches0 = rp0
-                use_patches1 = rp1
-
+                # Optional orientation debug summary per level
+                if bool(args.debug_brief):
+                    print(
+                        f"brief_diag[level={lvl}]: orient={ori_method} "
+                        f"a0_med={float(np.median(a0)):.3f} a1_med={float(np.median(a1)):.3f}"
+                    )
             else:
-                # Use raw patches as-is
-                use_patches0 = pr0.patches
-                use_patches1 = pr1.patches
-
-            # Compute packed BRIEF descriptors from patches
-            d0 = brief_from_patches(use_patches0, pairs, packbits=True, bitorder="little")
-            d1 = brief_from_patches(use_patches1, pairs, packbits=True, bitorder="little")
+                d0 = brief_from_patches(pr0.patches, pairs, packbits=True, bitorder="little")
+                d1 = brief_from_patches(pr1.patches, pairs, packbits=True, bitorder="little")
 
             # Map level keypoints back to base-image coordinates
-            s = float(pyr_scales[lvl])
+            sx0, sy0 = pyr_map0[lvl]
+            sx1, sy1 = pyr_map1[lvl]
             kps0_base = np.asarray(pr0.kps, dtype=np.float64).copy()
             kps1_base = np.asarray(pr1.kps, dtype=np.float64).copy()
-            kps0_base[:, 0] *= s
-            kps0_base[:, 1] *= s
-            kps1_base[:, 0] *= s
-            kps1_base[:, 1] *= s
+            kps0_base[:, 0] *= float(sx0)
+            kps0_base[:, 1] *= float(sy0)
+            kps1_base[:, 0] *= float(sx1)
+            kps1_base[:, 1] *= float(sy1)
+
+            # Optional coordinate-mapping debug summary per level
+            if bool(args.debug_brief):
+                approx = float(pyr_scales[lvl])
+                print(
+                    f"brief_diag[level={lvl}]: map0=({sx0:.4f},{sy0:.4f}) map1=({sx1:.4f},{sy1:.4f}) "
+                    f"approx_scalar={approx:.4f}"
+                )
 
             # Append into global lists
             all_kps0.append(kps0_base)
@@ -444,136 +554,35 @@ if __name__ == "__main__":
         print(f"patches0: {descA.shape[0]}")
         print(f"patches1: {descB.shape[0]}")
 
-        # Build per-level index lists for B (for scale gating)
-        max_lvl = int(max(int(lvlA.max()), int(lvlB.max())))
-        idxB_by_lvl = []
-        for l in range(max_lvl + 1):
-            idxB_by_lvl.append(np.nonzero(lvlB == l)[0].astype(np.int64, copy=False))
+        # Optional BRIEF diagnostics before matching
+        if bool(args.debug_brief):
+            _print_brief_descriptor_stats(descA, name="A", n_bits=int(args.brief_bits))
+            _print_brief_descriptor_stats(descB, name="B", n_bits=int(args.brief_bits))
+            _print_brief_hamming_diagnostics(
+                descA,
+                lvlA,
+                descB,
+                lvlB,
+                scale_gate=int(scale_gate),
+                n_bits=int(args.brief_bits),
+            )
 
-        # Prepare arrays for best match per A
-        best_ib = np.full((descA.shape[0],), -1, dtype=np.int64)
-        best_d = np.full((descA.shape[0],), np.inf, dtype=np.float64)
-        best_lB = np.full((descA.shape[0],), -1, dtype=np.int32)
-
-        # For each level in A, compare to gated levels in B
-        for lA in range(max_lvl + 1):
-
-            # Indices of A at this level
-            idxA = np.nonzero(lvlA == lA)[0].astype(np.int64, copy=False)
-            if idxA.size == 0:
-                continue
-
-            # Build allowed B levels
-            lmin = max(0, lA - int(scale_gate))
-            lmax = min(max_lvl, lA + int(scale_gate))
-
-            # Loop allowed B levels
-            for lB in range(lmin, lmax + 1):
-
-                # Indices of B at this level
-                idxB = idxB_by_lvl[lB]
-                if idxB.size == 0:
-                    continue
-
-                # Compute Hamming distances for this (A_level, B_level) block
-                D = hamming_distance_matrix(descA[idxA], descB[idxB]).astype(np.float64, copy=False)
-
-                # Best B in this block for each A row
-                j = np.argmin(D, axis=1)
-                d = D[np.arange(D.shape[0]), j]
-
-                # Update global best if improved
-                better = d < best_d[idxA]
-                if np.any(better):
-                    a_up = idxA[better]
-                    best_d[a_up] = d[better]
-                    best_ib[a_up] = idxB[j[better]]
-                    best_lB[a_up] = int(lB)
-
-        # Apply NN distance gate
-        if args.brief_max_dist is None:
-            keep = best_ib >= 0
-        else:
-            keep = (best_ib >= 0) & (best_d <= float(int(args.brief_max_dist)))
-
-        # Candidate matches
-        ia = np.nonzero(keep)[0].astype(np.int64, copy=False)
-        ib = best_ib[keep].astype(np.int64, copy=False)
-        d1 = best_d[keep].astype(np.float64, copy=False)
-
-        # Optional ratio test (compute 2nd best within the same gating)
-        if str(args.brief_mode).lower() == "ratio":
-
-            # If we can't define a ratio (not enough candidates), fall back to NN keep
-            ratio = float(args.brief_ratio)
-            if ratio <= 0.0 or ratio >= 1.0:
-                raise ValueError(f"brief_ratio must be in (0,1); got {ratio}")
-
-            # Build second-best distances
-            second_d = np.full((descA.shape[0],), np.inf, dtype=np.float64)
-
-            # For each level in A, compute second best among gated B by brute force on blocks
-            for lA in range(max_lvl + 1):
-                idxA = np.nonzero(lvlA == lA)[0].astype(np.int64, copy=False)
-                if idxA.size == 0:
-                    continue
-                lmin = max(0, lA - int(scale_gate))
-                lmax = min(max_lvl, lA + int(scale_gate))
-                for lB in range(lmin, lmax + 1):
-                    idxB = idxB_by_lvl[lB]
-                    if idxB.size == 0:
-                        continue
-                    D = hamming_distance_matrix(descA[idxA], descB[idxB]).astype(np.float64, copy=False)
-                    if D.shape[1] < 2:
-                        continue
-                    # Two smallest per row via partition
-                    two = np.partition(D, kth=1, axis=1)[:, :2]
-                    # Sort the two values to ensure [0] is best, [1] is second
-                    two.sort(axis=1)
-                    # Update second best (global) conservatively
-                    # Note: this is approximate if best and second-best come from different blocks; good enough for demo
-                    second_d[idxA] = np.minimum(second_d[idxA], two[:, 1])
-
-            # Apply ratio test on current candidates
-            d2 = second_d[ia]
-            d2 = np.maximum(d2, 1.0)
-            keep_ratio = (d1 / d2) < float(ratio)
-            ia = ia[keep_ratio]
-            ib = ib[keep_ratio]
-            d1 = d1[keep_ratio]
-
-        # Mutual cross-check (keep only best A for each B among kept pairs)
-        if bool(args.brief_mutual) and ia.size > 0:
-
-            # Sort by (ib asc, distance asc)
-            order = np.lexsort((d1, ib))
-            ia_s = ia[order]
-            ib_s = ib[order]
-            d_s = d1[order]
-
-            # Keep first occurrence per ib (smallest distance)
-            keep_m = np.ones((ib_s.size,), dtype=bool)
-            keep_m[1:] = ib_s[1:] != ib_s[:-1]
-
-            # Apply
-            ia = ia_s[keep_m]
-            ib = ib_s[keep_m]
-            d1 = d_s[keep_m]
-
-        # Convert to score where higher is better
-        score = (-d1).astype(np.float64, copy=False)
-
-        # Sort by score descending (i.e., smallest distance first)
-        order = np.argsort(score)[::-1]
-        ia = ia[order]
-        ib = ib[order]
-        score = score[order]
-
-        # Truncate to max_matches
-        if args.max_matches is not None:
-            ia = ia[: int(args.max_matches)]
-            ib = ib[: int(args.max_matches)]
-            score = score[: int(args.max_matches)]
+        # Run robust scale-gated BRIEF matching
+        matches = match_brief_hamming_with_scale_gate(
+            descA,
+            lvlA,
+            descB,
+            lvlB,
+            mode=str(args.brief_mode).lower(),
+            max_dist=None if args.brief_max_dist is None else int(args.brief_max_dist),
+            ratio=float(args.brief_ratio),
+            mutual=bool(args.brief_mutual),
+            max_matches=None if args.max_matches is None else int(args.max_matches),
+            scale_gate=int(scale_gate),
+        )
+        ia = matches.ia
+        ib = matches.ib
+        score = matches.score
 
         # Report
         print(f"matches: {ia.shape[0]}")

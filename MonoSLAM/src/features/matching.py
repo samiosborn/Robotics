@@ -594,3 +594,164 @@ def match_descriptors_hamming_ratio(
         score = score[:max_matches]
 
     return MatchResult(ia=ia, ib=ib, score=score)
+
+
+# Match packed BRIEF descriptors with optional level-consistency gating.
+# This is useful for multi-scale pipelines where cross-level matches should be constrained.
+def match_brief_hamming_with_scale_gate(
+    descA: np.ndarray,
+    levelsA: np.ndarray,
+    descB: np.ndarray,
+    levelsB: np.ndarray,
+    *,
+    mode: str = "nn",
+    max_dist: int | None = 80,
+    ratio: float = 0.8,
+    mutual: bool = True,
+    max_matches: int | None = None,
+    scale_gate: int = 1,
+) -> MatchResult:
+
+    # --- Checks ---
+    # Require arrays
+    descA = np.asarray(descA)
+    descB = np.asarray(descB)
+    levelsA = np.asarray(levelsA)
+    levelsB = np.asarray(levelsB)
+
+    # Validate packed descriptor format
+    if descA.ndim != 2 or descB.ndim != 2:
+        raise ValueError(f"descA and descB must be 2D; got {descA.shape} and {descB.shape}")
+    if descA.dtype != np.uint8 or descB.dtype != np.uint8:
+        raise ValueError("descA and descB must be uint8 packed descriptors")
+    if descA.shape[1] != descB.shape[1]:
+        raise ValueError(f"descriptor byte dims must match; got {descA.shape[1]} and {descB.shape[1]}")
+
+    # Validate level vectors
+    if levelsA.ndim != 1 or levelsA.shape[0] != descA.shape[0]:
+        raise ValueError(f"levelsA must be shape (Na,); got {levelsA.shape}")
+    if levelsB.ndim != 1 or levelsB.shape[0] != descB.shape[0]:
+        raise ValueError(f"levelsB must be shape (Nb,); got {levelsB.shape}")
+
+    # Validate mode
+    mode = str(mode).lower().strip()
+    if mode not in {"nn", "ratio"}:
+        raise ValueError(f"mode must be 'nn' or 'ratio'; got {mode}")
+
+    # Validate ratio
+    ratio = check_finite_scalar(ratio, "ratio")
+    if ratio <= 0.0 or ratio >= 1.0:
+        raise ValueError(f"ratio must be in (0,1); got {ratio}")
+
+    # Validate mutual flag
+    mutual = bool(mutual)
+
+    # Validate scale gate
+    if not isinstance(scale_gate, (int, np.integer)):
+        raise ValueError(f"scale_gate must be int >= 0; got {type(scale_gate)}")
+    scale_gate = int(scale_gate)
+    if scale_gate < 0:
+        raise ValueError(f"scale_gate must be >= 0; got {scale_gate}")
+
+    # Validate max_dist if provided
+    if max_dist is not None:
+        if not isinstance(max_dist, (int, np.integer)):
+            raise ValueError(f"max_dist must be int or None; got {type(max_dist)}")
+        max_dist = int(max_dist)
+        if max_dist < 0:
+            raise ValueError(f"max_dist must be >= 0; got {max_dist}")
+
+    # Validate max_matches if provided
+    if max_matches is not None:
+        max_matches = check_int_gt0(max_matches, "max_matches")
+
+    # Compute Hamming distance matrix
+    D = hamming_distance_matrix(descA, descB).astype(np.float64, copy=False)
+    Na, Nb = D.shape
+
+    # Early exit
+    if Na == 0 or Nb == 0:
+        return MatchResult(
+            ia=np.zeros((0,), dtype=np.int64),
+            ib=np.zeros((0,), dtype=np.int64),
+            score=np.zeros((0,), dtype=np.float64),
+        )
+
+    # Enforce level consistency by masking disallowed pairs to +inf
+    M = (np.abs(levelsA[:, None].astype(np.int64) - levelsB[None, :].astype(np.int64)) <= int(scale_gate))
+    Dg = np.where(M, D, np.inf)
+
+    # Best and second-best distances per A
+    best_j = np.full((Na,), -1, dtype=np.int64)
+    best_d = np.full((Na,), np.inf, dtype=np.float64)
+    second_d = np.full((Na,), np.inf, dtype=np.float64)
+
+    # Rows with at least one valid candidate after gating
+    valid_row = np.isfinite(Dg).any(axis=1)
+    if np.any(valid_row):
+        Dv = Dg[valid_row]
+        j = np.argmin(Dv, axis=1)
+        d = Dv[np.arange(Dv.shape[0]), j]
+        best_j[valid_row] = j.astype(np.int64, copy=False)
+        best_d[valid_row] = d.astype(np.float64, copy=False)
+
+        # Second-best is required for ratio mode
+        if mode == "ratio":
+            if Nb >= 2:
+                two = np.partition(Dv, kth=1, axis=1)[:, :2]
+                two.sort(axis=1)
+                second_d[valid_row] = two[:, 1]
+
+    # Base keep mask
+    keep = valid_row.copy()
+
+    # Optional absolute distance gate
+    if max_dist is not None:
+        keep = keep & (best_d <= float(max_dist))
+
+    # Optional ratio test
+    if mode == "ratio":
+        denom = np.maximum(second_d, 1e-12)
+        keep = keep & np.isfinite(second_d) & ((best_d / denom) < float(ratio))
+
+    # Candidate matches
+    ia = np.nonzero(keep)[0].astype(np.int64, copy=False)
+    ib = best_j[keep].astype(np.int64, copy=False)
+    d1 = best_d[keep].astype(np.float64, copy=False)
+
+    # Mutual cross-check under the same gated distance matrix
+    if mutual and ia.size > 0:
+        valid_col = np.isfinite(Dg).any(axis=0)
+        best_i_for_b = np.full((Nb,), -1, dtype=np.int64)
+        if np.any(valid_col):
+            Dc = Dg[:, valid_col]
+            best_i_for_b[valid_col] = np.argmin(Dc, axis=0).astype(np.int64, copy=False)
+        ok = (ia == best_i_for_b[ib])
+        ia = ia[ok]
+        ib = ib[ok]
+        d1 = d1[ok]
+
+    # Empty after filtering
+    if ia.size == 0:
+        return MatchResult(
+            ia=np.zeros((0,), dtype=np.int64),
+            ib=np.zeros((0,), dtype=np.int64),
+            score=np.zeros((0,), dtype=np.float64),
+        )
+
+    # Score where higher is better
+    score = (-d1).astype(np.float64, copy=False)
+
+    # Sort by score descending (smallest distance first)
+    order = np.argsort(score)[::-1]
+    ia = ia[order]
+    ib = ib[order]
+    score = score[order]
+
+    # Truncate if requested
+    if max_matches is not None:
+        ia = ia[:max_matches]
+        ib = ib[:max_matches]
+        score = score[:max_matches]
+
+    return MatchResult(ia=ia, ib=ib, score=score)
