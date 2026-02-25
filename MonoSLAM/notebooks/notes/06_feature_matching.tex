@@ -1,0 +1,354 @@
+% notebooks/notes/06_feature_matching.tex
+\documentclass[11pt]{article}
+
+\input{preamble.tex}
+
+\title{Feature Matching for SLAM}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+% ====
+\section{Notation, Conventions, and the Matching Problem}
+% ====
+
+\subsection{Keypoints, patches, and descriptors}
+
+\begin{definition}[Keypoints]
+Let $\img:\Omega\subset\Z^2\to\R$ be a grayscale image. A set of detected keypoints is a finite collection
+\[
+\mathcal{K} \coloneqq \{x_i\}_{i=1}^N,\qquad x_i\in\Omega.
+\]
+In implementations, we store keypoints as an array of shape $(N,2)$ with $(u,v)$ or $(x,y)$ coordinates.
+\end{definition}
+
+\begin{definition}[Patch / window around a keypoint]
+Let $\mathcal{W}\subset\Z^2$ be a finite symmetric set (e.g.\ $\{-r,\dots,r\}^2$). The patch centred at $x$ is
+\[
+P_{\img}(x) \;\coloneqq\; \{\img(x+r): r\in\mathcal{W}\}.
+\]
+For square patches of odd size $P=2r+1$, we often identify $P_{\img}(x)$ with a matrix in $\R^{P\times P}$.
+\end{definition}
+
+\begin{definition}[Descriptor]
+A descriptor is a map that assigns to each keypoint $x$ a vector (or bitstring) summarising local appearance:
+\[
+d(x)\in\R^D \quad \text{(float descriptor)} \qquad\text{or}\qquad d(x)\in\{0,1\}^B \quad \text{(binary descriptor)}.
+\]
+The descriptor may be computed from a patch, gradients, or other local statistics.
+\end{definition}
+
+\begin{remark}
+In our codebase we used two families:
+(i) \emph{patch similarity} via NCC on raw patches, and
+(ii) \emph{descriptor similarity} via L2 distance for float descriptors and Hamming distance for binary BRIEF-like descriptors.
+\end{remark}
+
+\subsection{Matches as index pairs}
+
+\begin{definition}[Match set]
+Let $\mathcal{K}_0=\{x_i\}_{i=1}^{N_0}$ be keypoints in image $\img_0$ and $\mathcal{K}_1=\{y_j\}_{j=1}^{N_1}$ in image $\img_1$.
+A set of matches is a set of index pairs
+\[
+\mathcal{M}\subset \{1,\dots,N_0\}\times\{1,\dots,N_1\}.
+\]
+A match $(i,j)\in\mathcal{M}$ asserts that $x_i$ and $y_j$ correspond to (approximately) the same physical scene point.
+\end{definition}
+
+\begin{definition}[Score convention]
+A match may carry a score $s_{ij}$ where ``better'' depends on the similarity measure:
+\[
+\text{NCC: higher is better (closer to }1\text{)},\qquad
+\text{Distances (L2/Hamming): lower is better.}
+\]
+In code it is convenient to convert distances to a ``higher is better'' score via $s=-d$.
+\end{definition}
+
+\begin{remark}
+This score convention matters for sorting and for top-$K$ filtering prior to RANSAC.
+\end{remark}
+
+% ====
+\section{Patch Similarity via Normalised Cross-Correlation (NCC)}
+% ====
+
+\subsection{Vectorised patches}
+
+\begin{definition}[Vectorised patch]
+Given a patch $P\in\R^{P\times P}$, define its vectorisation $p\in\R^{D}$ with $D=P^2$ by stacking entries.
+\end{definition}
+
+\subsection{Normalisation: z-score and L2}
+
+\begin{definition}[Per-patch z-score]
+For a vectorised patch $p\in\R^D$, define
+\[
+\tilde p \;\coloneqq\; \frac{p-\mu(p)\mathbf{1}}{\sigma(p)+\varepsilon},
+\]
+where $\mu(p)=\frac{1}{D}\sum_{k=1}^D p_k$ and $\sigma(p)$ is the standard deviation.
+\end{definition}
+
+\begin{definition}[Row-wise L2 normalisation]
+For $z\in\R^D$, define
+\[
+\hat z \;\coloneqq\; \frac{z}{\|z\|_2+\varepsilon}.
+\]
+\end{definition}
+
+\begin{remark}
+In our NCC implementation, we typically use both: first z-score to remove brightness/contrast offsets within the patch, then L2-normalise so a dot product becomes a cosine similarity.
+\end{remark}
+
+\subsection{NCC as cosine similarity}
+
+\begin{proposition}[NCC as dot product of normalised patches]\label{prop:ncc-dot}
+Let $p,q\in\R^D$ be two vectorised patches. If $\hat p,\hat q$ are z-scored and L2-normalised versions, then
+\[
+\mathrm{NCC}(p,q) \;\approx\; \hat p^\T \hat q \in [-1,1].
+\]
+\end{proposition}
+
+\begin{proof}
+Z-scoring enforces approximate zero mean and unit variance, while L2-normalisation enforces unit norm. The dot product of unit vectors is the cosine of the angle between them, bounded in $[-1,1]$. For standard NCC definitions, this matches the normalised correlation coefficient up to finite-sample conventions and the stabilising $\varepsilon$.
+\end{proof}
+
+\begin{remark}
+NCC is simple and often works surprisingly well for small viewpoint changes, but it is not scale-invariant and struggles under significant rotation unless the patch is canonicalised (e.g.\ by orientation) or matched in a pyramid.
+\end{remark}
+
+% ====
+\section{Descriptor Similarity: L2 and Hamming}
+% ====
+
+\subsection{Float descriptors and L2 distance}
+
+\begin{definition}[L2 distance]
+For float descriptors $a,b\in\R^D$, define
+\[
+d_{L2}(a,b) \;\coloneqq\; \|a-b\|_2.
+\]
+\end{definition}
+
+\begin{remark}
+SIFT-style pipelines often use L2 distance on gradient-histogram descriptors. In our minimal codebase, we primarily used NCC on raw patches, but the L2 machinery is the same pattern: compute a distance matrix, take nearest neighbours, then apply a filtering policy.
+\end{remark}
+
+\subsection{Binary descriptors and Hamming distance}
+
+\begin{definition}[Binary descriptor]
+A binary descriptor is a bitstring $b\in\{0,1\}^B$.
+In code, we often pack bits into bytes (uint8) for fast XOR operations.
+\end{definition}
+
+\begin{definition}[Hamming distance]
+For two binary descriptors $b,c\in\{0,1\}^B$, the Hamming distance is
+\[
+d_H(b,c)\;\coloneqq\; \sum_{k=1}^B \mathbf{1}\{b_k \neq c_k\}.
+\]
+Equivalently, $d_H$ is the popcount of $(b \oplus c)$.
+\end{definition}
+
+\begin{remark}
+Hamming distance is cheap to compute and robust to mild noise. It is widely used in ORB/BRIEF-style pipelines.
+\end{remark}
+
+% ====
+\section{Matching Policies: NN, Mutual Check, Ratio Test, and Top-$K$}
+% ====
+
+\subsection{Nearest neighbour matching}
+
+\begin{definition}[Nearest neighbour (NN) matching]
+Given descriptors $\{d_i\}_{i=1}^{N_0}$ in $\img_0$ and $\{e_j\}_{j=1}^{N_1}$ in $\img_1$, define for each $i$
+\[
+j^\star(i) \in \arg\min_{j} \; d(d_i,e_j),
+\]
+where $d(\cdot,\cdot)$ is a distance (L2 or Hamming). NN matching returns candidate pairs $(i,j^\star(i))$.
+\end{definition}
+
+\begin{remark}
+For NCC, we instead \emph{maximise} similarity. The pattern is the same: choose best partner per descriptor/patch under the chosen score.
+\end{remark}
+
+\subsection{Mutual cross-check}
+
+\begin{definition}[Mutual (symmetric) matching]
+A match $(i,j)$ is \emph{mutual} if $j=j^\star(i)$ and also $i=i^\star(j)$, where
+\[
+i^\star(j)\in \arg\min_i d(d_i,e_j).
+\]
+\end{definition}
+
+\begin{remark}
+Mutual matching reduces false matches but can remove many true matches when the descriptor space is ambiguous or when one side contains repeated texture.
+\end{remark}
+
+\subsection{Ratio test}
+
+\begin{definition}[Lowe-style ratio test]
+Let $j_1(i)$ and $j_2(i)$ be the nearest and second-nearest neighbours of $d_i$ by distance.
+The ratio test accepts $i$ if
+\[
+\frac{d(d_i, e_{j_1(i)})}{d(d_i, e_{j_2(i)})} < \rho,
+\]
+for a threshold $\rho\in(0,1)$.
+\end{definition}
+
+\begin{remark}
+For Hamming distances (binary descriptors), the ratio test is often \emph{too strict} early on unless the scene has very distinctive texture. NN + max-distance threshold tends to be the more forgiving baseline.
+\end{remark}
+
+\subsection{Top-$K$ filtering}
+
+\begin{definition}[Top-$K$ pre-filtering]
+Given a set of candidate matches with scores $\{s_m\}_{m=1}^M$ (higher is better), \emph{top-$K$} filtering keeps only the $K$ highest-scoring matches prior to geometry verification (e.g.\ RANSAC).
+\end{definition}
+
+\begin{remark}
+Top-$K$ is useful when you have many weak matches: it biases RANSAC toward sampling higher-quality correspondences.
+\end{remark}
+
+% ====
+\section{Geometric Verification with a Homography and RANSAC}
+% ====
+
+\subsection{When a homography is the right model}
+
+\begin{remark}[Planar scenes and ``box on a plane'']
+A homography is appropriate when the matched points lie on a plane in 3D or when the camera rotates about its optical centre with negligible translation. For a printed box face or planar object, homography verification is a good sanity check.
+\end{remark}
+
+\subsection{Homography mapping and transfer error}
+
+\begin{definition}[Homography mapping]
+A homography is a projective transform $H\in\R^{3\times 3}$ acting on homogeneous image points:
+\[
+\tilde y \;\sim\; H \tilde x,
+\]
+where $\tilde x=(u,v,1)^\T$ and $\sim$ denotes equality up to nonzero scale.
+\end{definition}
+
+\begin{definition}[Forward transfer error]
+Given corresponding inhomogeneous points $x_i,y_i\in\R^2$, define
+\[
+e_i(H) \;\coloneqq\; \| y_i - \pi(H\tilde x_i)\|_2,
+\]
+where $\pi(\cdot)$ dehomogenises homogeneous coordinates.
+\end{definition}
+
+\begin{definition}[Symmetric transfer error]
+Define the symmetric transfer error by
+\[
+e_i^{\mathrm{sym}}(H) \;\coloneqq\; \| y_i - \pi(H\tilde x_i)\|_2^2 \;+\; \| x_i - \pi(H^{-1}\tilde y_i)\|_2^2.
+\]
+\end{definition}
+
+\begin{remark}
+Symmetric transfer error penalises mismatch in both directions and is commonly used for robust homography scoring.
+\end{remark}
+
+\subsection{RANSAC}
+
+\begin{definition}[RANSAC for homography]
+Given candidate correspondences $\{(x_i,y_i)\}_{i=1}^M$:
+\begin{enumerate}
+\item Repeat for $T$ trials: sample 4 correspondences uniformly without replacement.
+\item Fit a homography $H$ to the sample (e.g.\ DLT + normalisation).
+\item Score $H$ by counting inliers under a threshold $\tau$ using $e_i^{\mathrm{sym}}(H)$.
+\item Keep the $H$ with the largest inlier count (break ties by lower mean inlier error).
+\end{enumerate}
+Return the best $H$ and inlier mask.
+\end{definition}
+
+\begin{remark}
+RANSAC is the key ``outlier rejection'' step: it lets you tolerate many incorrect matches, as long as a consistent subset exists.
+\end{remark}
+
+% ====
+\section{Visual Sanity Checks}
+% ====
+
+\subsection{Match visualisation}
+
+\begin{remark}
+A match plot (two images side-by-side with connecting lines) is the fastest sanity check. If the majority of lines criss-cross wildly, your matching policy is too permissive or your descriptor is not robust for the transform at hand.
+\end{remark}
+
+\subsection{Projecting source corners into the scene}
+
+\begin{definition}[Projected box corners]
+Let $\img_0$ be the template image (e.g.\ \texttt{box.png}). Its four corners define points $x_1,\dots,x_4\in\R^2$.
+Using an estimated homography $H$, the projected corners in $\img_1$ are
+\[
+y_k \;\coloneqq\; \pi(H\tilde x_k),\qquad k=1,\dots,4.
+\]
+Drawing the polygon through $\{y_k\}$ on $\img_1$ provides a geometric sanity check.
+\end{definition}
+
+\begin{remark}
+If the polygon is wildly distorted or misplaced, your estimated $H$ is likely being fit to the wrong inlier set (or the model is inappropriate).
+\end{remark}
+
+% ====
+\section{Rotation and Scale Robustness}
+% ====
+
+\subsection{Keypoint orientation}
+
+\begin{definition}[Keypoint orientation (local gradient angle)]
+Given a keypoint $x$, define a local orientation $\theta(x)$ from a neighbourhood around $x$ (e.g.\ a weighted sum of gradients):
+\[
+\theta(x) \;\coloneqq\; \mathrm{atan2}\!\Big(\sum_{r\in\mathcal{W}} w(r)\,\partial_v \img(x+r),\;
+\sum_{r\in\mathcal{W}} w(r)\,\partial_u \img(x+r)\Big).
+\]
+\end{definition}
+
+\begin{remark}
+Orientation is used to ``rotate'' the descriptor sampling pattern so that the descriptor becomes approximately rotation-invariant.
+\end{remark}
+
+\subsection{Gaussian pyramids and scale}
+
+\begin{definition}[Gaussian pyramid (recall)]
+Define $\img^{(0)}=\img$ and
+\[
+\img^{(\ell+1)} \coloneqq \big(G_\sigma * \img^{(\ell)}\big)^{\downarrow 2}.
+\]
+Each level $\ell$ corresponds to a larger effective spatial scale in the original image.
+\end{definition}
+
+\begin{remark}
+If an object appears smaller in the scene image than in the template image, matching descriptors across pyramid levels can recover correspondences that a single-scale descriptor misses.
+\end{remark}
+
+\subsection{Multiscale BRIEF and scale gating}
+
+\begin{definition}[Multiscale BRIEF (concept)]
+Compute BRIEF descriptors for keypoints at multiple pyramid levels. A match may be constrained to plausible relative scale levels (a \emph{scale gate}) to reduce spurious matches across very different scales.
+\end{definition}
+
+\begin{remark}
+This is the core idea behind scale robustness: instead of trying to make a single descriptor perfectly scale-invariant, you search across a discrete set of scales.
+\end{remark}
+
+% ====
+\section{Practical Tuning and Debugging}
+% ====
+
+\subsection{Parameter tradeoffs}
+
+\begin{remark}
+Typical tradeoffs observed in practice:
+\begin{itemize}
+\item Larger patch size increases distinctiveness but may reduce repeatability under viewpoint changes.
+\item More BRIEF bits increases distinctiveness but may require relaxing the Hamming threshold to avoid zero matches.
+\item Mutual cross-check reduces false matches but often reduces inliers too much early on.
+\item RANSAC threshold $\tau$ should reflect expected pixel localisation noise and model mismatch.
+\end{itemize}
+\end{remark}
+
+
+\end{document}
