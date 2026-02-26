@@ -6,7 +6,6 @@ import sys
 
 import numpy as np
 from PIL import Image
-from PIL import ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -19,130 +18,22 @@ from features.harris import harris_keypoints
 from features.patches import extract_patches
 
 from features.matching import match_patches_ncc
-from features.matching import hamming_distance_matrix
 from features.matching import match_brief_hamming_with_scale_gate
 from features.descriptors import brief_make_pairs
 from features.descriptors import brief_from_patches
 from features.descriptors import brief_orientations_from_patches
 from features.orientation import keypoint_orientations
+from features.debug import print_brief_bitorder_checks
+from features.debug import print_brief_hamming_diagnostics
+from features.debug import print_brief_ransac_survivorship
+from features.debug import print_brief_runtime_params
+from features.debug import print_brief_unique_stats
+from features.viz import draw_matches
+from features.viz import draw_projected_box
 
 from geometry.checks import as_2xN_points
-from geometry.homography import apply_homography
 from geometry.homography import estimate_homography
 from geometry.homography import estimate_homography_ransac
-
-
-# Print descriptor quality diagnostics for packed BRIEF descriptors.
-def _print_brief_descriptor_stats(desc: np.ndarray, *, name: str, n_bits: int) -> None:
-
-    # Guard empty descriptors
-    if desc.size == 0:
-        print(f"brief_diag[{name}]: empty descriptors")
-        return
-
-    # Descriptor uniqueness / duplication
-    uniq, counts = np.unique(desc, axis=0, return_counts=True)
-    n_desc = int(desc.shape[0])
-    n_unique = int(uniq.shape[0])
-    n_dup = int(n_desc - n_unique)
-    max_mult = int(counts.max()) if counts.size > 0 else 0
-
-    # Bit statistics
-    bits = np.unpackbits(desc, axis=1, bitorder="little")
-    bits = bits[:, : int(n_bits)]
-    p_global = float(bits.mean())
-    p_bit = bits.mean(axis=0)
-    dead_bits = int(np.sum((p_bit < 0.01) | (p_bit > 0.99)))
-
-    # Entropy at global one-rate (max is 1.0 at p=0.5)
-    p = min(max(p_global, 1e-12), 1.0 - 1e-12)
-    ent = float(-(p * np.log2(p) + (1.0 - p) * np.log2(1.0 - p)))
-
-    print(
-        f"brief_diag[{name}]: n={n_desc} unique={n_unique} dup={n_dup} "
-        f"dup_ratio={n_dup / max(1, n_desc):.3f} max_mult={max_mult}"
-    )
-    print(
-        f"brief_diag[{name}]: bit_one_rate={p_global:.4f} "
-        f"bit_entropy={ent:.4f} dead_bits={dead_bits}/{int(n_bits)}"
-    )
-
-
-# Print NN / NN2 Hamming diagnostics under level-gated matching.
-def _print_brief_hamming_diagnostics(
-    descA: np.ndarray,
-    levelsA: np.ndarray,
-    descB: np.ndarray,
-    levelsB: np.ndarray,
-    *,
-    scale_gate: int,
-    n_bits: int,
-) -> None:
-
-    # Guard empties
-    if descA.shape[0] == 0 or descB.shape[0] == 0:
-        print("brief_diag[hamming]: empty descriptors")
-        return
-
-    # Full Hamming matrix
-    D = hamming_distance_matrix(descA, descB).astype(np.float64, copy=False)
-
-    # Gate by level consistency
-    M = (np.abs(levelsA[:, None].astype(np.int64) - levelsB[None, :].astype(np.int64)) <= int(scale_gate))
-    Dg = np.where(M, D, np.inf)
-
-    # Rows with at least one / two valid candidates
-    row_valid_1 = np.isfinite(Dg).any(axis=1)
-    row_valid_2 = (np.isfinite(Dg).sum(axis=1) >= 2)
-
-    if not np.any(row_valid_1):
-        print("brief_diag[hamming]: no valid candidates after scale gating")
-        return
-
-    # Best NN distance per A
-    Dv1 = Dg[row_valid_1]
-    j1 = np.argmin(Dv1, axis=1)
-    d1 = Dv1[np.arange(Dv1.shape[0]), j1]
-
-    # Second-best distance for rows that have at least two candidates
-    d2 = np.full((d1.shape[0],), np.inf, dtype=np.float64)
-    if np.any(row_valid_2):
-        Dv2 = Dg[row_valid_2]
-        two = np.partition(Dv2, kth=1, axis=1)[:, :2]
-        two.sort(axis=1)
-        d2_vals = two[:, 1]
-        d2[row_valid_2[row_valid_1]] = d2_vals
-
-    # Ratio stats only where d2 is finite
-    ratio_ok = np.isfinite(d2)
-    ratio = d1[ratio_ok] / np.maximum(d2[ratio_ok], 1.0)
-
-    # Distance quantiles
-    q_d1 = np.quantile(d1, [0.1, 0.5, 0.9])
-    print(
-        f"brief_diag[hamming]: nn_d q10={q_d1[0]:.1f} q50={q_d1[1]:.1f} q90={q_d1[2]:.1f} "
-        f"(valid_rows={int(row_valid_1.sum())}/{int(descA.shape[0])})"
-    )
-
-    if ratio.size > 0:
-        q_r = np.quantile(ratio, [0.1, 0.5, 0.9])
-        print(
-            f"brief_diag[hamming]: nn/nn2 q10={q_r[0]:.3f} q50={q_r[1]:.3f} q90={q_r[2]:.3f} "
-            f"(rows_with_nn2={int(ratio.size)})"
-        )
-    else:
-        print("brief_diag[hamming]: nn/nn2 unavailable (insufficient gated candidates)")
-
-    # Compact histogram of NN distances
-    step = 8
-    bins = np.arange(0, int(n_bits) + step, step, dtype=np.int64)
-    hist, edges = np.histogram(d1, bins=bins)
-    parts = []
-    for i in range(hist.shape[0]):
-        if hist[i] > 0:
-            parts.append(f"[{int(edges[i])},{int(edges[i + 1])}):{int(hist[i])}")
-    if len(parts) > 0:
-        print("brief_diag[hamming]: nn_hist " + " ".join(parts))
 
 
 # Only run when executed as a script
@@ -192,10 +83,12 @@ if __name__ == "__main__":
     parser.set_defaults(brief_mutual=True)
 
     # Multiscale BRIEF via pyramid
-    parser.add_argument("--brief_multiscale", action="store_true")
+    parser.add_argument("--brief_multiscale", dest="brief_multiscale", action="store_true")
+    parser.add_argument("--no_brief_multiscale", dest="brief_multiscale", action="store_false")
+    parser.set_defaults(brief_multiscale=True)
     parser.add_argument("--pyr_levels", type=int, default=4)
     parser.add_argument("--pyr_scale", type=float, default=1.25)
-    parser.add_argument("--scale_gate", type=int, default=1)
+    parser.add_argument("--scale_gate", type=int, default=3)
 
     # Max matches to keep (pre-RANSAC)
     parser.add_argument("--max_matches", type=int, default=300)
@@ -209,6 +102,7 @@ if __name__ == "__main__":
 
     # Drawing options
     parser.add_argument("--max_draw", type=int, default=200)
+    parser.add_argument("--max_draw_inliers", type=int, default=200)
 
     # BRIEF diagnostics
     parser.add_argument("--debug_brief", action="store_true")
@@ -233,7 +127,9 @@ if __name__ == "__main__":
     out_dir = Path(args.out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     out_matches = out_dir / f"{str(args.name)}.png"
+    out_matches_inliers = out_dir / f"{str(args.name)}_inliers.png"
     out_scene = out_dir / f"{str(args.name)}_scene.png"
+    out_scene_inliers = out_dir / f"{str(args.name)}_scene_inliers.png"
 
     # Load images (force RGB to avoid palette / weird modes)
     img0 = Image.open(str(p0)).convert("RGB")
@@ -275,6 +171,30 @@ if __name__ == "__main__":
     scale_gate = int(args.scale_gate)
     if scale_gate < 0:
         raise ValueError(f"scale_gate must be >= 0; got {scale_gate}")
+
+    # Keep BRIEF descriptor packing consistent between both images.
+    brief_bitorder = "little"
+
+    # Optional BRIEF parameter echo for reproducibility.
+    if bool(args.debug_brief) and str(args.match).lower() == "brief":
+        print_brief_runtime_params(
+            brief_bits=int(args.brief_bits),
+            patch=int(args.patch),
+            brief_orient=bool(args.brief_orient),
+            multiscale=bool(args.brief_multiscale),
+            pyr_levels=int(args.pyr_levels),
+            pyr_scale=float(args.pyr_scale),
+            scale_gate=int(args.scale_gate),
+            brief_mode=str(args.brief_mode).lower().strip(),
+            max_dist=None if args.brief_max_dist is None else int(args.brief_max_dist),
+            mutual=bool(args.brief_mutual),
+            ransac=bool(args.ransac),
+            ransac_trials=int(args.ransac_trials),
+            ransac_thresh=float(args.ransac_thresh),
+            ransac_seed=int(args.ransac_seed),
+            ransac_topk=int(args.ransac_topk),
+        )
+        print_brief_bitorder_checks(bitorder_a=brief_bitorder, bitorder_b=brief_bitorder)
 
     # Create per-level PIL images
     pyr0_imgs = []
@@ -449,8 +369,8 @@ if __name__ == "__main__":
                     raise ValueError(f"Unknown brief_orient_method '{ori_method}'")
 
                 # Rotate BRIEF sampling pairs analytically per keypoint (no patch warping)
-                d0 = brief_from_patches(pr0.patches, pairs, angles=a0, packbits=True, bitorder="little")
-                d1 = brief_from_patches(pr1.patches, pairs, angles=a1, packbits=True, bitorder="little")
+                d0 = brief_from_patches(pr0.patches, pairs, angles=a0, packbits=True, bitorder=brief_bitorder)
+                d1 = brief_from_patches(pr1.patches, pairs, angles=a1, packbits=True, bitorder=brief_bitorder)
 
                 # Optional orientation debug summary per level
                 if bool(args.debug_brief):
@@ -459,8 +379,8 @@ if __name__ == "__main__":
                         f"a0_med={float(np.median(a0)):.3f} a1_med={float(np.median(a1)):.3f}"
                     )
             else:
-                d0 = brief_from_patches(pr0.patches, pairs, packbits=True, bitorder="little")
-                d1 = brief_from_patches(pr1.patches, pairs, packbits=True, bitorder="little")
+                d0 = brief_from_patches(pr0.patches, pairs, packbits=True, bitorder=brief_bitorder)
+                d1 = brief_from_patches(pr1.patches, pairs, packbits=True, bitorder=brief_bitorder)
 
             # Map level keypoints back to base-image coordinates
             sx0, sy0 = pyr_map0[lvl]
@@ -556,13 +476,17 @@ if __name__ == "__main__":
 
         # Optional BRIEF diagnostics before matching
         if bool(args.debug_brief):
-            _print_brief_descriptor_stats(descA, name="A", n_bits=int(args.brief_bits))
-            _print_brief_descriptor_stats(descB, name="B", n_bits=int(args.brief_bits))
-            _print_brief_hamming_diagnostics(
+            print_brief_unique_stats(descA, name="image0")
+            print_brief_unique_stats(descB, name="image1")
+            print_brief_hamming_diagnostics(
                 descA,
                 lvlA,
                 descB,
                 lvlB,
+                mode=str(args.brief_mode).lower().strip(),
+                max_dist=None if args.brief_max_dist is None else int(args.brief_max_dist),
+                ratio=float(args.brief_ratio),
+                mutual=bool(args.brief_mutual),
                 scale_gate=int(scale_gate),
                 n_bits=int(args.brief_bits),
             )
@@ -597,19 +521,20 @@ if __name__ == "__main__":
         ib = ib[:k]
         score = score[:k]
 
-    # Default: keep all matches for drawing
-    ia_keep = ia
-    ib_keep = ib
+    # Keep the final pre-RANSAC match list for drawing.
+    ia_draw = np.asarray(ia, dtype=np.int64)
+    ib_draw = np.asarray(ib, dtype=np.int64)
+    ransac_mask = None
 
     # Best homography (if any)
     H_best = None
 
     # RANSAC homography
-    if bool(args.ransac) and ia_keep.size > 0:
+    if bool(args.ransac) and ia_draw.size > 0:
 
         # Gather matched points (N,2)
-        pts0 = np.asarray(kpsA[ia_keep, :2], dtype=np.float64)
-        pts1 = np.asarray(kpsB[ib_keep, :2], dtype=np.float64)
+        pts0 = np.asarray(kpsA[ia_draw, :2], dtype=np.float64)
+        pts1 = np.asarray(kpsB[ib_draw, :2], dtype=np.float64)
 
         # Convert to geometry convention (2,N)
         x0 = as_2xN_points(pts0, name="x0", finite=True)
@@ -628,20 +553,22 @@ if __name__ == "__main__":
         # Handle failure
         if mask is None or reason is not None:
             print(f"ransac: failed ({reason})")
+            if bool(args.debug_brief) and str(args.match).lower() == "brief":
+                print_brief_ransac_survivorship(mask=None, total=int(ia_draw.size))
         else:
             # Count inliers
             inliers = int(mask.sum())
             total = int(mask.size)
             print(f"ransac: inliers {inliers}/{total} (thresh={float(args.ransac_thresh):.2f}px)")
+            ransac_mask = np.asarray(mask, dtype=bool)
 
-            # Filter to inliers
-            ia_keep = ia_keep[mask]
-            ib_keep = ib_keep[mask]
+            if bool(args.debug_brief) and str(args.match).lower() == "brief":
+                print_brief_ransac_survivorship(mask=ransac_mask, total=int(ia_draw.size))
 
             # Refit H on all inliers
             if inliers >= 4:
                 try:
-                    H = estimate_homography(x0[:, mask], x1[:, mask], normalise=True)
+                    H = estimate_homography(x0[:, ransac_mask], x1[:, ransac_mask], normalise=True)
                 except Exception:
                     pass
 
@@ -654,70 +581,49 @@ if __name__ == "__main__":
                 Hn = H_best / s
                 print("ransac: H (normalised):")
                 print(Hn)
+    elif bool(args.ransac) and bool(args.debug_brief) and str(args.match).lower() == "brief":
+        print_brief_ransac_survivorship(mask=None, total=int(ia_draw.size))
 
     # --------------------
     # Visualisation output
     # --------------------
-
-    # Prepare side-by-side canvas
-    A = img0.convert("RGB")
-    B = img1.convert("RGB")
-    WA, HA = A.size
-    WB, HB = B.size
-    canvas = Image.new("RGB", (WA + WB, max(HA, HB)))
-    canvas.paste(A, (0, 0))
-    canvas.paste(B, (WA, 0))
-    draw = ImageDraw.Draw(canvas)
-
-    # Draw at most max_draw matches
-    M = int(min(int(ia_keep.size), int(args.max_draw)))
-    for m in range(M):
-
-        # Read indices
-        i = int(ia_keep[m])
-        j = int(ib_keep[m])
-
-        # Read points
-        x0p = float(kpsA[i, 0])
-        y0p = float(kpsA[i, 1])
-        x1p = float(kpsB[j, 0]) + float(WA)
-        y1p = float(kpsB[j, 1])
-
-        # Draw circles
-        r = 3
-        draw.ellipse((x0p - r, y0p - r, x0p + r, y0p + r))
-        draw.ellipse((x1p - r, y1p - r, x1p + r, y1p + r))
-
-        # Draw line
-        draw.line((x0p, y0p, x1p, y1p), width=1)
-
-    # Save match visual
-    canvas.save(str(out_matches))
+    # Legacy-friendly default: when RANSAC succeeds, main output shows inliers.
+    main_draw_inliers = bool(args.ransac) and (ransac_mask is not None)
+    draw_matches(
+        img0,
+        img1,
+        kpsA,
+        kpsB,
+        ia_draw,
+        ib_draw,
+        out_matches,
+        max_draw=int(args.max_draw),
+        draw_topk=int(args.max_draw),
+        draw_inliers_only=main_draw_inliers,
+        inlier_mask=ransac_mask if main_draw_inliers else None,
+    )
     print(f"wrote: {out_matches}")
 
-    # If we have a homography, project img0 corners into img1 and draw the quad
-    if H_best is not None:
-
-        # Build source corners in image0 coords (2,4)
-        x = np.array(
-            [
-                [0.0, float(W0 - 1), float(W0 - 1), 0.0],
-                [0.0, 0.0, float(H0 - 1), float(H0 - 1)],
-            ],
-            dtype=float,
+    if bool(args.ransac):
+        draw_matches(
+            img0,
+            img1,
+            kpsA,
+            kpsB,
+            ia_draw,
+            ib_draw,
+            out_matches_inliers,
+            max_draw=int(args.max_draw_inliers),
+            draw_topk=int(args.max_draw_inliers),
+            draw_inliers_only=True,
+            inlier_mask=ransac_mask,
         )
+        print(f"wrote: {out_matches_inliers}")
 
-        # Project corners into scene
-        y = apply_homography(H_best, x)
-
-        # Convert into PIL polygon list
-        quad = [(float(y[0, i]), float(y[1, i])) for i in range(y.shape[1])]
-
-        # Draw onto scene image
-        scene = img1.convert("RGB")
-        dscene = ImageDraw.Draw(scene)
-        dscene.polygon(quad, outline=(255, 0, 0), width=3)
-
-        # Save
-        scene.save(str(out_scene))
+    # If we have a homography, project img0 corners into img1 and draw the quad.
+    if H_best is not None:
+        draw_projected_box(img0, img1, H_best, out_scene, width=3)
         print(f"wrote: {out_scene}")
+        if bool(args.ransac):
+            draw_projected_box(img0, img1, H_best, out_scene_inliers, width=3)
+            print(f"wrote: {out_scene_inliers}")
