@@ -1,4 +1,4 @@
-# geometry/bootstrap.py
+# slam/bootstrap.py
 import numpy as np
 from geometry.checks import check_2xN_pair, check_3x3, check_bool_N
 from geometry.parallax import parallax_angle_stats_deg
