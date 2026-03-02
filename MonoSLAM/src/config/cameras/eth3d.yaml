@@ -1,0 +1,16 @@
+# configs/cameras/eth3d.yaml
+
+camera:
+  model: pinhole
+
+  width: 752
+  height: 480
+
+  K:
+    fx: 676.8
+    fy: 676.8
+    cx: 376.0
+    cy: 240.0
+
+  distortion:
+    model: none

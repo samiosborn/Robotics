@@ -1,0 +1,26 @@
+# configs/profiles/eth3d_c2.yaml
+
+profile:
+  name: eth3d_c2
+
+includes:
+  camera: configs/cameras/eth3d.yaml
+  features: configs/features.yaml
+  bootstrap: configs/bootstrap.yaml
+
+dataset:
+  name: eth3d
+  root: data/eth3d
+  seq: cables_2_mono
+  rgb_subdir: cables_2/rgb
+  exts: [".png", ".jpg", ".jpeg"]
+  sort: lexicographic
+  start: 0
+  step: 1
+  max_frames: 3
+
+run:
+  out_dir: out
+  run_id: eth3d_c2
+  save_frames: [0, 1, 2]
+  deterministic: true
