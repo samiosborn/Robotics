@@ -1,5 +1,6 @@
 # src/geometry/epipolar.py
 import numpy as np
+from core.checks import check_matrix_3x3
 from geometry.checks import check_2xN_pair
 from geometry.homogeneous import homogenise
 
@@ -11,7 +12,7 @@ def algebraic_residuals(x1, x2, F):
     F = np.asarray(F, dtype=float)
     # Shape error
     check_2xN_pair(x1, x2)
-    check_3x3(F)
+    check_matrix_3x3(F, name="F", finite=False)
     # Homogenise
     x1h = homogenise(x1)
     x2h = homogenise(x2)

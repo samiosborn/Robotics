@@ -1,6 +1,7 @@
 # geometry/fundamental.py
 import numpy as np
-from geometry.checks import check_2xN_pair, check_3x3, check_bool_N
+from core.checks import check_mask_bool_N, check_matrix_3x3
+from geometry.checks import check_2xN_pair
 from geometry.normalisation import hartley_norm
 from geometry.essential import essential_from_pose
 from geometry.distances import sampson_distances_sq
@@ -105,9 +106,9 @@ def estimate_fundamental_ransac(x1, x2, num_trials=1000, sample_size = 8, thresh
 def refit_fundamental_on_inliers(x1, x2, F, inlier_mask, min_inliers=8, threshold=3, shrink_guard=0.8, recompute_mask=True):
     # Check dims
     check_2xN_pair(x1, x2)
-    check_3x3(F)
+    check_matrix_3x3(F, name="F", finite=False)
     N = x1.shape[1]
-    mask = check_bool_N(inlier_mask, N)
+    mask = check_mask_bool_N(inlier_mask, N, name="inlier_mask")
     # No mask
     if mask is None:
         return F, None, {"refit": False, "reason": "mask_is_none"}

@@ -1,6 +1,7 @@
 # geometry/homography.py
 import numpy as np
-from geometry.checks import check_2xN, check_2xN_pair, check_3x3
+from core.checks import check_matrix_3x3, check_points_2xN
+from geometry.checks import check_2xN_pair
 from geometry.homogeneous import homogenise, dehomogenise
 from geometry.normalisation import hartley_norm, denormalise_point_mapping, normalise_projective_scale
 from geometry.distances import point_to_point_distances_sq
@@ -8,8 +9,8 @@ from geometry.distances import point_to_point_distances_sq
 # Apply homography
 def apply_homography(H, x): 
     # Checks
-    check_2xN(x)
-    check_3x3(H)
+    check_points_2xN(x, name="x", finite=False)
+    check_matrix_3x3(H, name="H", finite=False)
     # Homogenise
     x_h = homogenise(x)
     # Transform
@@ -82,7 +83,7 @@ def transfer_errors_sq(x1, x2, H):
 def symmetric_transfer_errors_sq(x1, x2, H): 
     # Check dims
     check_2xN_pair(x1, x2)
-    check_3x3(H)
+    check_matrix_3x3(H, name="H", finite=False)
     # Near singular H
     det = np.linalg.det(H)
     if abs(det) < 1e-12:

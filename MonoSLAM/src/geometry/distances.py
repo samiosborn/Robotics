@@ -1,6 +1,7 @@
 # geometry/distances.py
 import numpy as np
-from geometry.checks import check_2xN, check_3xN, check_2xN_pair
+from core.checks import check_points_2xN, check_points_3xN
+from geometry.checks import check_2xN_pair
 from geometry.homogeneous import homogenise
 from geometry.epipolar import algebraic_residuals
 
@@ -10,8 +11,8 @@ def point_to_line_distances(x, l):
     x = np.asarray(x, dtype = float)
     l = np.asarray(l, dtype = float)
     # Check dims
-    check_2xN(x)
-    check_3xN(l)
+    check_points_2xN(x, name="x", finite=False)
+    check_points_3xN(l, name="l", finite=False)
     if l.shape[1] != x.shape[1]:
         raise ValueError(f"x and l must share N; got x {x.shape}, l {l.shape}")
     # Homogenise

@@ -1,8 +1,8 @@
 # geometry/parallax.py
 import numpy as np
-from geometry.checks import check_2xN_pair, check_3x3, check_bool_N
-from geometry.homogeneous import homogenise
+from core.checks import check_mask_bool_N, check_matrix_3x3
 from geometry.checks import check_2xN_pair
+from geometry.homogeneous import homogenise
 
 # Bearing vectors
 def bearing_vectors(x, K, eps=1e-12): 
@@ -21,11 +21,11 @@ def bearing_vectors(x, K, eps=1e-12):
 def parallax_angles_rad(R, K1, K2, x1, x2, mask=None, eps=1e-12):
     # Checks
     check_2xN_pair(x1, x2)
-    check_3x3(R)
-    check_3x3(K1)
-    check_3x3(K2)
+    check_matrix_3x3(R, name="R", finite=False)
+    check_matrix_3x3(K1, name="K1", finite=False)
+    check_matrix_3x3(K2, name="K2", finite=False)
     N = x1.shape[1]
-    mask = check_bool_N(mask, N)
+    mask = check_mask_bool_N(mask, N, name="mask")
     if mask is None:
         mask = np.ones(N, dtype=bool)
     # Bearing vectors

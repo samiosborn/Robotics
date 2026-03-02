@@ -1,6 +1,7 @@
 # slam/bootstrap.py
 import numpy as np
-from geometry.checks import check_2xN_pair, check_3x3, check_bool_N
+from core.checks import check_mask_bool_N, check_matrix_3x3
+from geometry.checks import check_2xN_pair
 from geometry.parallax import parallax_angle_stats_deg
 from geometry.triangulation import triangulate_points, depths_two_view
 from geometry.fundamental import estimate_fundamental_ransac, refit_fundamental_on_inliers
@@ -25,11 +26,11 @@ def planar_check(mask_F, mask_H, gamma=1.2, min_H_inliers=20):
 def parallax_check_deg(R, K1, K2, x1, x2, mask=None, quartile_trim=(0.1, 0.9), min_points=8, min_p50_deg=1.0, min_p25_deg=0.7):
     # Check dims
     check_2xN_pair(x1, x2)
-    check_3x3(K1)
-    check_3x3(K2)
-    check_3x3(R)
+    check_matrix_3x3(K1, name="K1", finite=False)
+    check_matrix_3x3(K2, name="K2", finite=False)
+    check_matrix_3x3(R, name="R", finite=False)
     N = x1.shape[1]
-    mask = check_bool_N(mask, N)
+    mask = check_mask_bool_N(mask, N, name="mask")
     n_mask = int(mask.sum()) if mask is not None else int(N)
     # Default 
     degenerate = False
@@ -64,11 +65,11 @@ def parallax_check_deg(R, K1, K2, x1, x2, mask=None, quartile_trim=(0.1, 0.9), m
 def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0.7, depth_max_ratio=100.0, depth_sanity_min=0.7, eps=1e-9): 
     # Check dims
     check_2xN_pair(x1, x2)
-    check_3x3(K1)
-    check_3x3(K2)
-    check_3x3(R)
+    check_matrix_3x3(K1, name="K1", finite=False)
+    check_matrix_3x3(K2, name="K2", finite=False)
+    check_matrix_3x3(R, name="R", finite=False)
     N_full = int(x1.shape[1])
-    mask_full = check_bool_N(mask, N_full)
+    mask_full = check_mask_bool_N(mask, N_full, name="mask")
     stats = {"N_full": N_full}
     aux = {
         "X_valid": np.zeros((3, 0), dtype=float),
@@ -147,8 +148,8 @@ def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0
 def validate_two_view_bootstrap(K1, K2, x1, x2, cfg): 
     # Check input dims
     check_2xN_pair(x1, x2)
-    check_3x3(K1)
-    check_3x3(K2)
+    check_matrix_3x3(K1, name="K1", finite=False)
+    check_matrix_3x3(K2, name="K2", finite=False)
     
     # Default
     ok = True

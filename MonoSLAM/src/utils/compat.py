@@ -1,15 +1,10 @@
 import numpy as np
 
-import geometry.epipolar as _epipolar
 import geometry.triangulation as _triangulation
-from geometry.checks import check_3x3
 from geometry.homogeneous import homogenise, dehomogenise
 
 
 def install_two_view_compat_shims():
-    # Compatibility shim for current epipolar->distances dependency chain.
-    _epipolar.check_3x3 = check_3x3
-
     # Compatibility shim for triangulation point-shape handling.
     def _triangulate_point_compat(P1, P2, x1, x2):
         x1_h = homogenise(np.asarray(x1, dtype=float).reshape(2, 1)).reshape(3,)
