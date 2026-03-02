@@ -71,7 +71,6 @@ __pypackages__/
 *.onnx
 *.tfrecord
 
-datasets/
 data/
 logs/
 checkpoints/
