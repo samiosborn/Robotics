@@ -1,156 +1,32 @@
 # slam/bootstrap.py
 import numpy as np
-from core.checks import check_mask_bool_N, check_matrix_3x3
-from geometry.checks import check_2xN_pair
-from geometry.parallax import parallax_angle_stats_deg
-from geometry.triangulation import triangulate_points, depths_two_view
+
+from core.checks import check_matrix_3x3
+from core.checks import check_2xN_pair
+from geometry.degeneracy import depth_degeneracy_two_view, parallax_degeneracy_deg, planar_degeneracy_from_masks
 from geometry.fundamental import estimate_fundamental_ransac, refit_fundamental_on_inliers
 from geometry.homography import estimate_homography_ransac
 from geometry.pose import pose_from_fundamental
+from slam.seed import build_two_view_seed
 
-# Planar check
-def planar_check(mask_F, mask_H, gamma=1.2, min_H_inliers=20): 
-    # Early return
-    if mask_H is None or mask_F is None:
-        return False, {"nF": int(np.sum(mask_F)) if mask_F is not None else 0, "nH": 0, "ratio": 0.0}
-    # Size of masks
-    nH = np.sum(mask_H)
-    nF = np.sum(mask_F)
-    # Too many homography RANSAC inliers
-    degenerate = (nH >= gamma * nF) and (nH >= min_H_inliers)
-    # Statistics
-    stats = dict(nF=int(nF), nH=int(nH), ratio=float(nH/max(nF, 1)))
-    return degenerate, stats
 
-# Parallax check (deg)
-def parallax_check_deg(R, K1, K2, x1, x2, mask=None, quartile_trim=(0.1, 0.9), min_points=8, min_p50_deg=1.0, min_p25_deg=0.7):
-    # Check dims
-    check_2xN_pair(x1, x2)
-    check_matrix_3x3(K1, name="K1", finite=False)
-    check_matrix_3x3(K2, name="K2", finite=False)
-    check_matrix_3x3(R, name="R", finite=False)
-    N = x1.shape[1]
-    mask = check_mask_bool_N(mask, N, name="mask")
-    n_mask = int(mask.sum()) if mask is not None else int(N)
-    # Default 
-    degenerate = False
-    stats = {"n_mask": n_mask, "n_trim": 0, "p25": None, "p50": None, "p75": None, "reason": None}
-    # Too small mask
-    if mask is not None and int(mask.sum()) < min_points:
-        degenerate = True
-        stats.update({"reason": "mask_too_small"})
-        return degenerate, stats
-    # Parallax angle stats (degrees)
-    par_stats = parallax_angle_stats_deg(R, K1, K2, x1, x2, mask, quartile_trim, min_points)
-    # Statistics
-    stats.update({"n_trim": par_stats["n_trim"], "p25": par_stats["p25"], "p50": par_stats["p50"], "p75": par_stats["p75"]})
-    # Degen
-    if par_stats["reason"] is not None: 
-        stats.update({"reason": par_stats["reason"]})
-        degenerate = True
-        return degenerate, stats
-    # Parallax
-    if stats["p50"] < min_p50_deg: 
-        degenerate = True
-        stats.update({"reason": "parallax_p50_too_small"})
-        return degenerate, stats
-    elif stats["p25"] < min_p25_deg:
-        degenerate = True
-        stats.update({"reason": "parallax_p25_too_small"})
-        return degenerate, stats
-    else: 
-        return degenerate, stats
+# Planar check compatibility wrapper
+def planar_check(mask_F, mask_H, gamma=1.2, min_H_inliers=20):
+    return planar_degeneracy_from_masks(
+        mask_F=mask_F,
+        mask_H=mask_H,
+        gamma=float(gamma),
+        min_H_inliers=int(min_H_inliers),
+    )
 
-# Depth check 
-def depth_check(R, t, K1, K2, x1, x2, mask=None, min_points=20, cheirality_min=0.7, depth_max_ratio=100.0, depth_sanity_min=0.7, eps=1e-9): 
-    # Check dims
-    check_2xN_pair(x1, x2)
-    check_matrix_3x3(K1, name="K1", finite=False)
-    check_matrix_3x3(K2, name="K2", finite=False)
-    check_matrix_3x3(R, name="R", finite=False)
-    N_full = int(x1.shape[1])
-    mask_full = check_mask_bool_N(mask, N_full, name="mask")
-    stats = {"N_full": N_full}
-    aux = {
-        "X_valid": np.zeros((3, 0), dtype=float),
-        "idx_valid_full": np.array([], dtype=int)}
-    t = np.asarray(t, float).reshape(3)
-    # Default
-    degenerate = False
-    # Apply mask
-    if mask_full is not None: 
-        x1 = x1[:, mask_full]
-        x2 = x2[:, mask_full]
-    # Minimum number of points
-    N_mask = int(x1.shape[1])
-    stats.update({"N_mask": N_mask})
-    if N_mask < min_points: 
-        degenerate = True
-        stats.update({"reason": "too_few_correspondences"})
-        return degenerate, stats, aux
-    # Build P
-    P1 = K1 @ np.hstack((np.eye(3), np.zeros((3,1))))
-    P2 = K2 @ np.hstack((R, t.reshape((3,1))))
-    # Triangulate points
-    X = triangulate_points(P1, P2, x1, x2)
-    # Depths
-    z1, z2 = depths_two_view(R, t, X)
-    # Baseline length
-    B = float(np.linalg.norm(t))
-    stats.update({"B": B})
-    # Baseline too small
-    if B < eps: 
-        degenerate = True
-        stats.update({"reason": "baseline_too_small"})
-        return degenerate, stats, aux
-    # Minimum depth of corresponding points
-    min_depths = np.minimum(z1, z2)
-    # Cheirality ratio
-    cheirality_ratio = float(((z1 > eps) & (z2 > eps)).mean())
-    stats.update({"cheirality_ratio": cheirality_ratio})
-    # Valid points
-    valid = (np.isfinite(min_depths) & 
-            (z1 > eps) & (z2 > eps) & 
-            (min_depths <= depth_max_ratio * B))
-    # Number of valid points
-    n_valid_depth = int(valid.sum())
-    stats.update({"n_valid_depth": n_valid_depth})
-    # Index of valid points
-    idx_mask_full = np.flatnonzero(mask_full) if mask_full is not None else np.arange(N_full)
-    idx_valid_full = idx_mask_full[valid]
-    aux.update({"idx_valid_full": idx_valid_full})
-    # Depth sanity ratio
-    depth_sanity_ratio = float(valid.mean())
-    stats.update({"depth_sanity_ratio": depth_sanity_ratio})
-    # Cheirality ratio too low    
-    if cheirality_ratio < cheirality_min: 
-        degenerate = True
-        stats.update({"reason": "cheirality_ratio_too_low"})
-        return degenerate, stats, aux    
-    # Valid depths
-    if n_valid_depth == 0: 
-        degenerate = True
-        stats.update({"reason": "too_few_positive_and_finite_depths"})
-        return degenerate, stats, aux
-    # Depth sanity ratio too low
-    if depth_sanity_ratio < depth_sanity_min: 
-        degenerate = True
-        stats.update({"reason": "depth_sanity_ratio_too_low"})
-        return degenerate, stats, aux
-    else: 
-        # Include X (valid)
-        X_valid = X[:, valid]
-        aux["X_valid"] = X_valid
-
-        return degenerate, stats, aux
 
 # Validate two-view bootstrap
-def validate_two_view_bootstrap(K1, K2, x1, x2, cfg): 
+def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # Check input dims
     check_2xN_pair(x1, x2)
     check_matrix_3x3(K1, name="K1", finite=False)
     check_matrix_3x3(K2, name="K2", finite=False)
-    
+
     # Default
     ok = True
     N = x1.shape[1]
@@ -159,18 +35,23 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # --- UNPACK ---
     r = cfg["ransac"]
     b = cfg["bootstrap"]
+
     # RANSAC blocks
     rF = r["F"]
     rH = r["H"]
+
     # Degeneracy-check blocks
     plan = b["planar"]
     par = b["parallax"]
     dep = b["depth"]
+
     # Scalars
     seed = int(r["seed"])
     eps = float(b["eps"])
+
     # Policy
     mask_policy = b["mask_policy"]
+
     # Fundamental RANSAC
     F_num_trials = int(rF["num_trials"])
     F_sample_size = int(rF["sample_size"])
@@ -179,21 +60,25 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     F_min_inlier_ratio = float(rF["min_inlier_ratio"])
     F_shrink_guard = float(rF["shrink_guard"])
     F_recompute = bool(rF["recompute_mask"])
+
     # Homography RANSAC
     H_num_trials = int(rH["num_trials"])
     H_thr_px = float(rH["threshold_px"])
     H_min_inliers = int(rH["min_inliers"])
     H_normalise = bool(rH["normalise"])
+
     # Planar check
     gamma = float(plan["gamma"])
     min_H_inliers = int(plan["min_H_inliers"])
     require_H_success = bool(plan["require_H_success"])
     min_F_inliers_for_test = int(plan["min_F_inliers_for_test"])
+
     # Parallax check
     min_parallax_p50_deg = float(par["min_p50_deg"])
     min_parallax_p25_deg = float(par["min_p25_deg"])
     min_parallax_points = int(par["min_points"])
     parallax_quartile_trim = tuple(map(float, par["quartile_trim"]))
+
     # Depth check
     depth_min_points = int(dep["min_points"])
     cheirality_min = float(dep["cheirality_min"])
@@ -203,89 +88,113 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     baseline_override = dep["baseline_override"]
 
     # --- FUNDAMENTAL CONSENSUS ---
-    # Estimate fundamental
-    F_best, F_mask = estimate_fundamental_ransac(x1, x2,
+    F_best, F_mask = estimate_fundamental_ransac(
+        x1,
+        x2,
         num_trials=F_num_trials,
         sample_size=F_sample_size,
         threshold=F_thr_px,
-        seed=seed)
-    # Refit fundamental
-    F_best, F_mask, F_refit_stats = refit_fundamental_on_inliers(x1, x2,
+        seed=seed,
+    )
+
+    F_best, F_mask, F_refit_stats = refit_fundamental_on_inliers(
+        x1,
+        x2,
         F=F_best,
         inlier_mask=F_mask,
         min_inliers=F_min_inliers,
         threshold=F_thr_px,
         shrink_guard=F_shrink_guard,
-        recompute_mask=bool(F_recompute))
+        recompute_mask=F_recompute,
+    )
+
     aux = {"F_best": F_best, "F_mask": F_mask}
+
     # Update stats with F mask
-    stats.update({"n0":F_refit_stats["n0"]})
+    stats.update({"n0": F_refit_stats["n0"]})
+
     # Reject if refit failed
-    if F_refit_stats["refit"] == False: 
+    if F_refit_stats["refit"] is False:
         ok = False
         stats.update({"reason": F_refit_stats["reason"]})
         return ok, stats, aux
+
     # Update stats with refit mask
     stats.update({"n1": F_refit_stats["n1"], "shrink_ratio": F_refit_stats["shrink_ratio"]})
+
     # Too few inliers
-    nF = F_mask.sum() 
-    if nF < min_F_inliers_for_test or (nF / N) < F_min_inlier_ratio: 
+    nF = int(F_mask.sum())
+    if nF < min_F_inliers_for_test or (nF / N) < F_min_inlier_ratio:
         ok = False
         stats.update({"nF": nF, "reason": "fundamental_insufficient_inliers"})
         return ok, stats, aux
 
     # --- HOMOGRAPHY CONSENSUS ---
-    # Estimate homography
-    H_best, H_mask, H_reason = estimate_homography_ransac(x1, x2,
+    H_best, H_mask, H_reason = estimate_homography_ransac(
+        x1,
+        x2,
         num_trials=H_num_trials,
         threshold=H_thr_px,
         normalise=H_normalise,
-        seed=seed)
+        seed=seed,
+    )
+
     # Update aux
     aux.update({"H_best": H_best, "H_mask": H_mask})
+
     # Failure to find H
-    if H_best is None or H_mask is None: 
-        if require_H_success: 
+    if H_best is None or H_mask is None:
+        if require_H_success:
             ok = False
             stats.update({"reason": H_reason})
             return ok, stats, aux
-        else: 
-            # Skip planar check
-            stats.update({"nH": 0, "H_inlier_ratio": 0.0, "H_over_F_ratio": None})
-    else: 
+
+        # Skip planar check
+        stats.update({"nH": 0, "H_inlier_ratio": 0.0, "H_over_F_ratio": None})
+    else:
         # H inliers too small
-        nH = H_mask.sum()
-        stats.update({"nH": int(nH), "H_inlier_ratio": float(nH / max(N, 1))})
-        if nH < H_min_inliers: 
+        nH = int(H_mask.sum())
+        stats.update({"nH": nH, "H_inlier_ratio": float(nH / max(N, 1))})
+        if nH < H_min_inliers:
             ok = False
             stats.update({"reason": "insufficient_homography_inliers"})
             return ok, stats, aux
-        # Planar degenerate check
-        planar_degenerate, planar_stats =  planar_check(
+
+        # Planar degeneracy check
+        planar_degenerate, planar_stats = planar_degeneracy_from_masks(
             mask_F=F_mask,
-            mask_H=H_mask, 
-            gamma=gamma, 
-            min_H_inliers=min_H_inliers)
+            mask_H=H_mask,
+            gamma=gamma,
+            min_H_inliers=min_H_inliers,
+        )
+
         # Update stats
         stats.update({"H_over_F_ratio": planar_stats["ratio"]})
-        # Confirmed planar degenerate
-        if planar_degenerate: 
+
+        # Confirmed planar degeneracy
+        if planar_degenerate:
             ok = False
             stats.update({"reason": "planar_degenerate"})
             return ok, stats, aux
-    
+
     # --- POSE RECOVERY ---
-    # Recover pose from F
     R, t, E, cheir_ratio, cheir_mask = pose_from_fundamental(
-        F_best, K1, K2, x1, x2,
+        F_best,
+        K1,
+        K2,
+        x1,
+        x2,
         F_mask=F_mask,
-        enforce_constraints=True)
-    t = np.asarray(t, float).reshape(3)
+        enforce_constraints=True,
+    )
+    t = np.asarray(t, dtype=float).reshape(3)
+
     # Update stats and aux
     aux.update({"R": R, "t": t, "E": E, "cheir_mask": cheir_mask})
-    nC = cheir_mask.sum()
-    stats.update({"cheir_ratio": float(cheir_ratio), "nC": int(nC)})
-    # Mask selection
+    nC = int(cheir_mask.sum())
+    stats.update({"cheir_ratio": float(cheir_ratio), "nC": nC})
+
+    # Mask selection policy
     if mask_policy == "F":
         mask = F_mask
     elif mask_policy == "cheirality":
@@ -294,108 +203,91 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
         mask = F_mask & cheir_mask
     else:
         raise ValueError(f"Unknown mask_policy: {mask_policy}")
-    # Update aux and stats
+
     aux.update({"mask": mask})
     stats.update({"n_mask": int(mask.sum())})
-    # Translation distance
+
+    # Translation magnitude
     tn = float(np.linalg.norm(t))
-    # Near-zero translation
-    if tn < eps: 
+    if tn < eps:
         ok = False
         stats.update({"reason": "pose_translation_near_zero"})
         return ok, stats, aux
-    # Baseline override
-    if baseline_override is not None: 
+
+    # Baseline scaling
+    if baseline_override is not None:
         t = t * (float(baseline_override) / tn)
-    else: 
+    else:
         t = t * (translation_norm / tn)
     aux.update({"t": t})
 
-    # --- PARALLAX DEGENERATE ---
-    # Parallax check (deg)
-    parallax_degen, parallax_stats_deg = parallax_check_deg(R, K1, K2, x1, x2, 
-        mask=mask, 
-        quartile_trim=parallax_quartile_trim, 
-        min_points=min_parallax_points, 
-        min_p50_deg=min_parallax_p50_deg, 
-        min_p25_deg=min_parallax_p25_deg)
-    # Update stats
-    stats.update({"parallax_p25_deg": parallax_stats_deg["p25"], 
-        "parallax_p50_deg": parallax_stats_deg["p50"], 
-        "parallax_p75_deg": parallax_stats_deg["p75"], 
-        "parallax_n_trim": parallax_stats_deg["n_trim"]})
-    # Confirmed parallax degenerate
-    if parallax_degen: 
+    # --- PARALLAX DEGENERACY ---
+    parallax_degen, parallax_stats = parallax_degeneracy_deg(
+        R,
+        K1,
+        K2,
+        x1,
+        x2,
+        mask=mask,
+        quartile_trim=parallax_quartile_trim,
+        min_points=min_parallax_points,
+        min_p50_deg=min_parallax_p50_deg,
+        min_p25_deg=min_parallax_p25_deg,
+    )
+
+    stats.update(
+        {
+            "parallax_p25_deg": parallax_stats["p25"],
+            "parallax_p50_deg": parallax_stats["p50"],
+            "parallax_p75_deg": parallax_stats["p75"],
+            "parallax_n_trim": parallax_stats["n_trim"],
+        }
+    )
+
+    if parallax_degen:
         ok = False
-        stats.update({"reason": parallax_stats_deg["reason"]})
+        stats.update({"reason": parallax_stats["reason"]})
         return ok, stats, aux
 
-    # --- DEPTH CHECK ---
-    # Depth check
-    depth_degen, depth_stats, depth_aux = depth_check(R, t, K1, K2, x1, x2,
+    # --- DEPTH DEGENERACY ---
+    depth_degen, depth_stats, depth_aux = depth_degeneracy_two_view(
+        R,
+        t,
+        K1,
+        K2,
+        x1,
+        x2,
         mask=mask,
         min_points=depth_min_points,
         cheirality_min=cheirality_min,
         depth_max_ratio=depth_max_ratio,
         depth_sanity_min=depth_sanity_min,
-        eps=eps)
-    # Update stats and aux
-    stats.update({f"depth_{k}": v for k, v in depth_stats.items() if k!="reason"})
+        eps=eps,
+    )
+
+    stats.update({f"depth_{k}": v for k, v in depth_stats.items() if k != "reason"})
     aux.update({"depth_idx_valid_full": depth_aux["idx_valid_full"], "X_valid": depth_aux["X_valid"]})
-    # Depth degenerate
-    if depth_degen: 
+
+    if depth_degen:
         ok = False
         stats.update({"reason": depth_stats["reason"]})
         return ok, stats, aux
-    else: 
-        return ok, stats, aux
+
+    return ok, stats, aux
+
 
 # Bootstrap two-view
 def bootstrap_two_view(K1, K2, x1, x2, cfg):
-    # Validate two-view bootstrap
-    ok, stats, aux = validate_two_view_bootstrap(K1, K2, x1, x2, cfg) 
-    # False
+    ok, stats, aux = validate_two_view_bootstrap(K1, K2, x1, x2, cfg)
     if not ok:
         return False, stats, aux, None
-    # Initialised index
-    idx_init = aux["depth_idx_valid_full"]
-    # Depth outputs
-    X_valid = aux["X_valid"] 
-    # Check size matches
-    if X_valid.shape[1] != idx_init.size:
-        raise ValueError(f"Mismatch: X_valid has {X_valid.shape[1]} cols but idx_init has {idx_init.size}")
-    # Pose0 (origin)
-    R0 = np.eye(3)
-    t0 = np.zeros(3)
-    # Pose1
-    R1 = aux["R"]
-    t1 = aux["t"]
-    # For each landmark, connect 3D point and 2D feature idx
-    landmarks = []
-    # Loop across correspondences
-    for lm_id, (j, X_w) in enumerate(zip(idx_init, X_valid.T)):
-        uv0 = x1[:, j]
-        uv1 = x2[:, j]
-        landmarks.append({
-            "id": lm_id,
-            "X_w": X_w,
-            "obs": [
-                {"kf": 0, "feat": int(j), "xy": uv0},
-                {"kf": 1, "feat": int(j), "xy": uv1},
-            ],
-            "descriptor": None,
-            "quality": {"reproj0_px": None, "reproj1_px": None},
-        })
-    # Initialised mask
-    mask_init = np.zeros(x1.shape[1], dtype=bool)
-    mask_init[idx_init] = True
-    # Build seed
-    seed = {
-        "T_WC0": (R0, t0),
-        "T_WC1": (R1, t1),
-        "landmarks": landmarks,
-        "mask_init": mask_init,
-        "idx_init": idx_init,
-    }
 
+    seed = build_two_view_seed(
+        x1,
+        x2,
+        idx_init=aux["depth_idx_valid_full"],
+        X_valid=aux["X_valid"],
+        R1=aux["R"],
+        t1=aux["t"],
+    )
     return True, stats, aux, seed
