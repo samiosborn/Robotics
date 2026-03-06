@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
-from features.checks import check_2d_image
+from core.checks import check_2d_image
 
 # Result of NMS container
 @dataclass(frozen=True)

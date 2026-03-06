@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from features.checks import check_finite_scalar, check_int_gt0
+from core.checks import check_finite_scalar, check_int_gt0
 
 
 # Return bundle for matching results

@@ -31,7 +31,7 @@ from features.debug import print_brief_unique_stats
 from features.viz import draw_matches
 from features.viz import draw_projected_box
 
-from geometry.checks import as_2xN_points
+from core.checks import as_2xN_points
 from geometry.homography import estimate_homography
 from geometry.homography import estimate_homography_ransac
 

@@ -1,7 +1,7 @@
 # geometry/distances.py
 import numpy as np
 from core.checks import check_points_2xN, check_points_3xN
-from geometry.checks import check_2xN_pair
+from core.checks import check_2xN_pair
 from geometry.homogeneous import homogenise
 from geometry.epipolar import algebraic_residuals
 

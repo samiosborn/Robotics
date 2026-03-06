@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from PIL import Image
-from features.checks import check_2d_image, check_axis_01, check_kernel_1d_odd, check_2d_pair_same_shape, check_positive
+from core.checks import check_2d_image, check_axis_01, check_kernel_1d_odd, check_2d_pair_same_shape, check_positive
 
 # Image to greyscale
 def img_to_grey(img, luminance_weights, eotf_params, assume_srgb=True, normalise_01=True, dtype=np.float64, eps=1e-8):

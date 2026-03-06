@@ -8,11 +8,11 @@ import numpy as np
 
 from PIL import Image
 
-from features.checks import check_finite_scalar
-from features.checks import check_int_ge0
-from features.checks import check_int_gt0
-from features.checks import check_int_odd_ge1
-from features.checks import check_keypoints_xy
+from core.checks import check_finite_scalar
+from core.checks import check_int_ge0
+from core.checks import check_int_gt0
+from core.checks import check_int_odd_ge1
+from core.checks import check_keypoints_xy
 
 from features.gradients import img_to_grey
 from features.harris import harris_keypoints

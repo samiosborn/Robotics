@@ -1,7 +1,7 @@
 # geometry/homography.py
 import numpy as np
 from core.checks import check_matrix_3x3, check_points_2xN
-from geometry.checks import check_2xN_pair
+from core.checks import check_2xN_pair
 from geometry.homogeneous import homogenise, dehomogenise
 from geometry.normalisation import hartley_norm, denormalise_point_mapping, normalise_projective_scale
 from geometry.distances import point_to_point_distances_sq

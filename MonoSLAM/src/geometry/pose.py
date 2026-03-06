@@ -1,7 +1,7 @@
 # src/geometry/pose.py 
 import numpy as np
 from core.checks import check_mask_bool_N, check_matrix_3x3
-from geometry.checks import check_2xN_pair
+from core.checks import check_2xN_pair
 from geometry.triangulation import disambiguate_pose_cheirality
 from geometry.essential import essential_from_fundamental, enforce_essential_constraints, decompose_essential
 

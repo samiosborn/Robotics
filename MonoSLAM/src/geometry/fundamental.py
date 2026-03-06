@@ -1,7 +1,7 @@
 # geometry/fundamental.py
 import numpy as np
 from core.checks import check_mask_bool_N, check_matrix_3x3
-from geometry.checks import check_2xN_pair
+from core.checks import check_2xN_pair
 from geometry.normalisation import hartley_norm
 from geometry.essential import essential_from_pose
 from geometry.distances import sampson_distances_sq

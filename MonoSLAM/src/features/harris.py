@@ -3,7 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-from features.checks import check_2d_image, check_2d_pair_same_shape, check_positive
+from core.checks import check_2d_image, check_2d_pair_same_shape, check_positive
 from features.gradients import compute_image_gradients, gaussian_kernel_1d, separable_filter
 from features.nms import nms_2d
 

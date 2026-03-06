@@ -3,7 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-from features.checks import check_2d_image, check_positive
+from core.checks import check_2d_image, check_positive
 
 # Patch result
 @dataclass(frozen=True)
