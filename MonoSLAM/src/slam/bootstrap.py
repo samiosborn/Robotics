@@ -1,13 +1,10 @@
-# slam/bootstrap.py
+# src/slam/bootstrap.py
 import numpy as np
 
-from core.checks import check_matrix_3x3
-from core.checks import check_2xN_pair
+from core.checks import check_2xN_pair, check_matrix_3x3
 from geometry.degeneracy import depth_degeneracy_two_view, parallax_degeneracy_deg, planar_degeneracy_from_masks
-from geometry.fundamental import estimate_fundamental_ransac, refit_fundamental_on_inliers
-from geometry.homography import estimate_homography_ransac
-from geometry.pose import pose_from_fundamental
 from slam.seed import build_two_view_seed
+from slam.two_view_consensus import estimate_fundamental_consensus, estimate_homography_consensus, recover_pose_from_fundamental_consensus, select_two_view_mask
 
 
 # Planar check compatibility wrapper
@@ -24,12 +21,15 @@ def planar_check(mask_F, mask_H, gamma=1.2, min_H_inliers=20):
 def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # Check input dims
     check_2xN_pair(x1, x2)
+    xy1 = np.asarray(x1.T, dtype=np.float64)
+    xy2 = np.asarray(x2.T, dtype=np.float64)
     check_matrix_3x3(K1, name="K1", finite=False)
     check_matrix_3x3(K2, name="K2", finite=False)
 
+
     # Default
     ok = True
-    N = x1.shape[1]
+    N = int(x1.shape[1])
     stats = {"N": N}
 
     # --- UNPACK ---
@@ -46,26 +46,13 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     dep = b["depth"]
 
     # Scalars
-    seed = int(r["seed"])
     eps = float(b["eps"])
 
-    # Policy
-    mask_policy = b["mask_policy"]
-
-    # Fundamental RANSAC
-    F_num_trials = int(rF["num_trials"])
-    F_sample_size = int(rF["sample_size"])
-    F_thr_px = float(rF["threshold_px"])
-    F_min_inliers = int(rF["min_inliers"])
+    # Fundamental acceptance
     F_min_inlier_ratio = float(rF["min_inlier_ratio"])
-    F_shrink_guard = float(rF["shrink_guard"])
-    F_recompute = bool(rF["recompute_mask"])
 
-    # Homography RANSAC
-    H_num_trials = int(rH["num_trials"])
-    H_thr_px = float(rH["threshold_px"])
+    # Homography acceptance
     H_min_inliers = int(rH["min_inliers"])
-    H_normalise = bool(rH["normalise"])
 
     # Planar check
     gamma = float(plan["gamma"])
@@ -87,73 +74,50 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     translation_norm = float(dep["translation_norm"])
     baseline_override = dep["baseline_override"]
 
+
     # --- FUNDAMENTAL CONSENSUS ---
-    F_best, F_mask = estimate_fundamental_ransac(
-        x1,
-        x2,
-        num_trials=F_num_trials,
-        sample_size=F_sample_size,
-        threshold=F_thr_px,
-        seed=seed,
-    )
-
-    F_best, F_mask, F_refit_stats = refit_fundamental_on_inliers(
-        x1,
-        x2,
-        F=F_best,
-        inlier_mask=F_mask,
-        min_inliers=F_min_inliers,
-        threshold=F_thr_px,
-        shrink_guard=F_shrink_guard,
-        recompute_mask=F_recompute,
-    )
-
+    F_best, F_mask, F_stats = estimate_fundamental_consensus(xy1, xy2, cfg)
     aux = {"F_best": F_best, "F_mask": F_mask}
 
-    # Update stats with F mask
-    stats.update({"n0": F_refit_stats["n0"]})
+    stats.update(
+        {
+            "n0": int(F_stats.get("n0", 0)),
+            "n1": int(F_stats.get("n1", F_stats.get("n0", 0))),
+            "shrink_ratio": F_stats.get("shrink_ratio", None),
+        }
+    )
 
-    # Reject if refit failed
-    if F_refit_stats["refit"] is False:
+    # Reject if F consensus failed or refit rejected
+    if F_best is None or F_mask is None or not bool(F_stats.get("refit", False)):
         ok = False
-        stats.update({"reason": F_refit_stats["reason"]})
+        stats.update({"reason": F_stats.get("reason", "fundamental_consensus_failed")})
         return ok, stats, aux
 
-    # Update stats with refit mask
-    stats.update({"n1": F_refit_stats["n1"], "shrink_ratio": F_refit_stats["shrink_ratio"]})
-
     # Too few inliers
-    nF = int(F_mask.sum())
-    if nF < min_F_inliers_for_test or (nF / N) < F_min_inlier_ratio:
+    nF = int(np.asarray(F_mask, dtype=bool).sum())
+    if nF < min_F_inliers_for_test or (nF / max(N, 1)) < F_min_inlier_ratio:
         ok = False
         stats.update({"nF": nF, "reason": "fundamental_insufficient_inliers"})
         return ok, stats, aux
 
-    # --- HOMOGRAPHY CONSENSUS ---
-    H_best, H_mask, H_reason = estimate_homography_ransac(
-        x1,
-        x2,
-        num_trials=H_num_trials,
-        threshold=H_thr_px,
-        normalise=H_normalise,
-        seed=seed,
-    )
+    stats.update({"nF": nF})
 
-    # Update aux
+    # --- HOMOGRAPHY CONSENSUS ---
+    H_best, H_mask, H_stats = estimate_homography_consensus(xy1, xy2, cfg)
     aux.update({"H_best": H_best, "H_mask": H_mask})
 
     # Failure to find H
     if H_best is None or H_mask is None:
         if require_H_success:
             ok = False
-            stats.update({"reason": H_reason})
+            stats.update({"reason": H_stats.get("reason", "homography_failed")})
             return ok, stats, aux
 
         # Skip planar check
         stats.update({"nH": 0, "H_inlier_ratio": 0.0, "H_over_F_ratio": None})
     else:
         # H inliers too small
-        nH = int(H_mask.sum())
+        nH = int(np.asarray(H_mask, dtype=bool).sum())
         stats.update({"nH": nH, "H_inlier_ratio": float(nH / max(N, 1))})
         if nH < H_min_inliers:
             ok = False
@@ -178,32 +142,27 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
             return ok, stats, aux
 
     # --- POSE RECOVERY ---
-    R, t, E, cheir_ratio, cheir_mask = pose_from_fundamental(
+    R, t, E, cheir_ratio, cheir_mask, pose_stats = recover_pose_from_fundamental_consensus(
         F_best,
+        F_mask,
         K1,
         K2,
-        x1,
-        x2,
-        F_mask=F_mask,
-        enforce_constraints=True,
+        xy1,
+        xy2,
     )
-    t = np.asarray(t, dtype=float).reshape(3)
 
-    # Update stats and aux
+    if R is None or t is None or E is None or cheir_mask is None:
+        ok = False
+        stats.update({"reason": pose_stats.get("reason", "pose_recovery_failed")})
+        return ok, stats, aux
+
+    t = np.asarray(t, dtype=np.float64).reshape(3)
     aux.update({"R": R, "t": t, "E": E, "cheir_mask": cheir_mask})
-    nC = int(cheir_mask.sum())
+    nC = int(np.asarray(cheir_mask, dtype=bool).sum())
     stats.update({"cheir_ratio": float(cheir_ratio), "nC": nC})
 
     # Mask selection policy
-    if mask_policy == "F":
-        mask = F_mask
-    elif mask_policy == "cheirality":
-        mask = cheir_mask
-    elif mask_policy == "intersection":
-        mask = F_mask & cheir_mask
-    else:
-        raise ValueError(f"Unknown mask_policy: {mask_policy}")
-
+    mask = select_two_view_mask(F_mask, cheir_mask, cfg)
     aux.update({"mask": mask})
     stats.update({"n_mask": int(mask.sum())})
 
