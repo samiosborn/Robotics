@@ -154,6 +154,8 @@ def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     if R is None or t is None or E is None or cheir_mask is None:
         ok = False
         stats.update({"reason": pose_stats.get("reason", "pose_recovery_failed")})
+        if pose_stats.get("error") is not None:
+            stats.update({"pose_error": pose_stats.get("error")})
         return ok, stats, aux
 
     t = np.asarray(t, dtype=np.float64).reshape(3)

@@ -40,6 +40,37 @@ class MultiScaleBriefResult:
     # Optional orientations (radians), shape (N,) or None
     ori: np.ndarray | None
 
+# Convert input image to a detector-safe PIL image
+def _to_detector_pil_image(img) -> Image.Image:
+    # Already PIL
+    if isinstance(img, Image.Image):
+        out = img
+        if out.mode not in {"I;16", "L", "RGB", "RGBA"}:
+            out = out.convert("L")
+        return out
+
+    # Convert NumPy-like input
+    arr = np.asarray(img)
+
+    # Greyscale array
+    if arr.ndim == 2:
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = np.clip(arr, 0.0, 1.0)
+            arr = np.round(255.0 * arr).astype(np.uint8)
+        else:
+            arr = np.asarray(arr, dtype=np.uint8)
+        return Image.fromarray(arr, mode="L")
+
+    # RGB-like array
+    if arr.ndim == 3 and arr.shape[2] >= 3:
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = np.clip(arr, 0.0, 1.0)
+            arr = np.round(255.0 * arr).astype(np.uint8)
+        else:
+            arr = np.asarray(arr, dtype=np.uint8)
+        return Image.fromarray(arr[:, :, :3], mode="RGB")
+
+    raise ValueError(f"Unsupported image shape for detector PIL conversion: {arr.shape}")
 
 # Build a simple PIL image pyramid (level 0 = original)
 def build_pil_pyramid(
@@ -309,11 +340,8 @@ def build_multiscale_brief(
     if max_kps_per_level is not None:
         max_kps_per_level = check_int_gt0(max_kps_per_level, name="max_kps_per_level")
 
-    # Convert to PIL if needed
-    if isinstance(img, Image.Image):
-        img_pil = img
-    else:
-        img_pil = Image.fromarray(np.asarray(img))
+    # Convert to detector-safe PIL image
+    img_pil = _to_detector_pil_image(img)
 
     # Build pyramid and scale list
     pyr, scales = build_pil_pyramid(
