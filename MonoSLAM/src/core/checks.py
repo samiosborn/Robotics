@@ -280,6 +280,23 @@ def check_3xN_pair(x1, x2, dtype=None, finite=True):
     return a, b
 
 
+# --- MIX OF (3,N) AND (2,N) ---
+
+# Check 3D points and 2D points match column count
+def check_3xN_2xN_cols(X, x, nameX="X", namex="x", dtype=None, finite=True):
+    # Check (3, N) points
+    X = check_points_3xN(X, name=nameX, dtype=dtype, finite=finite)
+
+    # Check (2, N) points
+    x = check_points_2xN(x, name=namex, dtype=dtype, finite=finite)
+
+    # Require same number of columns
+    if X.shape[1] != x.shape[1]:
+        raise ValueError(f"{nameX} and {namex} must share N; got {X.shape} and {x.shape}")
+
+    return X, x
+
+
 # --- IMAGES AND PATCHES ---
 
 # Check 2D image
