@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import check_3xN_2xN_cols, check_matrix_3x3, check_points_3xN
-from geometry.camera import pixel_to_normalised, reprojection_rmse, world_to_camera_points
+from core.checks import check_3xN_2xN_cols, check_3xN_pair, check_int_gt0, check_matrix_3x3, check_points_2xN, check_points_3xN, check_positive
+from geometry.camera import pixel_to_normalised, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
 
 
 # Bundle of 2D–3D correspondences for PnP
@@ -41,6 +41,21 @@ def _landmark_dict_by_id(seed: dict) -> dict[int, dict]:
         out[int(lm["id"])] = lm
 
     return out
+
+
+# Slice a PnP correspondence bundle consistently across all fields
+def _slice_pnp_correspondences(corrs: PnPCorrespondences, idx) -> PnPCorrespondences:
+    # Convert indexer
+    idx = np.asarray(idx)
+
+    # Slice all fields consistently
+    return PnPCorrespondences(
+        X_w=np.asarray(corrs.X_w[:, idx], dtype=np.float64),
+        x_cur=np.asarray(corrs.x_cur[:, idx], dtype=np.float64),
+        landmark_ids=np.asarray(corrs.landmark_ids[idx], dtype=np.int64).reshape(-1),
+        cur_feat_idx=np.asarray(corrs.cur_feat_idx[idx], dtype=np.int64).reshape(-1),
+        kf_feat_idx=np.asarray(corrs.kf_feat_idx[idx], dtype=np.int64).reshape(-1),
+    )
 
 
 # Build DLT design matrix for linear PnP
@@ -116,6 +131,33 @@ def _pose_from_dlt_projection(P_tilde, eps=1e-12):
     }
 
     return np.asarray(R, dtype=float), np.asarray(t, dtype=float).reshape(3), stats
+
+
+# Score a candidate pose by reprojection error and positive depth
+def _pnp_inlier_mask_from_pose(X_w, x_cur, K, R, t, *, threshold_px=3.0, eps=1e-12):
+    # --- Checks ---
+    # Check threshold
+    threshold_px = check_positive(threshold_px, name="threshold_px", eps=0.0)
+    # Check epsilon
+    eps = check_positive(eps, name="eps", eps=0.0)
+
+    # Project world points into the candidate camera frame
+    X_c = world_to_camera_points(R, t, X_w)
+
+    # Compute squared reprojection errors
+    d_sq = reprojection_errors_sq(K, R, t, X_w, x_cur)
+    d_sq = np.asarray(d_sq, dtype=float).reshape(-1)
+
+    # Reject invalid projections
+    d_sq[~np.isfinite(d_sq)] = np.inf
+
+    # Reject points behind the camera
+    d_sq[X_c[2, :] <= float(eps)] = np.inf
+
+    # Convert threshold into an inlier mask
+    inlier_mask = d_sq <= float(threshold_px ** 2)
+
+    return inlier_mask, d_sq
 
 
 # Build 2D–3D correspondences from seed and tracking output
@@ -348,4 +390,191 @@ def estimate_pose_pnp(
     stats.update({"reprojection_rmse_px": rmse_px})
 
     return np.asarray(R, dtype=float), np.asarray(t, dtype=float).reshape(3), stats
+
+
+# Estimate camera pose from 2D–3D correspondences with RANSAC around linear PnP
+def estimate_pose_pnp_ransac(
+    corrs: PnPCorrespondences,
+    K,
+    *,
+    num_trials=1000,
+    sample_size=6,
+    threshold_px=3.0,
+    min_inliers=12,
+    seed=0,
+    min_points=6,
+    rank_tol=1e-10,
+    min_cheirality_ratio=0.5,
+    eps=1e-12,
+    refit=True,
+):
+    # --- Checks ---
+    # Check intrinsics
+    K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
+    # Check RANSAC controls
+    num_trials = check_int_gt0(num_trials, name="num_trials")
+    sample_size = check_int_gt0(sample_size, name="sample_size")
+    min_inliers = check_int_gt0(min_inliers, name="min_inliers")
+    min_points = check_int_gt0(min_points, name="min_points")
+    threshold_px = check_positive(threshold_px, name="threshold_px", eps=0.0)
+    eps = check_positive(eps, name="eps", eps=0.0)
+    # Require a valid linear PnP sample size
+    if sample_size < 6:
+        raise ValueError(f"sample_size must be >= 6 for linear PnP; got {sample_size}")
+    # Require the solver minimum to be valid
+    if min_points < 6:
+        raise ValueError(f"min_points must be >= 6 for linear PnP; got {min_points}")
+    # Require the inlier minimum to be meaningful
+    if min_inliers < sample_size:
+        raise ValueError(f"min_inliers must be >= sample_size; got {min_inliers} < {sample_size}")
+    # Check correspondence arrays
+    X_w, x_cur = check_3xN_2xN_cols(corrs.X_w, corrs.x_cur, nameX="corrs.X_w", namex="corrs.x_cur", dtype=float, finite=True)
+
+    # Read total correspondence count
+    N = int(X_w.shape[1])
+
+    # Require enough correspondences
+    if N < sample_size:
+        raise ValueError(f"Need at least sample_size correspondences; got N={N}, sample_size={sample_size}")
+
+    # Random number generator
+    rng = np.random.default_rng(seed)
+
+    # Initialise best model
+    best_R = None
+    best_t = None
+    best_mask = np.zeros((N,), dtype=bool)
+    best_count = 0
+    best_mean_err = np.inf
+    n_model_success = 0
+
+    # RANSAC loop
+    for _ in range(num_trials):
+        # Sample a minimal subset
+        idx = rng.choice(N, size=sample_size, replace=False)
+
+        # Build subset correspondences
+        corrs_sub = _slice_pnp_correspondences(corrs, idx)
+
+        # Estimate a pose from the subset
+        try:
+            R_t, t_t, _ = estimate_pose_pnp(
+                corrs_sub,
+                K,
+                min_points=min_points,
+                rank_tol=rank_tol,
+                min_cheirality_ratio=min_cheirality_ratio,
+                eps=eps,
+            )
+        except Exception:
+            continue
+
+        # Skip failed models
+        if R_t is None or t_t is None:
+            continue
+
+        # Count successful model fits
+        n_model_success += 1
+
+        # Score on all correspondences
+        mask_t, d_sq_t = _pnp_inlier_mask_from_pose(
+            X_w,
+            x_cur,
+            K,
+            R_t,
+            t_t,
+            threshold_px=threshold_px,
+            eps=eps,
+        )
+
+        # Count inliers
+        count_t = int(mask_t.sum())
+        if count_t == 0:
+            continue
+
+        # Mean inlier error for tie-breaks
+        mean_err_t = float(np.mean(d_sq_t[mask_t]))
+
+        # Keep the best consensus
+        if (count_t > best_count) or (count_t == best_count and mean_err_t < best_mean_err):
+            best_R = np.asarray(R_t, dtype=float)
+            best_t = np.asarray(t_t, dtype=float).reshape(3,)
+            best_mask = np.asarray(mask_t, dtype=bool)
+            best_count = count_t
+            best_mean_err = mean_err_t
+
+            # Early exit on perfect agreement
+            if best_count == N:
+                break
+
+    # Default stats
+    stats = {
+        "N": N,
+        "num_trials": int(num_trials),
+        "sample_size": int(sample_size),
+        "threshold_px": float(threshold_px),
+        "min_inliers": int(min_inliers),
+        "n_model_success": int(n_model_success),
+        "n_inliers": int(best_count),
+        "mean_inlier_err_sq": None if not np.isfinite(best_mean_err) else float(best_mean_err),
+        "refit": False,
+        "reason": None,
+    }
+
+    # Fail if no good model was found
+    if best_R is None or best_t is None or best_count < min_inliers:
+        stats["reason"] = "pnp_ransac_failed"
+        return None, None, None, stats
+
+    # Stop here if refit is disabled
+    if not bool(refit):
+        return best_R, best_t, best_mask, stats
+
+    # Refit on the best inlier set
+    try:
+        corrs_in = _slice_pnp_correspondences(corrs, best_mask)
+
+        R_refit, t_refit, _ = estimate_pose_pnp(
+            corrs_in,
+            K,
+            min_points=min_points,
+            rank_tol=rank_tol,
+            min_cheirality_ratio=min_cheirality_ratio,
+            eps=eps,
+        )
+
+        # Keep only valid refits
+        if R_refit is not None and t_refit is not None:
+            # Score the refit model on all correspondences
+            mask_refit, d_sq_refit = _pnp_inlier_mask_from_pose(
+                X_w,
+                x_cur,
+                K,
+                R_refit,
+                t_refit,
+                threshold_px=threshold_px,
+                eps=eps,
+            )
+
+            # Read refit quality
+            n_refit = int(mask_refit.sum())
+            mean_err_refit = float(np.mean(d_sq_refit[mask_refit])) if n_refit > 0 else np.inf
+
+            # Keep refit only if it is not worse in consensus size
+            if n_refit >= best_count:
+                best_R = np.asarray(R_refit, dtype=float)
+                best_t = np.asarray(t_refit, dtype=float).reshape(3,)
+                best_mask = np.asarray(mask_refit, dtype=bool)
+                best_count = n_refit
+                best_mean_err = mean_err_refit
+                stats["refit"] = True
+
+    except Exception as exc:
+        stats["refit_error"] = str(exc)
+
+    # Final stats
+    stats["n_inliers"] = int(best_count)
+    stats["mean_inlier_err_sq"] = None if not np.isfinite(best_mean_err) else float(best_mean_err)
+
+    return best_R, best_t, best_mask, stats
 
