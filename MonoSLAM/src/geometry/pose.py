@@ -1,7 +1,9 @@
-# src/geometry/pose.py 
+# src/geometry/pose.py
 import numpy as np
-from core.checks import check_mask_bool_N, check_matrix_3x3
-from core.checks import check_2xN_pair
+
+from core.checks import check_mask_bool_N, check_matrix_3x3, check_2xN_pair, check_vector_3
+from geometry.lie import hat
+from geometry.rotation import axis_angle_to_rotmat
 from geometry.triangulation import disambiguate_pose_cheirality
 from geometry.essential import essential_from_fundamental, enforce_essential_constraints, decompose_essential
 
@@ -26,6 +28,38 @@ def angle_between_translations(t_1, t_2):
     cos_theta = np.clip(np.dot(t_1_n, t_2_n), -1.0, 1.0)
     # Angle
     return np.arccos(cos_theta)
+
+
+# Apply a left-multiplicative increment to a world-to-camera pose
+def apply_left_pose_increment_wc(R, t, delta, eps=1e-12):
+    # --- Checks ---
+    # Check rotation
+    R = check_matrix_3x3(R, name="R", dtype=float, finite=False)
+    # Check translation
+    t = check_vector_3(t, name="t", dtype=float, finite=False)
+    # Check increment
+    delta = np.asarray(delta, dtype=float).reshape(6,)
+
+    # Split translational and rotational parts
+    rho = delta[:3]
+    omega = delta[3:]
+
+    # Rotation magnitude
+    theta = float(np.linalg.norm(omega))
+
+    # Small-angle update
+    if theta <= float(eps):
+        dR = np.eye(3, dtype=float) + hat(omega)
+    else:
+        axis = omega / theta
+        dR = axis_angle_to_rotmat(axis, theta)
+
+    # Left-multiplicative world-to-camera update
+    R_new = dR @ R
+    t_new = dR @ t + rho
+
+    return np.asarray(R_new, dtype=float), np.asarray(t_new, dtype=float).reshape(3,)
+
 
 # Recover pose from fundamental matrix estimate
 def pose_from_fundamental(F, K1, K2, x1, x2, F_mask=None, enforce_constraints=True):
@@ -58,3 +92,4 @@ def pose_from_fundamental(F, K1, K2, x1, x2, F_mask=None, enforce_constraints=Tr
         return R, t, E, cheir_ratio, full_best_mask
     else: 
         return R, t, E, cheir_ratio, best_cheir_mask
+
