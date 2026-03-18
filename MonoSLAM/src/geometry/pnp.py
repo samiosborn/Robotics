@@ -7,7 +7,9 @@ import numpy as np
 
 from core.checks import check_3xN_2xN_cols, check_3xN_pair, check_int_gt0, check_matrix_3x3, check_points_2xN, check_points_3xN, check_positive
 from geometry.camera import pixel_to_normalised, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
-
+from geometry.lie import hat
+from geometry.rotation import axis_angle_to_rotmat
+from geometry.pose import apply_left_pose_increment_wc
 
 # Bundle of 2D–3D correspondences for PnP
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ def _build_pnp_dlt_matrix(X_w, x_hat):
 
     # Fill two equations per correspondence
     for i in range(N):
+        # Homogeneous world point
         Xi = X_h[:, i]
 
         # p1^T X - u p3^T X = 0
@@ -99,6 +102,7 @@ def _build_pnp_dlt_matrix(X_w, x_hat):
 # Recover a metric pose from a projective DLT camera matrix
 def _pose_from_dlt_projection(P_tilde, eps=1e-12):
     # --- Checks ---
+    # Convert projective camera matrix
     P_tilde = np.asarray(P_tilde, dtype=float)
     if P_tilde.shape != (3, 4):
         raise ValueError(f"P_tilde must be (3,4); got {P_tilde.shape}")
@@ -107,16 +111,16 @@ def _pose_from_dlt_projection(P_tilde, eps=1e-12):
     M = P_tilde[:, :3]
     p4 = P_tilde[:, 3]
 
-    # Project M onto the nearest rotation
+    # Project the linear block onto the nearest rotation
     U, S, Vt = np.linalg.svd(M)
     R = U @ Vt
 
-    # Enforce proper rotation
+    # Enforce a proper rotation
     if np.linalg.det(R) < 0.0:
         U[:, -1] *= -1.0
         R = U @ Vt
 
-    # Recover signed common scale
+    # Recover the common scale
     scale = float(np.trace(M @ R.T) / 3.0)
     if abs(scale) < float(eps):
         raise ValueError("Recovered DLT scale is near zero")
@@ -158,6 +162,82 @@ def _pnp_inlier_mask_from_pose(X_w, x_cur, K, R, t, *, threshold_px=3.0, eps=1e-
     inlier_mask = d_sq <= float(threshold_px ** 2)
 
     return inlier_mask, d_sq
+
+
+# Build the Gauss-Newton linear system for pose-only reprojection refinement
+def _linearise_pose_only_reprojection(X_w, x_cur, K, R, t, eps=1e-12):
+    # --- Checks ---
+    # Check intrinsics
+    K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
+    # Check correspondences
+    X_w, x_cur = check_3xN_2xN_cols(X_w, x_cur, nameX="X_w", namex="x_cur", dtype=float, finite=True)
+
+    # Transform world points into the current camera frame
+    X_c = world_to_camera_points(R, t, X_w)
+
+    # Read intrinsics
+    fx = float(K[0, 0])
+    fy = float(K[1, 1])
+    cx = float(K[0, 2])
+    cy = float(K[1, 2])
+
+    # Keep only points in front of the camera
+    z = X_c[2, :]
+    valid = np.isfinite(z) & (z > float(eps))
+
+    # Require at least one valid point
+    if not np.any(valid):
+        raise ValueError("No valid positive-depth points for pose refinement")
+
+    # Slice valid correspondences
+    X_c_valid = X_c[:, valid]
+    x_obs_valid = x_cur[:, valid]
+
+    # Read valid count
+    N = int(X_c_valid.shape[1])
+
+    # Allocate Jacobian and residual vector
+    J = np.zeros((2 * N, 6), dtype=float)
+    r = np.zeros((2 * N,), dtype=float)
+
+    # Linearise one correspondence at a time
+    for i in range(N):
+        # Read camera-frame point
+        X = float(X_c_valid[0, i])
+        Y = float(X_c_valid[1, i])
+        Z = float(X_c_valid[2, i])
+
+        # Predicted pixel location
+        u_hat = fx * (X / Z) + cx
+        v_hat = fy * (Y / Z) + cy
+
+        # Observed pixel location
+        u_obs = float(x_obs_valid[0, i])
+        v_obs = float(x_obs_valid[1, i])
+
+        # Residual = observed - predicted
+        r[2 * i] = u_obs - u_hat
+        r[2 * i + 1] = v_obs - v_hat
+
+        # Projection Jacobian with respect to camera-frame point
+        J_proj = np.array(
+            [
+                [fx / Z, 0.0, -fx * X / (Z ** 2)],
+                [0.0, fy / Z, -fy * Y / (Z ** 2)],
+            ],
+            dtype=float,
+        )
+
+        # Camera-frame point Jacobian with respect to left pose increment
+        J_pose = np.hstack([np.eye(3, dtype=float), -hat(X_c_valid[:, i])])
+
+        # Residual Jacobian
+        J_i = -J_proj @ J_pose
+
+        # Write block
+        J[2 * i : 2 * i + 2, :] = J_i
+
+    return J, r, valid
 
 
 # Build 2D–3D correspondences from seed and tracking output
@@ -306,6 +386,7 @@ def estimate_pose_pnp(
     K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
     # Check correspondences
     X_w, x_cur = check_3xN_2xN_cols(corrs.X_w, corrs.x_cur, nameX="corrs.X_w", namex="corrs.x_cur", dtype=float, finite=True)
+
     # Validate scalar parameters
     min_points = max(6, int(min_points))
     rank_tol = float(rank_tol)
@@ -392,6 +473,143 @@ def estimate_pose_pnp(
     return np.asarray(R, dtype=float), np.asarray(t, dtype=float).reshape(3), stats
 
 
+# Refine a PnP pose by minimising reprojection error over fixed 2D–3D correspondences
+def refine_pose_pnp(
+    corrs: PnPCorrespondences,
+    K,
+    R_init,
+    t_init,
+    *,
+    max_iters=15,
+    min_points=6,
+    damping=1e-6,
+    step_tol=1e-9,
+    improvement_tol=1e-9,
+    eps=1e-12,
+):
+    # --- Checks ---
+    # Check intrinsics
+    K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
+    # Check correspondences
+    X_w, x_cur = check_3xN_2xN_cols(corrs.X_w, corrs.x_cur, nameX="corrs.X_w", namex="corrs.x_cur", dtype=float, finite=True)
+    # Check initial pose
+    R = check_matrix_3x3(R_init, name="R_init", dtype=float, finite=False)
+    t = np.asarray(t_init, dtype=float).reshape(3,)
+    # Check iteration controls
+    max_iters = check_int_gt0(max_iters, name="max_iters")
+    min_points = max(6, int(min_points))
+    damping = check_positive(damping, name="damping", eps=0.0)
+    step_tol = check_positive(step_tol, name="step_tol", eps=0.0)
+    improvement_tol = check_positive(improvement_tol, name="improvement_tol", eps=0.0)
+    eps = check_positive(eps, name="eps", eps=0.0)
+
+    # Read total correspondence count
+    N = int(X_w.shape[1])
+
+    # Initialise stats
+    stats = {
+        "n_corr": N,
+        "max_iters": int(max_iters),
+        "n_iters": 0,
+        "method": "gauss_newton_pose_only",
+        "converged": False,
+        "reason": None,
+    }
+
+    # Require enough correspondences
+    if N < min_points:
+        stats.update({"reason": "too_few_correspondences"})
+        return None, None, stats
+
+    # Initial reprojection score
+    try:
+        prev_rmse = float(reprojection_rmse(K, R, t, X_w, x_cur))
+    except Exception as exc:
+        stats.update({"reason": "initial_reprojection_eval_failed", "error": str(exc)})
+        return None, None, stats
+
+    stats["rmse_px_init"] = prev_rmse
+
+    # Gauss-Newton iterations
+    for it in range(max_iters):
+        # Build local linear system
+        try:
+            J, r, valid = _linearise_pose_only_reprojection(X_w, x_cur, K, R, t, eps=eps)
+        except Exception as exc:
+            stats.update({"reason": "linearisation_failed", "error": str(exc), "n_iters": int(it)})
+            return None, None, stats
+
+        # Require enough valid points
+        n_valid = int(np.sum(valid))
+        if n_valid < min_points:
+            stats.update({"reason": "too_few_valid_points", "n_valid": n_valid, "n_iters": int(it)})
+            return None, None, stats
+
+        # Normal equations with light damping
+        H = J.T @ J + float(damping) * np.eye(6, dtype=float)
+        g = J.T @ r
+
+        # Solve for increment
+        try:
+            delta = -np.linalg.solve(H, g)
+        except Exception as exc:
+            stats.update({"reason": "normal_equations_failed", "error": str(exc), "n_iters": int(it)})
+            return None, None, stats
+
+        # Read step size
+        step_norm = float(np.linalg.norm(delta))
+
+        # Update pose
+        R_new, t_new = apply_left_pose_increment(R, t, delta, eps=eps)
+
+        # Score updated pose
+        try:
+            rmse_new = float(reprojection_rmse(K, R_new, t_new, X_w, x_cur))
+        except Exception as exc:
+            stats.update({"reason": "updated_reprojection_eval_failed", "error": str(exc), "n_iters": int(it)})
+            return None, None, stats
+
+        # Accept the step
+        R = R_new
+        t = t_new
+
+        # Track progress
+        stats["n_iters"] = int(it + 1)
+        stats["n_valid"] = n_valid
+        stats["step_norm_last"] = step_norm
+        stats["rmse_px_last"] = rmse_new
+
+        # Convergence on step size
+        if step_norm <= float(step_tol):
+            stats["converged"] = True
+            stats["reason"] = "step_tol_reached"
+            break
+
+        # Convergence on RMSE improvement
+        if abs(prev_rmse - rmse_new) <= float(improvement_tol):
+            stats["converged"] = True
+            stats["reason"] = "improvement_tol_reached"
+            break
+
+        # Continue from new score
+        prev_rmse = rmse_new
+
+    # Final score
+    try:
+        rmse_final = float(reprojection_rmse(K, R, t, X_w, x_cur))
+    except Exception as exc:
+        stats.update({"reason": "final_reprojection_eval_failed", "error": str(exc)})
+        return None, None, stats
+
+    stats["rmse_px_final"] = rmse_final
+
+    # Mark non-convergence if loop ended naturally
+    if stats["reason"] is None:
+        stats["reason"] = "max_iters_reached"
+
+    return np.asarray(R, dtype=float), np.asarray(t, dtype=float).reshape(3), stats
+
+
 # Estimate camera pose from 2D–3D correspondences with RANSAC around linear PnP
 def estimate_pose_pnp_ransac(
     corrs: PnPCorrespondences,
@@ -407,6 +625,11 @@ def estimate_pose_pnp_ransac(
     min_cheirality_ratio=0.5,
     eps=1e-12,
     refit=True,
+    refine_nonlinear=True,
+    refine_max_iters=15,
+    refine_damping=1e-6,
+    refine_step_tol=1e-9,
+    refine_improvement_tol=1e-9,
 ):
     # --- Checks ---
     # Check intrinsics
@@ -418,15 +641,19 @@ def estimate_pose_pnp_ransac(
     min_points = check_int_gt0(min_points, name="min_points")
     threshold_px = check_positive(threshold_px, name="threshold_px", eps=0.0)
     eps = check_positive(eps, name="eps", eps=0.0)
+
     # Require a valid linear PnP sample size
     if sample_size < 6:
         raise ValueError(f"sample_size must be >= 6 for linear PnP; got {sample_size}")
+
     # Require the solver minimum to be valid
     if min_points < 6:
         raise ValueError(f"min_points must be >= 6 for linear PnP; got {min_points}")
+
     # Require the inlier minimum to be meaningful
     if min_inliers < sample_size:
         raise ValueError(f"min_inliers must be >= sample_size; got {min_inliers} < {sample_size}")
+
     # Check correspondence arrays
     X_w, x_cur = check_3xN_2xN_cols(corrs.X_w, corrs.x_cur, nameX="corrs.X_w", namex="corrs.x_cur", dtype=float, finite=True)
 
@@ -532,8 +759,10 @@ def estimate_pose_pnp_ransac(
 
     # Refit on the best inlier set
     try:
+        # Slice inlier correspondences
         corrs_in = _slice_pnp_correspondences(corrs, best_mask)
 
+        # Re-estimate a linear pose on all inliers
         R_refit, t_refit, _ = estimate_pose_pnp(
             corrs_in,
             K,
@@ -543,9 +772,30 @@ def estimate_pose_pnp_ransac(
             eps=eps,
         )
 
-        # Keep only valid refits
+        # Keep only valid linear refits
         if R_refit is not None and t_refit is not None:
-            # Score the refit model on all correspondences
+            # Optionally refine nonlinearly on the fixed inlier set
+            if bool(refine_nonlinear):
+                R_nonlin, t_nonlin, refine_stats = refine_pose_pnp(
+                    corrs_in,
+                    K,
+                    R_refit,
+                    t_refit,
+                    max_iters=refine_max_iters,
+                    min_points=min_points,
+                    damping=refine_damping,
+                    step_tol=refine_step_tol,
+                    improvement_tol=refine_improvement_tol,
+                    eps=eps,
+                )
+
+                stats["refine_stats"] = refine_stats
+
+                if R_nonlin is not None and t_nonlin is not None:
+                    R_refit = R_nonlin
+                    t_refit = t_nonlin
+
+            # Score the refined pose on all correspondences
             mask_refit, d_sq_refit = _pnp_inlier_mask_from_pose(
                 X_w,
                 x_cur,
@@ -556,11 +806,11 @@ def estimate_pose_pnp_ransac(
                 eps=eps,
             )
 
-            # Read refit quality
+            # Read refined quality
             n_refit = int(mask_refit.sum())
             mean_err_refit = float(np.mean(d_sq_refit[mask_refit])) if n_refit > 0 else np.inf
 
-            # Keep refit only if it is not worse in consensus size
+            # Keep the refined model if consensus is not worse
             if n_refit >= best_count:
                 best_R = np.asarray(R_refit, dtype=float)
                 best_t = np.asarray(t_refit, dtype=float).reshape(3,)
