@@ -657,3 +657,133 @@ def estimate_pose_from_seed(
         "stats": stats,
     }
 
+
+# Process one new frame against the current seed map
+def process_frame_against_seed(
+    K: np.ndarray,
+    seed: dict[str, Any],
+    keyframe_feats: FrameFeatures,
+    cur_im: np.ndarray,
+    *,
+    feature_cfg: dict[str, Any],
+    match_mode: str | None = None,
+    ncc_min_score: float = 0.7,
+    brief_mode: str = "nn",
+    brief_max_dist: int | None = 80,
+    brief_ratio: float = 0.8,
+    mutual: bool = True,
+    max_matches: int | None = None,
+    scale_gate: int = 1,
+    F_cfg: dict[str, Any],
+    num_trials: int = 1000,
+    sample_size: int = 6,
+    threshold_px: float = 3.0,
+    min_inliers: int = 12,
+    ransac_seed: int = 0,
+    min_points: int = 6,
+    rank_tol: float = 1e-10,
+    min_cheirality_ratio: float = 0.5,
+    eps: float = 1e-12,
+    refit: bool = True,
+    refine_nonlinear: bool = True,
+    refine_max_iters: int = 15,
+    refine_damping: float = 1e-6,
+    refine_step_tol: float = 1e-9,
+    refine_improvement_tol: float = 1e-9,
+) -> dict[str, Any]:
+    # --- Checks ---
+    # Check intrinsics
+    check_matrix_3x3(K, name="K", dtype=float, finite=False)
+
+    # Check containers
+    if not isinstance(seed, dict):
+        raise ValueError("seed must be a dict")
+    if not isinstance(feature_cfg, dict):
+        raise ValueError("feature_cfg must be a dict")
+    if not isinstance(F_cfg, dict):
+        raise ValueError("F_cfg must be a dict")
+
+    # Track current frame against the reference keyframe
+    track_out = track_against_keyframe(
+        K,
+        keyframe_feats,
+        cur_im,
+        feature_cfg=feature_cfg,
+        match_mode=match_mode,
+        ncc_min_score=ncc_min_score,
+        brief_mode=brief_mode,
+        brief_max_dist=brief_max_dist,
+        brief_ratio=brief_ratio,
+        mutual=mutual,
+        max_matches=max_matches,
+        scale_gate=scale_gate,
+        F_cfg=F_cfg,
+    )
+
+    # Read tracking stats
+    track_stats = track_out.get("stats", {}) if isinstance(track_out, dict) else {}
+    n_track_inliers = int(track_stats.get("n_inliers", 0))
+
+    # Early exit if tracking produced no geometric inliers
+    if n_track_inliers <= 0:
+        stats = {
+            "ok": False,
+            "reason": track_stats.get("reason", "tracking_failed"),
+            "n_track_inliers": 0,
+            "n_pnp_corr": 0,
+            "n_pnp_inliers": 0,
+        }
+        return {
+            "ok": False,
+            "track_out": track_out,
+            "pose_out": None,
+            "R": None,
+            "t": None,
+            "stats": stats,
+        }
+
+    # Estimate current pose from the seed map
+    pose_out = estimate_pose_from_seed(
+        K,
+        seed,
+        track_out,
+        num_trials=num_trials,
+        sample_size=sample_size,
+        threshold_px=threshold_px,
+        min_inliers=min_inliers,
+        ransac_seed=ransac_seed,
+        min_points=min_points,
+        rank_tol=rank_tol,
+        min_cheirality_ratio=min_cheirality_ratio,
+        eps=eps,
+        refit=refit,
+        refine_nonlinear=refine_nonlinear,
+        refine_max_iters=refine_max_iters,
+        refine_damping=refine_damping,
+        refine_step_tol=refine_step_tol,
+        refine_improvement_tol=refine_improvement_tol,
+    )
+
+    # Read pose stats
+    pose_stats = pose_out.get("stats", {}) if isinstance(pose_out, dict) else {}
+    ok = bool(pose_out.get("ok", False)) if isinstance(pose_out, dict) else False
+
+    # Pack a single frontend result
+    stats = {
+        "ok": bool(ok),
+        "reason": pose_stats.get("reason", None),
+        "n_track_matches": int(track_stats.get("n_matches", 0)),
+        "n_track_inliers": int(track_stats.get("n_inliers", 0)),
+        "n_pnp_corr": int(pose_stats.get("n_corr", 0)),
+        "n_pnp_inliers": int(pose_stats.get("n_pnp_inliers", 0)),
+    }
+
+    return {
+        "ok": bool(ok),
+        "track_out": track_out,
+        "pose_out": pose_out,
+        "R": None if not ok else np.asarray(pose_out["R"], dtype=np.float64),
+        "t": None if not ok else np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
+        "stats": stats,
+    }
+
