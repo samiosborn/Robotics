@@ -35,6 +35,26 @@ def check_array(x, name="x", *, ndim=None, shape=None, dtype=None, finite=False)
     return arr
 
 
+# Check object is a dict
+def check_dict(x, name="obj") -> dict:
+    if not isinstance(x, dict):
+        raise ValueError(f"{name} must be a dict")
+    return x
+
+
+# Check dict contains required keys
+def check_required_keys(d, keys, name="dict") -> dict:
+    # Check dict
+    d = check_dict(d, name=name)
+
+    # Find missing keys
+    missing = [str(k) for k in keys if k not in d]
+    if len(missing) > 0:
+        raise ValueError(f"{name} is missing required keys: {missing}")
+
+    return d
+
+
 # --- SCALAR CHECKS ---
 
 # Check finite scalar
@@ -181,6 +201,30 @@ def check_matrix_3x3(M, name="M", dtype=None, finite=True) -> np.ndarray:
     return arr
 
 
+# Check 1D integer array
+def check_int_array_1d(x, name="x", dtype=np.int64) -> np.ndarray:
+    # Check array and cast to integer dtype
+    arr = check_array(x, name=name, dtype=dtype, finite=False)
+
+    # Require 1D
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be 1D; got {arr.shape}")
+
+    return arr
+
+
+# Check 1D integer index array
+def check_index_array_1d(x, name="x", dtype=np.int64, allow_negative=True) -> np.ndarray:
+    # Check integer array
+    arr = check_int_array_1d(x, name=name, dtype=dtype)
+
+    # Optionally forbid negative indices
+    if not bool(allow_negative) and np.any(arr < 0):
+        raise ValueError(f"{name} must contain only nonnegative indices")
+
+    return arr
+
+
 # --- POINTS IN D x N FORM ---
 
 # Internal helper for point sets with fixed row count
@@ -243,6 +287,19 @@ def check_points_xy_N2plus(kps, name="kps", dtype=None, finite=True) -> np.ndarr
     return arr
 
 
+# Check (N,2) points with expected row count
+def check_points_xy_N2_rows(xy, N, name="xy", dtype=None, finite=True) -> np.ndarray:
+    # Check points
+    arr = check_points_xy_N2(xy, name=name, dtype=dtype, finite=finite)
+
+    # Check expected row count
+    N = check_int_ge0(N, name="N")
+    if arr.shape[0] != N:
+        raise ValueError(f"{name} must have shape ({N},2); got {arr.shape}")
+
+    return arr
+
+
 # Convert (N,2) or (N,2+) points to (2,N)
 def as_2xN_points(xy, name="xy", finite=True, dtype=None):
     # Check x,y point array
@@ -253,6 +310,19 @@ def as_2xN_points(xy, name="xy", finite=True, dtype=None):
 
 
 # --- PAIRS OF POINT SETS ---
+
+# Check two 1D arrays have same length
+def check_1d_pair_same_length(a, b, nameA="a", nameB="b"):
+    # Check arrays
+    a = check_array(a, name=nameA, ndim=1, finite=False)
+    b = check_array(b, name=nameB, ndim=1, finite=False)
+
+    # Require same length
+    if a.shape[0] != b.shape[0]:
+        raise ValueError(f"{nameA} and {nameB} must have same length; got {a.shape[0]} and {b.shape[0]}")
+
+    return a, b
+
 
 # Check shape-matched (2,N) point pair
 def check_2xN_pair(x1, x2, dtype=None, finite=True):
@@ -284,10 +354,10 @@ def check_3xN_pair(x1, x2, dtype=None, finite=True):
 
 # Check 3D points and 2D points match column count
 def check_3xN_2xN_cols(X, x, nameX="X", namex="x", dtype=None, finite=True):
-    # Check (3, N) points
+    # Check (3,N) points
     X = check_points_3xN(X, name=nameX, dtype=dtype, finite=finite)
 
-    # Check (2, N) points
+    # Check (2,N) points
     x = check_points_2xN(x, name=namex, dtype=dtype, finite=finite)
 
     # Require same number of columns
