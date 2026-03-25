@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_matrix_3x3, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
+from core.checks import as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
 from geometry.camera import projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
 
@@ -317,7 +317,9 @@ def triangulate_new_landmarks(
 
     valid_ray_norms = (n1 > float(eps)) & (n2 > float(eps))
     cos_parallax = np.ones((N,), dtype=np.float64)
-    cos_parallax[valid_ray_norms] = np.sum(v1[:, valid_ray_norms] * v2[:, valid_ray_norms], axis=0) / (n1[valid_ray_norms] * n2[valid_ray_norms])
+    cos_parallax[valid_ray_norms] = np.sum(v1[:, valid_ray_norms] * v2[:, valid_ray_norms], axis=0) / (
+        n1[valid_ray_norms] * n2[valid_ray_norms]
+    )
     cos_parallax = np.clip(cos_parallax, -1.0, 1.0)
 
     parallax_deg = np.degrees(np.arccos(cos_parallax))
@@ -380,4 +382,158 @@ def triangulate_new_landmarks(
         valid_mask=np.asarray(valid_mask, dtype=bool),
         stats=stats,
     )
+
+
+# Append newly triangulated landmarks into the seed map
+def append_new_landmarks_to_seed(
+    seed: dict,
+    batch: TriangulatedLandmarkBatch,
+    *,
+    keyframe_kf: int = 1,
+    current_kf: int = -1,
+    descriptor_source=None,
+) -> dict:
+    # --- Checks ---
+    # Check containers
+    seed = check_required_keys(seed, {"landmarks", "landmark_id_by_feat1"}, name="seed")
+
+    # Check triangulated batch
+    if not isinstance(batch, TriangulatedLandmarkBatch):
+        raise ValueError("batch must be a TriangulatedLandmarkBatch bundle")
+
+    # Check frame indices
+    keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
+    current_kf = int(current_kf)
+    if current_kf < -1:
+        raise ValueError(f"current_kf must be >= -1; got {current_kf}")
+
+    # Read seed landmarks
+    landmarks_raw = seed["landmarks"]
+    if not isinstance(landmarks_raw, list):
+        raise ValueError("seed['landmarks'] must be a list")
+    landmarks = list(landmarks_raw)
+
+    # Read and check lookup
+    landmark_id_by_feat1 = check_index_array_1d(
+        seed["landmark_id_by_feat1"],
+        name="seed['landmark_id_by_feat1']",
+        dtype=np.int64,
+        allow_negative=True,
+    ).copy()
+
+    # Check batch arrays
+    track_idx = check_index_array_1d(batch.track_idx, name="batch.track_idx", dtype=np.int64, allow_negative=False)
+    kf_feat_idx = check_index_array_1d(batch.kf_feat_idx, name="batch.kf_feat_idx", dtype=np.int64, allow_negative=False)
+    cur_feat_idx = check_index_array_1d(batch.cur_feat_idx, name="batch.cur_feat_idx", dtype=np.int64, allow_negative=False)
+
+    track_idx, kf_feat_idx = check_1d_pair_same_length(
+        track_idx,
+        kf_feat_idx,
+        nameA="batch.track_idx",
+        nameB="batch.kf_feat_idx",
+    )
+    track_idx, cur_feat_idx = check_1d_pair_same_length(
+        track_idx,
+        cur_feat_idx,
+        nameA="batch.track_idx",
+        nameB="batch.cur_feat_idx",
+    )
+
+    # Check 2D/3D data
+    x_kf, x_cur = check_2xN_pair(batch.x_kf, batch.x_cur, dtype=float, finite=True)
+    X_w = np.asarray(batch.X_w, dtype=np.float64)
+    if X_w.ndim != 2 or X_w.shape[0] != 3:
+        raise ValueError(f"batch.X_w must be (3,N); got {X_w.shape}")
+    if X_w.shape[1] != int(track_idx.size):
+        raise ValueError(
+            f"batch.X_w must have {track_idx.size} columns to match batch.track_idx; got {X_w.shape[1]}"
+        )
+    if x_kf.shape[1] != int(track_idx.size):
+        raise ValueError(
+            f"batch.x_kf must have {track_idx.size} columns to match batch.track_idx; got {x_kf.shape[1]}"
+        )
+
+    # Check feature-index bounds against the seed lookup
+    if track_idx.size > 0:
+        if int(kf_feat_idx.max()) >= int(landmark_id_by_feat1.size):
+            raise ValueError(
+                f"batch.kf_feat_idx contains index {int(kf_feat_idx.max())} outside seed lookup size {landmark_id_by_feat1.size}"
+            )
+
+    # Read descriptor source if supplied
+    desc = None
+    if descriptor_source is not None:
+        desc = np.asarray(getattr(descriptor_source, "desc", np.zeros((0,), dtype=np.float64)))
+
+    # Next landmark id
+    existing_ids = [int(lm["id"]) for lm in landmarks if isinstance(lm, dict) and "id" in lm]
+    next_id = 0 if len(existing_ids) == 0 else (max(existing_ids) + 1)
+
+    # Append each triangulated landmark
+    n_added = 0
+    added_ids = []
+
+    for i in range(int(track_idx.size)):
+        # Read feature indices
+        feat_kf = int(kf_feat_idx[i])
+        feat_cur = int(cur_feat_idx[i])
+
+        # Skip if the keyframe feature is already assigned
+        if int(landmark_id_by_feat1[feat_kf]) >= 0:
+            continue
+
+        # Read world point and image observations
+        X_i = np.asarray(X_w[:, i], dtype=np.float64)
+        x_kf_i = np.asarray(x_kf[:, i], dtype=np.float64)
+        x_cur_i = np.asarray(x_cur[:, i], dtype=np.float64)
+
+        # Optional descriptor copy from the current-frame feature index
+        descriptor_i = None
+        if desc.ndim >= 1 and feat_cur < int(desc.shape[0]):
+            descriptor_i = np.asarray(desc[feat_cur]).copy()
+
+        # Build observation list
+        obs = [
+            {"kf": int(keyframe_kf), "feat": feat_kf, "xy": x_kf_i},
+            {"kf": int(current_kf), "feat": feat_cur, "xy": x_cur_i},
+        ]
+
+        # Build landmark dict in the same style as seed.py
+        lm_id = int(next_id)
+        landmark = {
+            "id": lm_id,
+            "X_w": X_i,
+            "obs": obs,
+            "descriptor": descriptor_i,
+            "quality": {
+                "reproj0_px": None,
+                "reproj1_px": None,
+            },
+        }
+
+        # Append to the landmark list
+        landmarks.append(landmark)
+
+        # Update the keyframe feature lookup
+        landmark_id_by_feat1[feat_kf] = lm_id
+
+        # Advance counters
+        added_ids.append(lm_id)
+        next_id += 1
+        n_added += 1
+
+    # Pack back into the seed
+    seed["landmarks"] = landmarks
+    seed["landmark_id_by_feat1"] = landmark_id_by_feat1
+
+    # Store append stats for debugging
+    seed["last_append_stats"] = {
+        "n_in_batch": int(track_idx.size),
+        "n_added": int(n_added),
+        "added_ids": np.asarray(added_ids, dtype=np.int64),
+        "keyframe_kf": int(keyframe_kf),
+        "current_kf": int(current_kf),
+    }
+
+    return seed
 
