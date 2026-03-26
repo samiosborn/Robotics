@@ -47,6 +47,19 @@ class TriangulatedLandmarkBatch:
     stats: dict
 
 
+# Bundle for one map-growth step
+@dataclass(frozen=True)
+class MapGrowthResult:
+    # Updated seed after attempting map growth
+    seed: dict
+    # Candidate 2D-2D tracks considered for triangulation
+    candidates: NewLandmarkCandidates
+    # Triangulated batch after geometric filtering
+    batch: TriangulatedLandmarkBatch
+    # Step-level summary stats
+    stats: dict
+
+
 # Build candidate 2D-2D correspondences for new landmark triangulation
 def build_new_landmark_candidates(seed: dict, track_out: dict) -> NewLandmarkCandidates:
     # --- Checks ---
@@ -332,7 +345,6 @@ def triangulate_new_landmarks(
     # Optional reprojection gate
     if max_reproj_error_px is None:
         reproj_mask = np.ones((N,), dtype=bool)
-        reproj_err_sq = np.full((N,), np.nan, dtype=np.float64)
     else:
         err_kf_sq = np.asarray(reprojection_errors_sq(K_kf, R_kf, t_kf, X_w, x_kf), dtype=np.float64).reshape(-1)
         err_cur_sq = np.asarray(reprojection_errors_sq(K_cur, R_cur, t_cur, X_w, x_cur), dtype=np.float64).reshape(-1)
@@ -536,4 +548,83 @@ def append_new_landmarks_to_seed(
     }
 
     return seed
+
+
+# Run one complete map-growth step from a tracked frame
+def grow_map_from_tracking_result(
+    seed: dict,
+    track_out: dict,
+    K_kf,
+    K_cur,
+    R_kf,
+    t_kf,
+    R_cur,
+    t_cur,
+    *,
+    keyframe_kf: int = 1,
+    current_kf: int = -1,
+    descriptor_source=None,
+    min_parallax_deg: float = 1.0,
+    max_depth_ratio: float = 200.0,
+    max_reproj_error_px: float | None = 3.0,
+    eps: float = 1e-12,
+) -> MapGrowthResult:
+    # --- Checks ---
+    # Check containers
+    seed = check_required_keys(seed, {"landmarks", "landmark_id_by_feat1"}, name="seed")
+    track_out = check_dict(track_out, name="track_out")
+
+    # Use current-frame features as the default descriptor source when available
+    if descriptor_source is None and "cur_feats" in track_out:
+        descriptor_source = track_out["cur_feats"]
+
+    # Build candidate 2D-2D correspondences that are not already mapped
+    candidates = build_new_landmark_candidates(seed, track_out)
+
+    # Triangulate and filter the candidate set
+    batch = triangulate_new_landmarks(
+        K_kf,
+        K_cur,
+        R_kf,
+        t_kf,
+        R_cur,
+        t_cur,
+        candidates,
+        min_parallax_deg=min_parallax_deg,
+        max_depth_ratio=max_depth_ratio,
+        max_reproj_error_px=max_reproj_error_px,
+        eps=eps,
+    )
+
+    # Append valid landmarks into the seed
+    seed_before = int(len(seed["landmarks"]))
+    seed = append_new_landmarks_to_seed(
+        seed,
+        batch,
+        keyframe_kf=keyframe_kf,
+        current_kf=current_kf,
+        descriptor_source=descriptor_source,
+    )
+    seed_after = int(len(seed["landmarks"]))
+
+    # Read append stats
+    append_stats = seed.get("last_append_stats", {})
+    n_added = int(append_stats.get("n_added", max(seed_after - seed_before, 0)))
+
+    # Pack step-level stats
+    stats = {
+        "n_candidates": int(candidates.track_idx.size),
+        "n_triangulated_valid": int(batch.stats.get("n_valid", 0)),
+        "n_added": int(n_added),
+        "seed_landmarks_before": int(seed_before),
+        "seed_landmarks_after": int(seed_after),
+        "reason": batch.stats.get("reason", None),
+    }
+
+    return MapGrowthResult(
+        seed=seed,
+        candidates=candidates,
+        batch=batch,
+        stats=stats,
+    )
 
