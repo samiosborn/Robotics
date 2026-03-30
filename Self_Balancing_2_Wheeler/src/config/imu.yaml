@@ -4,7 +4,7 @@
 # I2C bus index on Raspberry Pi
 i2c_bus: 1
 # Device I2C address for ICM-20948
-i2c_address: 0x68
+i2c_address: 0x69
 # Bank selector register (BANK_SEL)
 reg_bank_sel: 0x7F
 # Bank containing accel/gyro output registers
