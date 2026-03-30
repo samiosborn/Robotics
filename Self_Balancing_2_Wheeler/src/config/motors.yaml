@@ -14,9 +14,9 @@ encoder:
       channel_b: 27
     right: 
       # GPIO
-      channel_a: 23
+      channel_a: 22
       # GPIO
-      channel_b: 24
+      channel_b: 23
 
   # --- Gearbox ---
   # Motor shaft turns per wheel shaft turns
