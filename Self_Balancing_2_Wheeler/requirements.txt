@@ -1,2 +1,5 @@
-pyyaml
+# requirements.txt
+PyYAML
 smbus2
+RPi.GPIO
+sparkfun-qwiic-scmd
