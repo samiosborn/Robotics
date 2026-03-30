@@ -5,12 +5,13 @@ import time
 from collections import deque
 import RPi.GPIO as GPIO
 
-class Encoder(): 
+
+class Encoder():
     def __init__(self, motor_yaml_config_path):
         # Import YAML config
-        with open(motor_yaml_config_path, 'r') as f: 
+        with open(motor_yaml_config_path, 'r') as f:
             cfg = yaml.safe_load(f)["encoder"]
-        
+
         # --- Load from YAML ---
         # Pulses per revolution (per channel)
         self._encoder_ppr_channel = cfg["encoder_ppr_channel"]
@@ -34,14 +35,14 @@ class Encoder():
         # --- State Variables ---
         # Transition lookup table
         self._transition_table = {
-            (0,1): +1,
-            (1,3): +1,
-            (3,2): +1,
-            (2,0): +1,
-            (0,2): -1,
-            (2,3): -1,
-            (3,1): -1,
-            (1,0): -1,
+            (0, 1): +1,
+            (1, 3): +1,
+            (3, 2): +1,
+            (2, 0): +1,
+            (0, 2): -1,
+            (2, 3): -1,
+            (3, 1): -1,
+            (1, 0): -1,
         }
 
         # --- Derivied Constants ---
@@ -53,6 +54,8 @@ class Encoder():
         self._wheel_cpr = self._encoder_cpr_raw * self._gear_ratio
         # Radians per count
         self._rad_per_count = 2 * math.pi / self._wheel_cpr
+        # Zero-velocity timeout (s)
+        self._zero_timeout_s = 0.1
 
         # --- Configure Encoder Pins ---
         # Stop warnings
@@ -85,12 +88,15 @@ class Encoder():
         self._velocity_right_rad_s = 0.0
         self._velocity_left_m_s = 0.0
         self._velocity_right_m_s = 0.0
+        # Last valid tick time
+        self._last_tick_time_left = None
+        self._last_tick_time_right = None
 
     # --- Private Methods ---
-    # Read current levels 
-    def _read_current_levels(self, wheel_side): 
+    # Read current levels
+    def _read_current_levels(self, wheel_side):
         # Read GPIO
-        if wheel_side == "left": 
+        if wheel_side == "left":
             a = GPIO.input(self._left_a_pin)
             b = GPIO.input(self._left_b_pin)
         elif wheel_side == "right":
@@ -99,6 +105,7 @@ class Encoder():
         # Current state
         current_state = (a << 1) | b
         return current_state
+
     # Form quadrature state
     def _quadrature_state(self, current_state, wheel_side):
         if wheel_side == "left":
@@ -106,6 +113,7 @@ class Encoder():
         elif wheel_side == "right":
             previous_state = self._prev_state_right
         return current_state, previous_state
+
     # Check transition direction
     def _transition_direction(self, current_state, previous_state, wheel_side):
         delta = self._transition_table.get((previous_state, current_state), 0)
@@ -115,56 +123,86 @@ class Encoder():
         elif wheel_side == "right":
             self._prev_state_right = current_state
         return delta
+
     # Update count
     def _update_count(self, delta, wheel_side):
-        if wheel_side == "left": 
+        if wheel_side == "left":
             self._count_left += delta
         elif wheel_side == "right":
             self._count_right += delta
         pass
+
     # Append to tick timestamp buffer
-    def _append_tick_times(self, wheel_side):
+    def _append_tick_times(self, wheel_side, delta):
+        # Ignore invalid transitions
+        if delta == 0:
+            return
+
         timestamp = time.monotonic()
+
         if wheel_side == "left":
-            self._tick_times_left.append(timestamp)
+            self._tick_times_left.append((timestamp, delta))
+            self._last_tick_time_left = timestamp
         elif wheel_side == "right":
-            self._tick_times_right.append(timestamp)
+            self._tick_times_right.append((timestamp, delta))
+            self._last_tick_time_right = timestamp
         pass
+
     # Compute velocity
     def _compute_velocity(self, tick_buffer, previous_velocity_rad_s):
         # Number of timestamps
         N = len(tick_buffer)
         # Buffer too small
         if N < 2:
-            return 0, 0
+            return 0.0, 0.0
         # Compute dt
-        dt = tick_buffer[N-1] - tick_buffer[0] 
-        # Counts per second
-        counts_per_sec = (N-1) / dt
+        dt = tick_buffer[N - 1][0] - tick_buffer[0][0]
+        # Degenerate dt
+        if dt <= 0.0:
+            vel_rad_s = previous_velocity_rad_s
+            vel_m_s = vel_rad_s * self._wheel_radius_m
+            return vel_rad_s, vel_m_s
+        # Signed counts per second
+        signed_counts = sum(delta for _, delta in tick_buffer)
+        counts_per_sec = signed_counts / dt
         # Angular velocity (rad/s)
-        current_velocity_rad_s = counts_per_sec * self._rad_per_count 
+        current_velocity_rad_s = counts_per_sec * self._rad_per_count
         # Low-pass filter
         vel_rad_s = self._alpha * current_velocity_rad_s + (1 - self._alpha) * previous_velocity_rad_s
         # Linear velocity (m/s)
         vel_m_s = vel_rad_s * self._wheel_radius_m
         return vel_rad_s, vel_m_s
+
     # Update velocity
     def _update_velocity(self, wheel_side):
         if wheel_side == "left":
             vel_rad_s, vel_m_s = self._compute_velocity(
-                self._tick_times_left, 
+                self._tick_times_left,
                 self._velocity_left_rad_s)
             # Update velocity
             self._velocity_left_rad_s = vel_rad_s
             self._velocity_left_m_s = vel_m_s
         elif wheel_side == "right":
             vel_rad_s, vel_m_s = self._compute_velocity(
-                self._tick_times_right, 
+                self._tick_times_right,
                 self._velocity_right_rad_s)
             # Update velocity
             self._velocity_right_rad_s = vel_rad_s
             self._velocity_right_m_s = vel_m_s
         pass
+
+    # Apply zero-velocity timeout
+    def _apply_zero_timeout(self):
+        now = time.monotonic()
+
+        if self._last_tick_time_left is None or (now - self._last_tick_time_left) > self._zero_timeout_s:
+            self._velocity_left_rad_s = 0.0
+            self._velocity_left_m_s = 0.0
+
+        if self._last_tick_time_right is None or (now - self._last_tick_time_right) > self._zero_timeout_s:
+            self._velocity_right_rad_s = 0.0
+            self._velocity_right_m_s = 0.0
+
     # Event callback
     def _event_callback(self, wheel_side):
         # Read current levels
@@ -173,16 +211,21 @@ class Encoder():
         current_state, previous_state = self._quadrature_state(current_state, wheel_side)
         # Check transition direction
         delta = self._transition_direction(current_state, previous_state, wheel_side)
+        # Ignore invalid transitions
+        if delta == 0:
+            return
         # Update count
         self._update_count(delta, wheel_side)
         # Append to tick timestamp buffer
-        self._append_tick_times(wheel_side) 
+        self._append_tick_times(wheel_side, delta)
         # Update velocity
         self._update_velocity(wheel_side)
         pass
+
     # Left Callback
     def _left_callback(self, channel):
         self._event_callback("left")
+
     # Right callback
     def _right_callback(self, channel):
         self._event_callback("right")
@@ -191,22 +234,33 @@ class Encoder():
     # Counts
     def get_counts(self):
         return self._count_left, self._count_right
+
     # Get angular velocity (rad/s)
     def get_angular_velocity(self):
+        self._apply_zero_timeout()
         return self._velocity_left_rad_s, self._velocity_right_rad_s
+
     # Get linear velocity (m/s)
     def get_linear_velocity(self):
+        self._apply_zero_timeout()
         return self._velocity_left_m_s, self._velocity_right_m_s
+
     # Reset counts
     def reset_counts(self):
         self._count_left = 0
         self._count_right = 0
+
     # Reset velocities
     def reset_velocities(self):
         self._velocity_left_rad_s = 0.0
         self._velocity_left_m_s = 0.0
         self._velocity_right_rad_s = 0.0
         self._velocity_right_m_s = 0.0
+        self._tick_times_left.clear()
+        self._tick_times_right.clear()
+        self._last_tick_time_left = None
+        self._last_tick_time_right = None
+
     # Cleanup GPIO
     def cleanup(self):
         GPIO.remove_event_detect(self._left_a_pin)
