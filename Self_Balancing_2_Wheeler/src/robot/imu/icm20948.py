@@ -4,6 +4,7 @@ import yaml
 import time
 import smbus2
 
+
 class ICM20948:
     def __init__(self, imu_yaml_config_path):
         # --- Import Configs ---
@@ -38,12 +39,24 @@ class ICM20948:
         self._accel_registers = cfg["accel_registers"]
         # Axis map: dict mapping IMU axes to robot axes
         self._axis_map = cfg["axis_map"]
+        # Desired sample rate from YAML (stored for later use)
+        self._sample_rate_hz = cfg["sample_rate_hz"]
+        # Desired low-pass filter cutoff from YAML (stored for reference)
+        self._dlpf_cutoff_hz = cfg["dlpf_cutoff_hz"]
         # Accel sensitivity
         self._accel_sens = constants.ACCEL_SENSITIVITY_LSB_PER_G[self._accel_cfg["fs_sel"]]
         # Gyro sensitivity
         self._gyro_sens = constants.GYRO_SENSITIVITY_LSB_PER_DPS[self._gyro_cfg["fs_sel"]]
         # Gravity
         self._gravity = constants.GRAVITY_M_S2
+
+        # --- Useful IMU Registers / Expected Values ---
+        # WHO_AM_I register in bank 0
+        self._who_am_i_reg = 0x00
+        # Expected ICM-20948 identity value
+        self._expected_who_am_i = 0xEA
+        # Power management register in bank 0
+        self._pwr_mgmt_1_reg = 0x06
 
         # --- Instance Variables ---
         # Bank selector (bank is either 0, 1, 2, or 3)
@@ -57,6 +70,10 @@ class ICM20948:
         # --- Configure Hardware ---
         # Create and open and store the bus object
         self._bus = smbus2.SMBus(self._i2c_bus)
+        # Wake IMU
+        self._wake()
+        # Check identity
+        self._check_who_am_i()
         # Configure accel/gyro
         self._configure_gyro()
         self._configure_accel()
@@ -66,24 +83,48 @@ class ICM20948:
     # Register write of current bank
     def _write_register(self, reg, value):
         return self._bus.write_byte_data(self._i2c_address, reg, value)
+
     # Read register of current bank
     def _read_register(self, reg):
         return self._bus.read_byte_data(self._i2c_address, reg)
+
     # Set register bank
     def _set_bank(self, bank):
         value = bank << 4
         self._current_bank = bank
         return self._write_register(self._reg_bank_sel, value)
+
     # Write to a bank's register
     def _write_bank_reg(self, bank, reg, value):
         if self._current_bank != bank:
             self._set_bank(bank)
         self._write_register(reg, value)
+
     # Read from a bank's register
     def _read_bank_reg(self, bank, reg):
         if self._current_bank != bank:
             self._set_bank(bank)
         return self._read_register(reg)
+
+
+    # --- Device Bring-Up ---
+    # Wake IMU from sleep
+    def _wake(self):
+        # USER BANK 0, PWR_MGMT_1
+        # Set CLKSEL = auto select best available clock, clear sleep
+        self._write_bank_reg(0, self._pwr_mgmt_1_reg, 0x01)
+        # Let sensor stabilise
+        time.sleep(0.05)
+
+    # Read and validate WHO_AM_I
+    def _check_who_am_i(self):
+        who_am_i = self._read_bank_reg(0, self._who_am_i_reg)
+        if who_am_i != self._expected_who_am_i:
+            raise RuntimeError(
+                f"ICM20948 WHO_AM_I mismatch: expected 0x{self._expected_who_am_i:02X}, "
+                f"got 0x{who_am_i:02X} at I2C address 0x{self._i2c_address:02X}"
+            )
+
 
     # --- Build Config Value Bytes ---
     # Builds GYRO_CONFIG_1 value
@@ -97,6 +138,7 @@ class ICM20948:
             (cfg["fchoice"] & 0b1)
         )
         return value
+
     # Builds ACCEL_CONFIG value
     def _pack_accel_config(self):
         reserved = 0
@@ -108,7 +150,7 @@ class ICM20948:
             (cfg["fchoice"] & 0b1)
         )
         return value
-    
+
     # --- Methods to Configure Accel / Gyro ---
     # Configure Gyroscope
     def _configure_gyro(self):
@@ -117,6 +159,7 @@ class ICM20948:
             self._gyro_cfg_address,
             self._pack_gyro_config()
         )
+
     # Configure Accelerometer
     def _configure_accel(self):
         self._write_bank_reg(
@@ -125,26 +168,29 @@ class ICM20948:
             self._pack_accel_config()
         )
 
+
     # --- Methods to Read Accel / Gyro ---
     # Read IMU registers
-    def _read_sensor_registers(self, registers): 
+    def _read_sensor_registers(self, registers):
         return {
-        "x_h": self._read_register(registers["x_h"]),
-        "x_l": self._read_register(registers["x_l"]),
-        "y_h": self._read_register(registers["y_h"]),
-        "y_l": self._read_register(registers["y_l"]),
-        "z_h": self._read_register(registers["z_h"]),
-        "z_l": self._read_register(registers["z_l"]),
+            "x_h": self._read_bank_reg(self._sensor_values_bank, registers["x_h"]),
+            "x_l": self._read_bank_reg(self._sensor_values_bank, registers["x_l"]),
+            "y_h": self._read_bank_reg(self._sensor_values_bank, registers["y_h"]),
+            "y_l": self._read_bank_reg(self._sensor_values_bank, registers["y_l"]),
+            "z_h": self._read_bank_reg(self._sensor_values_bank, registers["z_h"]),
+            "z_l": self._read_bank_reg(self._sensor_values_bank, registers["z_l"]),
         }
+
     # Combine high and low bits and sign-extend
     def _combine_h_l_as_signed(self, high_byte, low_byte):
         # Combine high and low bytes
-        combined = (high_byte <<8 | low_byte)
+        combined = (high_byte << 8) | low_byte
         # If bit 15 is 1, then it's actually negative
         if combined & 0x8000:
             # Sign-extend
             combined = combined - 0x10000
         return combined
+
     # Combine all axis H/L pairs in a register dictionary
     def _combine_axis_dict(self, raw_dict_h_l):
         return {
@@ -152,13 +198,15 @@ class ICM20948:
             "y": self._combine_h_l_as_signed(raw_dict_h_l["y_h"], raw_dict_h_l["y_l"]),
             "z": self._combine_h_l_as_signed(raw_dict_h_l["z_h"], raw_dict_h_l["z_l"]),
         }
+
     # Apply sensitivity to dict
-    def _sensitivity_for_dict(self, raw_dict, sensitivity): 
+    def _sensitivity_for_dict(self, raw_dict, sensitivity):
         return {
             "x": raw_dict["x"] / sensitivity,
             "y": raw_dict["y"] / sensitivity,
             "z": raw_dict["z"] / sensitivity,
         }
+
     # Apply scale factor to dict
     def _apply_scale_factor(self, sensitised_dict, scale_factor):
         return {
@@ -166,49 +214,51 @@ class ICM20948:
             "y": sensitised_dict["y"] * scale_factor,
             "z": sensitised_dict["z"] * scale_factor,
         }
+
     # Unbias a dict of readings
-    def _unbias_dict(self, biased_dict, bias): 
+    def _unbias_dict(self, biased_dict, bias):
         return {
             "x": biased_dict["x"] - bias[0],
             "y": biased_dict["y"] - bias[1],
             "z": biased_dict["z"] - bias[2],
         }
+
     # Axis remapping for dict
     def _axis_remapping(self, unbiased_dict):
         # Dict indexing
         mapped = {
-            "roll": unbiased_dict[self._axis_map["roll"]], 
+            "roll": unbiased_dict[self._axis_map["roll"]],
             "pitch": unbiased_dict[self._axis_map["pitch"]],
-            "yaw": unbiased_dict[self._axis_map["yaw"]],  
+            "yaw": unbiased_dict[self._axis_map["yaw"]],
         }
         # Pitch inversion
-        if self._axis_map.get("invert_pitch", False): 
+        if self._axis_map.get("invert_pitch", False):
             mapped["pitch"] = -mapped["pitch"]
         return mapped
+
     # Private read SI units method (before bias removal)
-    def _read_raw_si(self): 
-        # Switch to correct bank for sensor values
-        self._set_bank(self._sensor_values_bank)
+    def _read_raw_si(self):
         # Read raw accel and gyro
         accel_raw_separate = self._read_sensor_registers(self._accel_registers)
         gyro_raw_separate = self._read_sensor_registers(self._gyro_registers)
         # Combine high and low bytes into signed 16-bit values
         accel_raw = self._combine_axis_dict(accel_raw_separate)
-        gyro_raw  = self._combine_axis_dict(gyro_raw_separate)
+        gyro_raw = self._combine_axis_dict(gyro_raw_separate)
         # Convert to SI units
         acc_g = self._sensitivity_for_dict(accel_raw, self._accel_sens)
         acc_ms2 = self._apply_scale_factor(acc_g, self._gravity)
         gyro_dps = self._sensitivity_for_dict(gyro_raw, self._gyro_sens)
         gyro_rad_s = self._apply_scale_factor(gyro_dps, math.pi / 180.0)
         return {
-            "accel": acc_ms2, 
-            "gyro": gyro_rad_s,  
+            "accel": acc_ms2,
+            "gyro": gyro_rad_s,
         }
+
 
     # --- Public API ---
     # Read IMU
     def read(self):
-        # Biased SI units read 
+        # Biased SI units read
         biased_read = self._read_raw_si()
         acc_ms2 = biased_read["accel"]
         gyro_rad_s = biased_read["gyro"]
@@ -225,11 +275,17 @@ class ICM20948:
             "gyro": gyro,
             "timestamp": timestamp,
         }
+
     # Calibrate IMU
     def calibrate(self, num_calib_samples):
+        # Check
+        if num_calib_samples <= 0:
+            raise ValueError("num_calib_samples must be positive")
+
         # Initialise
         ax_bias = ay_bias = az_bias = 0.0
         gx_bias = gy_bias = gz_bias = 0.0
+
         # Loop
         for _ in range(num_calib_samples):
             # Read IMU in SI
@@ -245,6 +301,7 @@ class ICM20948:
             gz_bias += gyro["z"]
             # Wait (max 500Hz)
             time.sleep(0.002)
+
         # Average Error
         ax_avg = ax_bias / num_calib_samples
         ay_avg = ay_bias / num_calib_samples
@@ -252,14 +309,21 @@ class ICM20948:
         gx_avg = gx_bias / num_calib_samples
         gy_avg = gy_bias / num_calib_samples
         gz_avg = gz_bias / num_calib_samples
+
         # Gyro bias
         self._bias_gyro = [gx_avg, gy_avg, gz_avg]
+
         # Expected acceleration vector when upright (m/s^2)
         expected_acc = [0.0, 0.0, self._gravity]
+
         # Accel bias considering calibration offsets
         self._bias_accel = [
             ax_avg - expected_acc[0],
             ay_avg - expected_acc[1],
             az_avg - expected_acc[2],
         ]
-        pass
+
+    # Close I2C bus
+    def close(self):
+        if hasattr(self, "_bus") and self._bus is not None:
+            self._bus.close()
