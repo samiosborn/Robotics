@@ -7,11 +7,12 @@ from typing import Any
 
 import numpy as np
 
-from core.checks import as_2xN_points, check_choice, check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_mask_bool_1d, check_matrix_3x3, check_points_xy_N2plus, check_positive
+from core.checks import as_2xN_points, check_choice, check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_mask_bool_1d, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from features.matching import match_brief_hamming_with_scale_gate, match_patches_ncc
 from features.pipeline import FrameFeatures, detect_and_describe_image
 from geometry.pnp import build_pnp_correspondences, estimate_pose_pnp_ransac
 from slam.bootstrap import bootstrap_two_view, planar_check
+from slam.map_update import grow_map_from_tracking_result
 from slam.seed import attach_feature_bookkeeping_to_seed
 from slam.two_view_consensus import estimate_fundamental_consensus, estimate_homography_consensus, recover_pose_from_fundamental_consensus, select_two_view_mask
 
@@ -53,6 +54,23 @@ def _align_bool_mask(mask, N: int) -> np.ndarray:
     out[:n] = np.asarray(mask[:n], dtype=bool)
 
     return out
+
+
+# Read the frozen keyframe pose stored inside the seed
+def _seed_keyframe_pose(seed: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    # Check seed contains the keyframe pose
+    seed = check_required_keys(seed, {"T_WC1"}, name="seed")
+
+    # Read stored pose tuple
+    T_WC1 = seed["T_WC1"]
+    if not isinstance(T_WC1, (tuple, list)) or len(T_WC1) != 2:
+        raise ValueError("seed['T_WC1'] must be a length-2 tuple/list (R, t)")
+
+    # Check pose blocks
+    R = check_matrix_3x3(T_WC1[0], name="seed['T_WC1'][0]", dtype=float, finite=False)
+    t = check_vector_3(T_WC1[1], name="seed['T_WC1'][1]", dtype=float, finite=False)
+
+    return R, t
 
 
 # Match two feature bundles while preserving original feature indices
@@ -658,7 +676,7 @@ def estimate_pose_from_seed(
     }
 
 
-# Process one new frame against the current seed map
+# Process one new frame against the current seed map and grow the map if pose estimation succeeds
 def process_frame_against_seed(
     K: np.ndarray,
     seed: dict[str, Any],
@@ -690,6 +708,12 @@ def process_frame_against_seed(
     refine_damping: float = 1e-6,
     refine_step_tol: float = 1e-9,
     refine_improvement_tol: float = 1e-9,
+    keyframe_kf: int = 1,
+    current_kf: int = -1,
+    grow_map: bool = True,
+    min_parallax_deg: float = 1.0,
+    max_depth_ratio: float = 200.0,
+    max_reproj_error_px: float | None = 3.0,
 ) -> dict[str, Any]:
     # --- Checks ---
     # Check intrinsics
@@ -702,6 +726,17 @@ def process_frame_against_seed(
         raise ValueError("feature_cfg must be a dict")
     if not isinstance(F_cfg, dict):
         raise ValueError("F_cfg must be a dict")
+
+    # Check map-growth controls
+    keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
+    current_kf = int(current_kf)
+    if current_kf < -1:
+        raise ValueError(f"current_kf must be >= -1; got {current_kf}")
+
+    min_parallax_deg = check_positive(min_parallax_deg, name="min_parallax_deg", eps=0.0)
+    max_depth_ratio = check_positive(max_depth_ratio, name="max_depth_ratio", eps=0.0)
+    if max_reproj_error_px is not None:
+        max_reproj_error_px = check_positive(max_reproj_error_px, name="max_reproj_error_px", eps=0.0)
 
     # Track current frame against the reference keyframe
     track_out = track_against_keyframe(
@@ -732,11 +767,16 @@ def process_frame_against_seed(
             "n_track_inliers": 0,
             "n_pnp_corr": 0,
             "n_pnp_inliers": 0,
+            "n_new_candidates": 0,
+            "n_new_triangulated": 0,
+            "n_new_added": 0,
         }
         return {
             "ok": False,
+            "seed": seed,
             "track_out": track_out,
             "pose_out": None,
+            "map_growth_out": None,
             "R": None,
             "t": None,
             "stats": stats,
@@ -768,22 +808,89 @@ def process_frame_against_seed(
     pose_stats = pose_out.get("stats", {}) if isinstance(pose_out, dict) else {}
     ok = bool(pose_out.get("ok", False)) if isinstance(pose_out, dict) else False
 
+    # Stop if pose estimation failed
+    if not ok:
+        stats = {
+            "ok": False,
+            "reason": pose_stats.get("reason", "pnp_failed"),
+            "n_track_matches": int(track_stats.get("n_matches", 0)),
+            "n_track_inliers": int(track_stats.get("n_inliers", 0)),
+            "n_pnp_corr": int(pose_stats.get("n_corr", 0)),
+            "n_pnp_inliers": int(pose_stats.get("n_pnp_inliers", 0)),
+            "n_new_candidates": 0,
+            "n_new_triangulated": 0,
+            "n_new_added": 0,
+        }
+        return {
+            "ok": False,
+            "seed": seed,
+            "track_out": track_out,
+            "pose_out": pose_out,
+            "map_growth_out": None,
+            "R": None,
+            "t": None,
+            "stats": stats,
+        }
+
+    # Default map-growth output
+    seed_out = seed
+    map_growth_out = None
+
+    # Grow the map only after a valid pose has been recovered
+    if bool(grow_map):
+        # Read the frozen keyframe pose from the seed
+        R_kf, t_kf = _seed_keyframe_pose(seed)
+
+        # Read the current pose
+        R_cur = np.asarray(pose_out["R"], dtype=np.float64)
+        t_cur = np.asarray(pose_out["t"], dtype=np.float64).reshape(3)
+
+        # Run one map-growth step from the tracked frame
+        map_growth_out = grow_map_from_tracking_result(
+            seed,
+            track_out,
+            K,
+            K,
+            R_kf,
+            t_kf,
+            R_cur,
+            t_cur,
+            keyframe_kf=keyframe_kf,
+            current_kf=current_kf,
+            descriptor_source=track_out.get("cur_feats", None),
+            min_parallax_deg=min_parallax_deg,
+            max_depth_ratio=max_depth_ratio,
+            max_reproj_error_px=max_reproj_error_px,
+            eps=eps,
+        )
+
+        # Read the updated seed
+        seed_out = map_growth_out.seed
+
+    # Read map-growth stats
+    map_stats = map_growth_out.stats if map_growth_out is not None else {}
+
     # Pack a single frontend result
     stats = {
-        "ok": bool(ok),
-        "reason": pose_stats.get("reason", None),
+        "ok": True,
+        "reason": None,
         "n_track_matches": int(track_stats.get("n_matches", 0)),
         "n_track_inliers": int(track_stats.get("n_inliers", 0)),
         "n_pnp_corr": int(pose_stats.get("n_corr", 0)),
         "n_pnp_inliers": int(pose_stats.get("n_pnp_inliers", 0)),
+        "n_new_candidates": int(map_stats.get("n_candidates", 0)),
+        "n_new_triangulated": int(map_stats.get("n_triangulated_valid", 0)),
+        "n_new_added": int(map_stats.get("n_added", 0)),
+        "seed_landmarks_after": int(map_stats.get("seed_landmarks_after", len(seed_out.get("landmarks", [])))),
     }
 
     return {
-        "ok": bool(ok),
+        "ok": True,
+        "seed": seed_out,
         "track_out": track_out,
         "pose_out": pose_out,
-        "R": None if not ok else np.asarray(pose_out["R"], dtype=np.float64),
-        "t": None if not ok else np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
+        "map_growth_out": map_growth_out,
+        "R": np.asarray(pose_out["R"], dtype=np.float64),
+        "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
         "stats": stats,
     }
-
