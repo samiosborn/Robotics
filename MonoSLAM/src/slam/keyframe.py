@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import check_int_ge0, check_matrix_3x3, check_positive, check_required_keys, check_vector_3
+from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_center
 from geometry.rotation import angle_between_rotmats
 
@@ -37,6 +37,67 @@ def _seed_keyframe_pose(seed: dict) -> tuple[np.ndarray, np.ndarray]:
     t_kf = check_vector_3(T_WC1[1], name="seed['T_WC1'][1]", dtype=float, finite=False)
 
     return np.asarray(R_kf, dtype=np.float64), np.asarray(t_kf, dtype=np.float64).reshape(3,)
+
+
+# Build the feature-index to landmark-id lookup for a given keyframe id
+def _build_landmark_id_by_feat_for_kf(seed: dict, n_feat: int, kf_index: int) -> np.ndarray:
+    # Check seed contains landmarks
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
+
+    # Check sizes
+    n_feat = check_int_ge0(n_feat, name="n_feat")
+    kf_index = check_int_ge0(kf_index, name="kf_index")
+
+    # Read landmarks
+    landmarks = seed["landmarks"]
+    if not isinstance(landmarks, list):
+        raise ValueError("seed['landmarks'] must be a list")
+
+    # Initialise lookup as unmapped
+    landmark_id_by_feat = np.full((n_feat,), -1, dtype=np.int64)
+
+    # Scan all landmarks for observations in this keyframe
+    for lm in landmarks:
+        # Skip malformed landmarks
+        if not isinstance(lm, dict):
+            continue
+        if "id" not in lm:
+            continue
+
+        # Read landmark id
+        lm_id = int(lm["id"])
+
+        # Read observation list
+        obs = lm.get("obs", None)
+        if not isinstance(obs, list):
+            continue
+
+        # Scan observations for this keyframe
+        for ob in obs:
+            # Skip malformed observations
+            if not isinstance(ob, dict):
+                continue
+
+            # Keep only observations from the requested keyframe
+            if int(ob.get("kf", -1)) != kf_index:
+                continue
+
+            # Read feature index
+            feat = int(ob.get("feat", -1))
+            if feat < 0 or feat >= n_feat:
+                continue
+
+            # Reject conflicting assignments
+            prev = int(landmark_id_by_feat[feat])
+            if prev >= 0 and prev != lm_id:
+                raise ValueError(
+                    f"Feature {feat} in keyframe {kf_index} is assigned to multiple landmarks: {prev} and {lm_id}"
+                )
+
+            # Store the landmark id for this feature
+            landmark_id_by_feat[feat] = lm_id
+
+    return landmark_id_by_feat
 
 
 # Decide whether the current frame should become a new keyframe
@@ -193,3 +254,59 @@ def should_make_keyframe(
         reason=None,
         stats=stats,
     )
+
+
+# Promote the current processed frame to become the new reference keyframe
+def promote_frame_to_keyframe(
+    seed: dict,
+    cur_feats,
+    R_cur,
+    t_cur,
+    *,
+    current_kf: int,
+) -> dict:
+    # --- Checks ---
+    # Check required seed structure
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
+
+    # Check frame index
+    current_kf = check_int_ge0(current_kf, name="current_kf")
+
+    # Check pose
+    R_cur = check_matrix_3x3(R_cur, name="R_cur", dtype=float, finite=False)
+    t_cur = check_vector_3(t_cur, name="t_cur", dtype=float, finite=False)
+
+    # Check current feature bundle has keypoints
+    if not hasattr(cur_feats, "kps_xy"):
+        raise ValueError("cur_feats must have attribute 'kps_xy'")
+
+    # Read current keypoints
+    kps_xy = check_points_xy_N2plus(cur_feats.kps_xy, name="cur_feats.kps_xy", dtype=float, finite=True)
+    n_feat = int(kps_xy.shape[0])
+
+    # Build a fresh feature-to-landmark lookup for this new keyframe
+    landmark_id_by_feat1 = _build_landmark_id_by_feat_for_kf(seed, n_feat, current_kf)
+
+    # Store the new keyframe pose
+    seed["T_WC1"] = (
+        np.asarray(R_cur, dtype=np.float64),
+        np.asarray(t_cur, dtype=np.float64).reshape(3,),
+    )
+
+    # Store the new reference feature bundle
+    seed["feats1"] = cur_feats
+
+    # Store the new keyframe feature-to-landmark lookup
+    seed["landmark_id_by_feat1"] = landmark_id_by_feat1
+
+    # Store the current keyframe id for bookkeeping
+    seed["keyframe_kf"] = int(current_kf)
+
+    # Store promotion stats for debugging
+    seed["last_keyframe_promotion"] = {
+        "current_kf": int(current_kf),
+        "n_feat": int(n_feat),
+        "n_linked_landmarks": int(np.sum(landmark_id_by_feat1 >= 0)),
+    }
+
+    return seed
