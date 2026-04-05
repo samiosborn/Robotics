@@ -22,6 +22,19 @@ class KeyframeDecision:
     stats: dict
 
 
+# Keyframe update result
+@dataclass(frozen=True)
+class KeyframeUpdateResult:
+    # Updated seed after the keyframe decision
+    seed: dict
+    # Decision bundle
+    decision: KeyframeDecision
+    # Whether promotion actually happened
+    promoted: bool
+    # Step-level stats
+    stats: dict
+
+
 # Read the frozen keyframe pose from the seed
 def _seed_keyframe_pose(seed: dict) -> tuple[np.ndarray, np.ndarray]:
     # Check seed contains the stored keyframe pose
@@ -310,3 +323,88 @@ def promote_frame_to_keyframe(
     }
 
     return seed
+
+
+# Apply the keyframe decision and consider promoting the current frame
+def consider_promote_keyframe(
+    seed: dict,
+    pose_out: dict,
+    track_out: dict,
+    *,
+    map_growth_out: dict | None = None,
+    current_kf: int,
+    min_track_inliers: int = 80,
+    min_pnp_inliers: int = 40,
+    min_landmark_growth: int = 20,
+    min_translation_m: float = 0.10,
+    min_rotation_deg: float = 5.0,
+    require_pose: bool = True,
+) -> KeyframeUpdateResult:
+    # --- Checks ---
+    # Check required seed structure
+    seed = check_required_keys(seed, {"landmarks", "T_WC1"}, name="seed")
+
+    # Check containers
+    if not isinstance(pose_out, dict):
+        raise ValueError("pose_out must be a dict")
+    if not isinstance(track_out, dict):
+        raise ValueError("track_out must be a dict")
+    if map_growth_out is not None and not isinstance(map_growth_out, dict):
+        raise ValueError("map_growth_out must be a dict or None")
+
+    # Check frame index
+    current_kf = check_int_ge0(current_kf, name="current_kf")
+
+    # Run the decision rule
+    decision = should_make_keyframe(
+        seed,
+        pose_out,
+        track_out,
+        map_growth_out=map_growth_out,
+        min_track_inliers=min_track_inliers,
+        min_pnp_inliers=min_pnp_inliers,
+        min_landmark_growth=min_landmark_growth,
+        min_translation_m=min_translation_m,
+        min_rotation_deg=min_rotation_deg,
+        require_pose=require_pose,
+    )
+
+    # Default outcome is to keep the current keyframe
+    promoted = False
+    seed_out = seed
+
+    # Promote only when requested by the decision rule
+    if bool(decision.make_keyframe):
+        # Promotion requires a valid pose
+        if not bool(pose_out.get("ok", False)):
+            raise ValueError("Cannot promote a keyframe without a valid pose in pose_out")
+
+        # Promotion requires current-frame features
+        if "cur_feats" not in track_out:
+            raise ValueError("track_out must contain 'cur_feats' to promote a new keyframe")
+
+        # Promote the current frame to the new keyframe
+        seed_out = promote_frame_to_keyframe(
+            seed,
+            track_out["cur_feats"],
+            pose_out["R"],
+            pose_out["t"],
+            current_kf=current_kf,
+        )
+        promoted = True
+
+    # Pack update stats
+    stats = {
+        "make_keyframe": bool(decision.make_keyframe),
+        "promoted": bool(promoted),
+        "reason": decision.reason,
+        "current_kf": int(current_kf),
+        "n_landmarks": int(len(seed_out.get("landmarks", []))),
+    }
+
+    return KeyframeUpdateResult(
+        seed=seed_out,
+        decision=decision,
+        promoted=bool(promoted),
+        stats=stats,
+    )
