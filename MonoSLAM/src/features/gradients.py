@@ -2,7 +2,7 @@
 import math
 import numpy as np
 from PIL import Image
-from core.checks import check_2d_image, check_axis_01, check_kernel_1d_odd, check_2d_pair_same_shape, check_positive
+from core.checks import check_2d_image, check_axis_01, check_kernel_1d_odd, check_positive
 
 # Image to greyscale
 def img_to_grey(img, luminance_weights, eotf_params, assume_srgb=True, normalise_01=True, dtype=np.float64, eps=1e-8):
@@ -281,7 +281,10 @@ def gradients_sobel(im, sigma_d, sobel_ksize=3, sobel_scale=0.125, truncate=3.0,
 # Magnitude of gradient
 def gradient_magnitude(Ix, Iy, dtype=np.float64, eps=1e-8):
     # Checks
-    Ix, Iy = check_2d_pair_same_shape(Ix, Iy, "Ix", "Iy")
+    Ix = check_2d_image(Ix, "Ix")
+    Iy = check_2d_image(Iy, "Iy")
+    if Ix.shape != Iy.shape:
+        raise ValueError(f"Ix and Iy must have same shape; got {Ix.shape} and {Iy.shape}")
     Ix = np.asarray(Ix, dtype=dtype)
     Iy = np.asarray(Iy, dtype=dtype)
     # Magnitude
@@ -293,7 +296,10 @@ def gradient_magnitude(Ix, Iy, dtype=np.float64, eps=1e-8):
 # Orientation of gradient
 def gradient_orientation(Ix, Iy, dtype=np.float64):
     # Checks
-    Ix, Iy = check_2d_pair_same_shape(Ix, Iy, "Ix", "Iy")
+    Ix = check_2d_image(Ix, "Ix")
+    Iy = check_2d_image(Iy, "Iy")
+    if Ix.shape != Iy.shape:
+        raise ValueError(f"Ix and Iy must have same shape; got {Ix.shape} and {Iy.shape}")
     Ix = np.asarray(Ix, dtype=dtype)
     Iy = np.asarray(Iy, dtype=dtype)
     # Angle (radians)

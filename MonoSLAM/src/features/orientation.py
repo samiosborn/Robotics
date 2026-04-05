@@ -7,8 +7,7 @@ import numpy as np
 from core.checks import check_2d_image
 from core.checks import check_finite_scalar
 from core.checks import check_int_ge0
-from core.checks import check_int_gt0
-from core.checks import check_keypoints_xy
+from core.checks import check_points_xy_N2plus
 
 from features.gradients import gradients_dog
 
@@ -31,7 +30,7 @@ def keypoint_orientations(
     # Validate image
     im = check_2d_image(im, name="im", finite=True)
     # Validate keypoints (expects (N,2)+ with x,y in first two cols)
-    kps_xy = check_keypoints_xy(kps_xy, name="kps_xy", finite=True)
+    kps_xy = check_points_xy_N2plus(kps_xy, name="kps_xy", finite=True)
     # Validate sigma
     sigma_d = check_finite_scalar(sigma_d, name="sigma_d")
     if sigma_d <= 0.0:

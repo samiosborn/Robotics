@@ -18,6 +18,11 @@ dependencies = [
     "PyYAML",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
 [tool.setuptools]
 # Use the common src/ layout
 package-dir = {"" = "src"}

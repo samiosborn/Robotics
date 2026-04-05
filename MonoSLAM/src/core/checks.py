@@ -432,6 +432,24 @@ def check_mask_bool_1d(mask, name="mask") -> np.ndarray | None:
     return arr
 
 
+# Align a boolean mask to an expected length
+def align_bool_mask_1d(mask, N, name="mask") -> np.ndarray:
+    # Check expected length
+    N = check_int_ge0(N, name="N")
+
+    # Check mask
+    mask = check_mask_bool_1d(mask, name=name)
+    if mask is None:
+        return np.zeros((N,), dtype=bool)
+
+    # Align by truncation or zero-padding
+    out = np.zeros((N,), dtype=bool)
+    n = min(N, int(mask.size))
+    out[:n] = np.asarray(mask[:n], dtype=bool)
+
+    return out
+
+
 # Check boolean mask shape (N,) with explicit expected length
 def check_mask_bool_N(mask, N, name="mask") -> np.ndarray | None:
     # Allow None
@@ -487,4 +505,3 @@ def check_suffix(p, allowed: Iterable[str], name="file") -> Path:
         raise ValueError(f"{name} suffix must be one of {sorted(list(allowed_norm))}; got '{suffix}'")
 
     return path
-

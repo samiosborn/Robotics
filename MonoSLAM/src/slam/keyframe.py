@@ -9,6 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_center
 from geometry.rotation import angle_between_rotmats
+from slam.seed import seed_keyframe_pose
 
 
 # Keyframe decision bundle
@@ -33,23 +34,6 @@ class KeyframeUpdateResult:
     promoted: bool
     # Step-level stats
     stats: dict
-
-
-# Read the frozen keyframe pose from the seed
-def _seed_keyframe_pose(seed: dict) -> tuple[np.ndarray, np.ndarray]:
-    # Check seed contains the stored keyframe pose
-    seed = check_required_keys(seed, {"T_WC1"}, name="seed")
-
-    # Read pose tuple
-    T_WC1 = seed["T_WC1"]
-    if not isinstance(T_WC1, (tuple, list)) or len(T_WC1) != 2:
-        raise ValueError("seed['T_WC1'] must be a length-2 tuple/list (R, t)")
-
-    # Check pose blocks
-    R_kf = check_matrix_3x3(T_WC1[0], name="seed['T_WC1'][0]", dtype=float, finite=False)
-    t_kf = check_vector_3(T_WC1[1], name="seed['T_WC1'][1]", dtype=float, finite=False)
-
-    return np.asarray(R_kf, dtype=np.float64), np.asarray(t_kf, dtype=np.float64).reshape(3,)
 
 
 # Build the feature-index to landmark-id lookup for a given keyframe id
@@ -195,7 +179,7 @@ def should_make_keyframe(
         )
 
     # Read the stored keyframe pose
-    R_kf, t_kf = _seed_keyframe_pose(seed)
+    R_kf, t_kf = seed_keyframe_pose(seed)
 
     # Read the current pose
     R_cur = check_matrix_3x3(pose_out["R"], name="pose_out['R']", dtype=float, finite=False)

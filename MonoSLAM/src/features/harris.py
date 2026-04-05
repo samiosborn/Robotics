@@ -3,7 +3,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-from core.checks import check_2d_image, check_2d_pair_same_shape, check_positive
+from core.checks import check_2d_image, check_positive
 from features.gradients import compute_image_gradients, gaussian_kernel_1d, separable_filter
 from features.nms import nms_2d
 
@@ -24,7 +24,8 @@ def structure_tensor(Ix, Iy, sigma_i, truncate, border_mode, constant_value, dty
     Ix = check_2d_image(Ix, "Ix")
     Iy = check_2d_image(Iy, "Iy")
     # Validate same shape
-    Ix, Iy = check_2d_pair_same_shape(Ix, Iy, "Ix", "Iy")
+    if Ix.shape != Iy.shape:
+        raise ValueError(f"Ix and Iy must have same shape; got {Ix.shape} and {Iy.shape}")
     # Validate integration sigma
     sigma_i = check_positive(sigma_i, "sigma_i", eps)
     # Validate truncate
@@ -58,8 +59,10 @@ def harris_response(Sxx, Syy, Sxy, k, dtype=np.float64):
     Syy = check_2d_image(Syy, "Syy")
     Sxy = check_2d_image(Sxy, "Sxy")
     # Validate shapes match
-    Sxx, Syy = check_2d_pair_same_shape(Sxx, Syy, "Sxx", "Syy")
-    Sxx, Sxy = check_2d_pair_same_shape(Sxx, Sxy, "Sxx", "Sxy")
+    if Sxx.shape != Syy.shape:
+        raise ValueError(f"Sxx and Syy must have same shape; got {Sxx.shape} and {Syy.shape}")
+    if Sxx.shape != Sxy.shape:
+        raise ValueError(f"Sxx and Sxy must have same shape; got {Sxx.shape} and {Sxy.shape}")
     # Validate k
     if (not np.isfinite(k)) or (k <= 0.0):
         raise ValueError(f"k must be finite and > 0, got {k}")
@@ -89,8 +92,10 @@ def shi_tomasi_score(Sxx, Syy, Sxy, dtype=np.float64):
     Syy = check_2d_image(Syy, "Syy")
     Sxy = check_2d_image(Sxy, "Sxy")
     # Validate shapes match
-    Sxx, Syy = check_2d_pair_same_shape(Sxx, Syy, "Sxx", "Syy")
-    Sxx, Sxy = check_2d_pair_same_shape(Sxx, Sxy, "Sxx", "Sxy")
+    if Sxx.shape != Syy.shape:
+        raise ValueError(f"Sxx and Syy must have same shape; got {Sxx.shape} and {Syy.shape}")
+    if Sxx.shape != Sxy.shape:
+        raise ValueError(f"Sxx and Sxy must have same shape; got {Sxx.shape} and {Sxy.shape}")
     # Cast to dtype
     Sxx = np.asarray(Sxx, dtype=dtype)
     Syy = np.asarray(Syy, dtype=dtype)
@@ -137,7 +142,8 @@ def harris_keypoints_from_gradients(
     Ix = check_2d_image(Ix, "Ix")
     Iy = check_2d_image(Iy, "Iy")
     # Validate same shape
-    Ix, Iy = check_2d_pair_same_shape(Ix, Iy, "Ix", "Iy")
+    if Ix.shape != Iy.shape:
+        raise ValueError(f"Ix and Iy must have same shape; got {Ix.shape} and {Iy.shape}")
     # Validate sigma_i
     sigma_i = check_positive(sigma_i, "sigma_i", eps)
     # Validate truncate

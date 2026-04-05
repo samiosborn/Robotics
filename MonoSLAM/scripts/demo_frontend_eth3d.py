@@ -16,7 +16,8 @@ from core.checks import check_dir, check_file, check_int_ge0, check_int_gt0
 from utils.load_config import load_config
 from datasets.eth3d import load_eth3d_sequence
 from features.viz import draw_matches
-from slam.frontend import bootstrap_from_two_frames, track_against_keyframe
+from slam.frontend import bootstrap_from_two_frames
+from slam.tracking import track_against_keyframe
 
 
 # Load greyscale image for visualisation
