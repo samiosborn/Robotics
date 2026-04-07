@@ -115,7 +115,7 @@ def match_frames(
         ratio=brief_ratio,
         mutual=mutual,
         max_matches=max_matches,
-        scale_gate_levels=scale_gate,
+        scale_gate=scale_gate,
     )
 
     return MatchBundle(

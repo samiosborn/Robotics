@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
-from slam.map_update import grow_map_from_tracking_result
+from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
@@ -57,6 +57,7 @@ def process_frame_against_seed(
     keyframe_min_track_inliers: int = 80,
     keyframe_min_pnp_inliers: int = 40,
     keyframe_min_landmark_growth: int = 20,
+    keyframe_min_linked_landmarks_for_promotion: int = 100,
     keyframe_min_translation_m: float = 0.10,
     keyframe_min_rotation_deg: float = 5.0,
     keyframe_require_pose: bool = True,
@@ -89,6 +90,10 @@ def process_frame_against_seed(
     keyframe_min_track_inliers = check_int_ge0(keyframe_min_track_inliers, name="keyframe_min_track_inliers")
     keyframe_min_pnp_inliers = check_int_ge0(keyframe_min_pnp_inliers, name="keyframe_min_pnp_inliers")
     keyframe_min_landmark_growth = check_int_ge0(keyframe_min_landmark_growth, name="keyframe_min_landmark_growth")
+    keyframe_min_linked_landmarks_for_promotion = check_int_ge0(
+        keyframe_min_linked_landmarks_for_promotion,
+        name="keyframe_min_linked_landmarks_for_promotion",
+    )
     keyframe_min_translation_m = check_positive(keyframe_min_translation_m, name="keyframe_min_translation_m", eps=0.0)
     keyframe_min_rotation_deg = check_positive(keyframe_min_rotation_deg, name="keyframe_min_rotation_deg", eps=0.0)
 
@@ -199,13 +204,17 @@ def process_frame_against_seed(
         }
 
     # Default map-growth output
-    seed_out = seed
+    seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
+        seed,
+        pose_out,
+        current_kf=current_kf,
+    )
     map_growth_out = None
 
     # Grow the map only after a valid pose has been recovered
     if bool(grow_map):
         # Read the frozen keyframe pose from the seed
-        R_kf, t_kf = seed_keyframe_pose(seed)
+        R_kf, t_kf = seed_keyframe_pose(seed_out)
 
         # Read the current pose
         R_cur = np.asarray(pose_out["R"], dtype=np.float64)
@@ -213,7 +222,7 @@ def process_frame_against_seed(
 
         # Run one map-growth step from the tracked frame
         map_growth_out = grow_map_from_tracking_result(
-            seed,
+            seed_out,
             track_out,
             K,
             K,
@@ -247,6 +256,7 @@ def process_frame_against_seed(
             min_track_inliers=keyframe_min_track_inliers,
             min_pnp_inliers=keyframe_min_pnp_inliers,
             min_landmark_growth=keyframe_min_landmark_growth,
+            min_linked_landmarks_for_promotion=keyframe_min_linked_landmarks_for_promotion,
             min_translation_m=keyframe_min_translation_m,
             min_rotation_deg=keyframe_min_rotation_deg,
             require_pose=keyframe_require_pose,
@@ -269,6 +279,7 @@ def process_frame_against_seed(
         "n_track_inliers": int(track_stats.get("n_inliers", 0)),
         "n_pnp_corr": int(pose_stats.get("n_corr", 0)),
         "n_pnp_inliers": int(pose_stats.get("n_pnp_inliers", 0)),
+        "n_tracked_obs_added": int(tracked_obs_stats.get("n_added", 0)),
         "n_new_candidates": int(map_stats.get("n_candidates", 0)),
         "n_new_triangulated": int(map_stats.get("n_triangulated_valid", 0)),
         "n_new_added": int(map_stats.get("n_added", 0)),

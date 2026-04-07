@@ -45,6 +45,22 @@ def _landmark_dict_by_id(seed: dict) -> dict[int, dict]:
     return out
 
 
+# Count valid landmark observations
+def _landmark_observation_count(lm: dict) -> int:
+    # Read observation list
+    obs = lm.get("obs", None)
+    if not isinstance(obs, list):
+        return 0
+
+    # Count valid observation records
+    n_obs = 0
+    for ob in obs:
+        if isinstance(ob, dict):
+            n_obs += 1
+
+    return int(n_obs)
+
+
 # Slice a PnP correspondence bundle consistently across all fields
 def _slice_pnp_correspondences(corrs: PnPCorrespondences, idx) -> PnPCorrespondences:
     # Convert indexer
@@ -241,7 +257,12 @@ def _linearise_pose_only_reprojection(X_w, x_cur, K, R, t, eps=1e-12):
 
 
 # Build 2D–3D correspondences from seed and tracking output
-def build_pnp_correspondences(seed: dict, track_out: dict) -> PnPCorrespondences:
+def build_pnp_correspondences(
+    seed: dict,
+    track_out: dict,
+    *,
+    min_landmark_observations: int = 2,
+) -> PnPCorrespondences:
     # --- Checks ---
     # Seed must be a dict
     if not isinstance(seed, dict):
@@ -249,6 +270,12 @@ def build_pnp_correspondences(seed: dict, track_out: dict) -> PnPCorrespondences
     # Track output must be a dict
     if not isinstance(track_out, dict):
         raise ValueError("track_out must be a dict")
+
+    # Check landmark-quality filter
+    min_landmark_observations = check_int_gt0(
+        min_landmark_observations,
+        name="min_landmark_observations",
+    )
 
     # Read landmark id map from keyframe features to landmarks
     landmark_id_by_feat1 = np.asarray(
@@ -318,6 +345,11 @@ def build_pnp_correspondences(seed: dict, track_out: dict) -> PnPCorrespondences
         # Lookup landmark
         lm = lm_by_id.get(lm_id, None)
         if lm is None:
+            continue
+
+        # Require enough landmark observations
+        n_obs = _landmark_observation_count(lm)
+        if n_obs < min_landmark_observations:
             continue
 
         # Read world point
@@ -827,4 +859,3 @@ def estimate_pose_pnp_ransac(
     stats["mean_inlier_err_sq"] = None if not np.isfinite(best_mean_err) else float(best_mean_err)
 
     return best_R, best_t, best_mask, stats
-

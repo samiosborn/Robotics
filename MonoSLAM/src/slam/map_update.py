@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
+from core.checks import align_bool_mask_1d, as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
 from geometry.camera import projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
 
@@ -58,6 +58,153 @@ class MapGrowthResult:
     batch: TriangulatedLandmarkBatch
     # Step-level summary stats
     stats: dict
+
+
+# Append current-frame observations for already-known tracked landmarks
+def append_tracked_observations_to_seed(
+    seed: dict,
+    pose_out: dict,
+    *,
+    current_kf: int,
+) -> tuple[dict, dict]:
+    # --- Checks ---
+    # Check containers
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
+    pose_out = check_required_keys(pose_out, {"corrs", "pnp_inlier_mask"}, name="pose_out")
+
+    # Check frame index
+    current_kf = check_int_ge0(current_kf, name="current_kf")
+
+    # Read correspondence bundle
+    corrs = pose_out["corrs"]
+    if not hasattr(corrs, "landmark_ids"):
+        raise ValueError("pose_out['corrs'] must have attribute 'landmark_ids'")
+    if not hasattr(corrs, "cur_feat_idx"):
+        raise ValueError("pose_out['corrs'] must have attribute 'cur_feat_idx'")
+    if not hasattr(corrs, "x_cur"):
+        raise ValueError("pose_out['corrs'] must have attribute 'x_cur'")
+
+    # Read correspondence arrays
+    landmark_ids = check_index_array_1d(
+        getattr(corrs, "landmark_ids"),
+        name="pose_out['corrs'].landmark_ids",
+        dtype=np.int64,
+        allow_negative=False,
+    )
+
+    cur_feat_idx = check_index_array_1d(
+        getattr(corrs, "cur_feat_idx"),
+        name="pose_out['corrs'].cur_feat_idx",
+        dtype=np.int64,
+        allow_negative=False,
+    )
+
+    landmark_ids, cur_feat_idx = check_1d_pair_same_length(
+        landmark_ids,
+        cur_feat_idx,
+        nameA="pose_out['corrs'].landmark_ids",
+        nameB="pose_out['corrs'].cur_feat_idx",
+    )
+
+    # Read current-frame image points
+    x_cur = check_points_2xN(
+        getattr(corrs, "x_cur"),
+        name="pose_out['corrs'].x_cur",
+        dtype=float,
+        finite=True,
+    )
+
+    # Require aligned correspondence arrays
+    N = int(landmark_ids.size)
+    if int(x_cur.shape[1]) != N:
+        raise ValueError(
+            f"pose_out['corrs'].x_cur must have {N} columns to match pose_out['corrs'].landmark_ids; got {x_cur.shape[1]}"
+        )
+
+    # Align the PnP inlier mask to the correspondence count
+    pnp_inlier_mask = align_bool_mask_1d(
+        pose_out["pnp_inlier_mask"],
+        N,
+        name="pose_out['pnp_inlier_mask']",
+    )
+
+    # Read seed landmarks
+    landmarks_raw = seed["landmarks"]
+    if not isinstance(landmarks_raw, list):
+        raise ValueError("seed['landmarks'] must be a list")
+    landmarks = list(landmarks_raw)
+
+    # Build a landmark-id to list-index lookup
+    landmark_pos_by_id: dict[int, int] = {}
+    for i, lm in enumerate(landmarks):
+        if not isinstance(lm, dict):
+            continue
+        if "id" not in lm:
+            continue
+        landmark_pos_by_id[int(lm["id"])] = int(i)
+
+    # Start stats
+    stats = {
+        "n_corr": int(N),
+        "n_inlier_corr": int(pnp_inlier_mask.sum()),
+        "n_added": 0,
+        "n_duplicate": 0,
+        "n_missing_landmark": 0,
+        "current_kf": int(current_kf),
+    }
+
+    # Early exit on no correspondences
+    if N == 0:
+        seed["last_tracked_observation_append_stats"] = stats
+        return seed, stats
+
+    # Append one current-frame observation per inlier landmark track
+    for i in np.flatnonzero(pnp_inlier_mask):
+        lm_id = int(landmark_ids[i])
+        feat_idx = int(cur_feat_idx[i])
+        xy = np.asarray(x_cur[:, i], dtype=np.float64).reshape(2,)
+
+        lm_pos = landmark_pos_by_id.get(lm_id, None)
+        if lm_pos is None:
+            stats["n_missing_landmark"] += 1
+            continue
+
+        lm = landmarks[lm_pos]
+        obs = lm.get("obs", None)
+        if not isinstance(obs, list):
+            obs = []
+
+        duplicate = False
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            if int(ob.get("kf", -1)) != int(current_kf):
+                continue
+            if int(ob.get("feat", -1)) != int(feat_idx):
+                continue
+            duplicate = True
+            break
+
+        if duplicate:
+            stats["n_duplicate"] += 1
+            lm["obs"] = obs
+            continue
+
+        obs.append(
+            {
+                "kf": int(current_kf),
+                "feat": int(feat_idx),
+                "xy": xy,
+            }
+        )
+        lm["obs"] = obs
+        stats["n_added"] += 1
+
+    # Pack back into the seed
+    seed["landmarks"] = landmarks
+    seed["last_tracked_observation_append_stats"] = stats
+
+    return seed, stats
 
 
 # Build candidate 2D-2D correspondences for new landmark triangulation
@@ -627,4 +774,3 @@ def grow_map_from_tracking_result(
         batch=batch,
         stats=stats,
     )
-

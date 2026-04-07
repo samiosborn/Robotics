@@ -1,7 +1,8 @@
-# sripts/demo_frontend_eth3d.py
+# scripts/demo_frontend_eth3d.py
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -12,12 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from core.checks import check_dir, check_file, check_int_ge0, check_int_gt0
+from core.checks import check_dir, check_file, check_int_ge0, check_int_gt0, check_positive
 from utils.load_config import load_config
 from datasets.eth3d import load_eth3d_sequence
 from features.viz import draw_matches
+from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-from slam.tracking import track_against_keyframe
 
 
 # Load greyscale image for visualisation
@@ -60,9 +61,51 @@ def _load_runtime_cfg(profile_path: Path) -> tuple[dict, np.ndarray]:
         "features": features_cfg,
         "ransac": bootstrap_cfg["ransac"],
         "bootstrap": bootstrap_cfg["bootstrap"],
+        "pnp": bootstrap_cfg.get("pnp", {}),
     }
 
     return runtime_cfg, K
+
+
+# Build keyword arguments for the current frontend and tracking APIs
+def _frontend_kwargs_from_cfg(cfg: dict) -> dict:
+    if not isinstance(cfg, dict):
+        raise ValueError("cfg must be a dict")
+
+    features_cfg = cfg["features"]
+    ransac_cfg = cfg["ransac"]
+    bootstrap_cfg = cfg["bootstrap"]
+    pnp_cfg = cfg.get("pnp", {})
+
+    return {
+        "feature_cfg": features_cfg,
+        "F_cfg": ransac_cfg["F"],
+        "H_cfg": ransac_cfg["H"],
+        "bootstrap_cfg": bootstrap_cfg,
+        "pnp_threshold_px": check_positive(pnp_cfg.get("threshold_px", 3.0), name="pnp.threshold_px", eps=0.0),
+    }
+
+
+# Append one JSONL record
+def _append_jsonl(path: Path, row: dict) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+# Build one compact per-frame summary
+def _summarise_frontend_frame(frame_index: int, out: dict, seed: dict) -> dict:
+    stats = out.get("stats", {}) if isinstance(out, dict) else {}
+    return {
+        "frame_index": int(frame_index),
+        "ok": bool(out.get("ok", False)) if isinstance(out, dict) else False,
+        "n_track_inliers": int(stats.get("n_track_inliers", 0)),
+        "n_pnp_corr": int(stats.get("n_pnp_corr", 0)),
+        "n_pnp_inliers": int(stats.get("n_pnp_inliers", 0)),
+        "n_new_added": int(stats.get("n_new_added", 0)),
+        "keyframe_promoted": bool(stats.get("keyframe_promoted", False)),
+        "current_landmark_count": int(len(seed.get("landmarks", []))) if isinstance(seed, dict) else 0,
+        "reason": stats.get("reason", None),
+    }
 
 
 # Draw one match visualisation
@@ -200,7 +243,7 @@ def main() -> None:
     parser.add_argument("--i0", type=int, default=0)
     # Fixed bootstrap frame 1
     parser.add_argument("--i1", type=int, default=1)
-    # Number of later frames to track
+    # Number of later frames to process
     parser.add_argument("--num_track", type=int, default=5)
     # Maximum number of drawn matches
     parser.add_argument("--max_draw", type=int, default=200)
@@ -209,11 +252,16 @@ def main() -> None:
 
     profile_path = Path(args.profile).expanduser().resolve()
     cfg, K = _load_runtime_cfg(profile_path)
+    frontend_kwargs = _frontend_kwargs_from_cfg(cfg)
 
     dataset_cfg = cfg["dataset"]
     run_cfg = cfg["run"]
 
-    dataset_root = Path(args.dataset_root).expanduser().resolve() if args.dataset_root is not None else (ROOT / dataset_cfg["root"]).resolve()
+    dataset_root = (
+        Path(args.dataset_root).expanduser().resolve()
+        if args.dataset_root is not None
+        else (ROOT / dataset_cfg["root"]).resolve()
+    )
     seq_name = str(args.seq) if args.seq is not None else str(dataset_cfg["seq"])
 
     if args.out_dir is not None:
@@ -223,6 +271,9 @@ def main() -> None:
 
     check_dir(dataset_root, name="dataset_root")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Open the lightweight run log
+    log_path = out_dir / "frontend_log.jsonl"
 
     i0 = check_int_ge0(args.i0, name="i0")
     i1 = check_int_ge0(args.i1, name="i1")
@@ -254,7 +305,16 @@ def main() -> None:
     im1, ts1, id1 = seq.get(i1)
 
     # Run two-view bootstrap
-    boot = bootstrap_from_two_frames(K, K, im0, im1, cfg)
+    boot = bootstrap_from_two_frames(
+        K,
+        K,
+        im0,
+        im1,
+        feature_cfg=frontend_kwargs["feature_cfg"],
+        F_cfg=frontend_kwargs["F_cfg"],
+        H_cfg=frontend_kwargs["H_cfg"],
+        bootstrap_cfg=frontend_kwargs["bootstrap_cfg"],
+    )
 
     print(f"sequence: {seq.name}")
     print(f"dataset_root: {dataset_root}")
@@ -263,6 +323,19 @@ def main() -> None:
     print(f"bootstrap pair: {i0} ({id0}, t={ts0}) -> {i1} ({id1}, t={ts1})")
     print(f"bootstrap ok: {boot['ok']}")
     print(f"bootstrap stats: {boot['stats']}")
+
+    # Write the bootstrap summary
+    _append_jsonl(
+        log_path,
+        {
+            "event": "bootstrap",
+            "frame_index_0": int(i0),
+            "frame_index_1": int(i1),
+            "ok": bool(boot["ok"]),
+            "reason": boot["stats"].get("reason", None),
+            "n_landmarks": 0 if not isinstance(boot.get("seed"), dict) else int(len(boot["seed"].get("landmarks", []))),
+        },
+    )
 
     _draw_bootstrap_outputs(seq, i0, i1, boot, out_dir, max_draw)
 
@@ -279,18 +352,83 @@ def main() -> None:
 
     start_track = keyframe_index + 1
     stop_track = min(n_effective, start_track + num_track)
+    consecutive_failures = 0
+    max_consecutive_failures = 3
 
     for i in range(start_track, stop_track):
-        # Track current frame against the frozen keyframe
+        # Keep the current reference keyframe for visualisation
+        viz_keyframe_feats = keyframe_feats
+        viz_keyframe_index = keyframe_index
+
+        # Process the current frame through the frontend pipeline
         cur_im, cur_ts, cur_id = seq.get(i)
-        tr = track_against_keyframe(K, keyframe_feats, cur_im, cfg)
-        n_inliers = int(np.asarray(tr["inlier_mask"], dtype=bool).sum())
+        out = process_frame_against_seed(
+            K,
+            seed,
+            keyframe_feats,
+            cur_im,
+            feature_cfg=frontend_kwargs["feature_cfg"],
+            F_cfg=frontend_kwargs["F_cfg"],
+            threshold_px=frontend_kwargs["pnp_threshold_px"],
+            keyframe_kf=keyframe_index,
+            current_kf=i,
+        )
+        seed = out["seed"]
+        track_out = out["track_out"]
+        keyframe_out = out.get("keyframe_out", None)
+        summary = _summarise_frontend_frame(i, out, seed)
 
-        print(f"track frame: {i} ({cur_id}, t={cur_ts})")
-        print(f"  stats: {tr['stats']}")
-        print(f"  inliers: {n_inliers}")
+        print(
+            f"frame {summary['frame_index']}: ok={summary['ok']} "
+            f"n_track_inliers={summary['n_track_inliers']} "
+            f"n_pnp_corr={summary['n_pnp_corr']} "
+            f"n_pnp_inliers={summary['n_pnp_inliers']} "
+            f"n_new_added={summary['n_new_added']} "
+            f"keyframe_promoted={summary['keyframe_promoted']} "
+            f"current_landmark_count={summary['current_landmark_count']}"
+        )
 
-        _draw_track_outputs(seq, keyframe_index, i, keyframe_feats, tr, out_dir, max_draw)
+        # Write the per-frame summary
+        _append_jsonl(
+            log_path,
+            {
+                "event": "frame",
+                "frame_id": str(cur_id),
+                "timestamp": float(cur_ts),
+                **summary,
+            },
+        )
+
+        # Draw tracking outputs against the reference keyframe used for this step
+        _draw_track_outputs(seq, viz_keyframe_index, i, viz_keyframe_feats, track_out, out_dir, max_draw)
+
+        # Update the active keyframe after a promotion
+        if keyframe_out is not None and bool(keyframe_out.promoted):
+            keyframe_feats = out["track_out"]["cur_feats"]
+            keyframe_index = i
+
+        # Stop after repeated frontend failures
+        if bool(out["ok"]):
+            consecutive_failures = 0
+            continue
+
+        consecutive_failures += 1
+        print(
+            f"frame {i}: frontend failed with reason={summary['reason']} "
+            f"consecutive_failures={consecutive_failures}"
+        )
+        if consecutive_failures >= max_consecutive_failures:
+            print(f"stopping after {consecutive_failures} consecutive frontend failures")
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "stop",
+                    "frame_index": int(i),
+                    "reason": "repeated_failures",
+                    "consecutive_failures": int(consecutive_failures),
+                },
+            )
+            break
 
 
 if __name__ == "__main__":

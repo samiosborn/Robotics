@@ -10,6 +10,42 @@ from core.checks import align_bool_mask_1d, check_finite_scalar, check_in_01, ch
 from geometry.pnp import build_pnp_correspondences, estimate_pose_pnp_ransac
 
 
+# Build a histogram of observation counts for kept landmarks
+def _landmark_observation_histogram(seed: dict[str, Any], landmark_ids: np.ndarray) -> dict[str, int]:
+    # Read landmarks
+    landmarks = seed.get("landmarks", [])
+    if not isinstance(landmarks, list):
+        return {}
+
+    # Build landmark lookup
+    lm_by_id: dict[int, dict[str, Any]] = {}
+    for lm in landmarks:
+        if not isinstance(lm, dict):
+            continue
+        if "id" not in lm:
+            continue
+        lm_by_id[int(lm["id"])] = lm
+
+    # Count kept correspondences by landmark observation count
+    hist: dict[str, int] = {}
+    landmark_ids = np.asarray(landmark_ids, dtype=np.int64).reshape(-1)
+    for lm_id in landmark_ids:
+        lm = lm_by_id.get(int(lm_id), None)
+        if lm is None:
+            continue
+
+        obs = lm.get("obs", None)
+        if not isinstance(obs, list):
+            n_obs = 0
+        else:
+            n_obs = int(sum(1 for ob in obs if isinstance(ob, dict)))
+
+        key = str(int(n_obs))
+        hist[key] = int(hist.get(key, 0) + 1)
+
+    return {str(k): int(hist[k]) for k in sorted(hist, key=lambda s: int(s))}
+
+
 # Estimate the current pose from a bootstrap seed and tracked observations
 def estimate_pose_from_seed(
     K: np.ndarray,
@@ -24,6 +60,7 @@ def estimate_pose_from_seed(
     min_points: int = 6,
     rank_tol: float = 1e-10,
     min_cheirality_ratio: float = 0.5,
+    min_landmark_observations: int = 2,
     eps: float = 1e-12,
     refit: bool = True,
     refine_nonlinear: bool = True,
@@ -53,6 +90,7 @@ def estimate_pose_from_seed(
     rank_tol = check_positive(rank_tol, name="rank_tol", eps=0.0)
     min_cheirality_ratio = check_finite_scalar(min_cheirality_ratio, name="min_cheirality_ratio")
     check_in_01(min_cheirality_ratio, name="min_cheirality_ratio", eps=0.0)
+    min_landmark_observations = check_int_gt0(min_landmark_observations, name="min_landmark_observations")
     eps = check_positive(eps, name="eps", eps=0.0)
 
     # Check nonlinear refinement controls
@@ -74,11 +112,21 @@ def estimate_pose_from_seed(
         raise ValueError(f"min_inliers must be >= sample_size; got {min_inliers} < {sample_size}")
 
     # Build 2D–3D correspondences from the tracked frame
-    corrs = build_pnp_correspondences(seed, track_out)
+    corrs = build_pnp_correspondences(
+        seed,
+        track_out,
+        min_landmark_observations=min_landmark_observations,
+    )
     n_corr = int(corrs.X_w.shape[1])
+    landmark_observation_histogram = _landmark_observation_histogram(seed, corrs.landmark_ids)
 
     # Start stats from the correspondence count
-    stats: dict[str, Any] = {"n_corr": n_corr}
+    stats: dict[str, Any] = {
+        "n_corr": n_corr,
+        "n_corr_after_filter": n_corr,
+        "min_landmark_observations": int(min_landmark_observations),
+        "landmark_observation_histogram": landmark_observation_histogram,
+    }
 
     # Stop early if nothing survived
     if n_corr == 0:

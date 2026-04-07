@@ -9,6 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_center
 from geometry.rotation import angle_between_rotmats
+from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
 
@@ -97,16 +98,68 @@ def _build_landmark_id_by_feat_for_kf(seed: dict, n_feat: int, kf_index: int) ->
     return landmark_id_by_feat
 
 
+# Count landmarks that have an observation in a given keyframe
+def count_linked_landmarks_for_kf(seed: dict, kf_index: int) -> int:
+    # Check seed contains landmarks
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
+
+    # Check keyframe index
+    kf_index = check_int_ge0(kf_index, name="kf_index")
+
+    # Read landmarks
+    landmarks = seed["landmarks"]
+    if not isinstance(landmarks, list):
+        raise ValueError("seed['landmarks'] must be a list")
+
+    # Count linked landmarks
+    n_linked = 0
+    for lm in landmarks:
+        if not isinstance(lm, dict):
+            continue
+
+        obs = lm.get("obs", None)
+        if not isinstance(obs, list):
+            continue
+
+        linked = False
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            if int(ob.get("kf", -1)) != int(kf_index):
+                continue
+            linked = True
+            break
+
+        if linked:
+            n_linked += 1
+
+    return int(n_linked)
+
+
+# Read map-growth stats from either a dict or a typed result bundle
+def _map_growth_stats(map_growth_out: dict | MapGrowthResult | None) -> dict:
+    if map_growth_out is None:
+        return {}
+    if isinstance(map_growth_out, MapGrowthResult):
+        return map_growth_out.stats if isinstance(map_growth_out.stats, dict) else {}
+    if isinstance(map_growth_out, dict):
+        stats = map_growth_out.get("stats", {})
+        return stats if isinstance(stats, dict) else {}
+    raise ValueError("map_growth_out must be a dict, MapGrowthResult, or None")
+
+
 # Decide whether the current frame should become a new keyframe
 def should_make_keyframe(
     seed: dict,
     pose_out: dict,
     track_out: dict,
     *,
-    map_growth_out: dict | None = None,
+    map_growth_out: dict | MapGrowthResult | None = None,
+    current_kf: int,
     min_track_inliers: int = 80,
     min_pnp_inliers: int = 40,
     min_landmark_growth: int = 20,
+    min_linked_landmarks_for_promotion: int = 100,
     min_translation_m: float = 0.10,
     min_rotation_deg: float = 5.0,
     require_pose: bool = True,
@@ -120,26 +173,33 @@ def should_make_keyframe(
         raise ValueError("pose_out must be a dict")
     if not isinstance(track_out, dict):
         raise ValueError("track_out must be a dict")
-    if map_growth_out is not None and not isinstance(map_growth_out, dict):
-        raise ValueError("map_growth_out must be a dict or None")
+    _map_growth_stats(map_growth_out)
+
+    # Check frame index
+    current_kf = check_int_ge0(current_kf, name="current_kf")
 
     # Check scalar thresholds
     min_track_inliers = check_int_ge0(min_track_inliers, name="min_track_inliers")
     min_pnp_inliers = check_int_ge0(min_pnp_inliers, name="min_pnp_inliers")
     min_landmark_growth = check_int_ge0(min_landmark_growth, name="min_landmark_growth")
+    min_linked_landmarks_for_promotion = check_int_ge0(
+        min_linked_landmarks_for_promotion,
+        name="min_linked_landmarks_for_promotion",
+    )
     min_translation_m = check_positive(min_translation_m, name="min_translation_m", eps=0.0)
     min_rotation_deg = check_positive(min_rotation_deg, name="min_rotation_deg", eps=0.0)
 
     # Read stats dicts
     track_stats = track_out.get("stats", {})
     pose_stats = pose_out.get("stats", {})
-    map_stats = map_growth_out.get("stats", {}) if map_growth_out is not None else {}
+    map_stats = _map_growth_stats(map_growth_out)
 
     # Read counts
     n_track_inliers = int(track_stats.get("n_inliers", 0))
     n_pnp_inliers = int(pose_stats.get("n_pnp_inliers", 0))
     n_added = int(map_stats.get("n_added", 0))
     n_landmarks = int(len(seed.get("landmarks", [])))
+    n_linked_landmarks_candidate = count_linked_landmarks_for_kf(seed, current_kf)
 
     # Read pose status
     pose_ok = bool(pose_out.get("ok", False))
@@ -151,32 +211,38 @@ def should_make_keyframe(
         "n_pnp_inliers": int(n_pnp_inliers),
         "n_added": int(n_added),
         "n_landmarks": int(n_landmarks),
+        "n_linked_landmarks_candidate": int(n_linked_landmarks_candidate),
+        "promotion_vetoed_for_low_links": False,
         "translation_m": None,
         "rotation_deg": None,
     }
 
+    # Apply the linked-landmark promotion gate
+    def _decision(make_keyframe: bool, reason: str | None) -> KeyframeDecision:
+        stats_out = dict(stats)
+        if bool(make_keyframe) and int(n_linked_landmarks_candidate) < int(min_linked_landmarks_for_promotion):
+            stats_out["promotion_vetoed_for_low_links"] = True
+            return KeyframeDecision(
+                make_keyframe=False,
+                reason="linked_landmarks_low",
+                stats=stats_out,
+            )
+        return KeyframeDecision(
+            make_keyframe=bool(make_keyframe),
+            reason=reason,
+            stats=stats_out,
+        )
+
     # If a valid pose is required, stop early when it is unavailable
     if bool(require_pose) and not pose_ok:
-        return KeyframeDecision(
-            make_keyframe=False,
-            reason="pose_not_available",
-            stats=stats,
-        )
+        return _decision(False, "pose_not_available")
 
     # If pose is unavailable, fall back to track quality only
     if not pose_ok:
         if n_track_inliers < min_track_inliers:
-            return KeyframeDecision(
-                make_keyframe=True,
-                reason="track_inliers_low",
-                stats=stats,
-            )
+            return _decision(True, "track_inliers_low")
 
-        return KeyframeDecision(
-            make_keyframe=False,
-            reason=None,
-            stats=stats,
-        )
+        return _decision(False, None)
 
     # Read the stored keyframe pose
     R_kf, t_kf = seed_keyframe_pose(seed)
@@ -199,58 +265,30 @@ def should_make_keyframe(
 
     # Promote when both translation and rotation are clearly significant
     if translation_m >= min_translation_m and rotation_deg >= min_rotation_deg:
-        return KeyframeDecision(
-            make_keyframe=True,
-            reason="translation_and_rotation_large",
-            stats=stats,
-        )
+        return _decision(True, "translation_and_rotation_large")
 
     # Promote when translation alone is significant
     if translation_m >= min_translation_m:
-        return KeyframeDecision(
-            make_keyframe=True,
-            reason="translation_large",
-            stats=stats,
-        )
+        return _decision(True, "translation_large")
 
     # Promote when rotation alone is significant
     if rotation_deg >= min_rotation_deg:
-        return KeyframeDecision(
-            make_keyframe=True,
-            reason="rotation_large",
-            stats=stats,
-        )
+        return _decision(True, "rotation_large")
 
     # Promote when the current frame added many new landmarks
     if n_added >= min_landmark_growth:
-        return KeyframeDecision(
-            make_keyframe=True,
-            reason="landmark_growth_high",
-            stats=stats,
-        )
+        return _decision(True, "landmark_growth_high")
 
     # Promote when keyframe tracking quality has degraded
     if n_track_inliers < min_track_inliers:
-        return KeyframeDecision(
-            make_keyframe=True,
-            reason="track_inliers_low",
-            stats=stats,
-        )
+        return _decision(True, "track_inliers_low")
 
     # Promote when pose support has degraded
     if n_pnp_inliers < min_pnp_inliers:
-        return KeyframeDecision(
-            make_keyframe=True,
-            reason="pnp_inliers_low",
-            stats=stats,
-        )
+        return _decision(True, "pnp_inliers_low")
 
     # Otherwise keep the existing keyframe
-    return KeyframeDecision(
-        make_keyframe=False,
-        reason=None,
-        stats=stats,
-    )
+    return _decision(False, None)
 
 
 # Promote the current processed frame to become the new reference keyframe
@@ -315,11 +353,12 @@ def consider_promote_keyframe(
     pose_out: dict,
     track_out: dict,
     *,
-    map_growth_out: dict | None = None,
+    map_growth_out: dict | MapGrowthResult | None = None,
     current_kf: int,
     min_track_inliers: int = 80,
     min_pnp_inliers: int = 40,
     min_landmark_growth: int = 20,
+    min_linked_landmarks_for_promotion: int = 100,
     min_translation_m: float = 0.10,
     min_rotation_deg: float = 5.0,
     require_pose: bool = True,
@@ -333,8 +372,7 @@ def consider_promote_keyframe(
         raise ValueError("pose_out must be a dict")
     if not isinstance(track_out, dict):
         raise ValueError("track_out must be a dict")
-    if map_growth_out is not None and not isinstance(map_growth_out, dict):
-        raise ValueError("map_growth_out must be a dict or None")
+    _map_growth_stats(map_growth_out)
 
     # Check frame index
     current_kf = check_int_ge0(current_kf, name="current_kf")
@@ -345,9 +383,11 @@ def consider_promote_keyframe(
         pose_out,
         track_out,
         map_growth_out=map_growth_out,
+        current_kf=current_kf,
         min_track_inliers=min_track_inliers,
         min_pnp_inliers=min_pnp_inliers,
         min_landmark_growth=min_landmark_growth,
+        min_linked_landmarks_for_promotion=min_linked_landmarks_for_promotion,
         min_translation_m=min_translation_m,
         min_rotation_deg=min_rotation_deg,
         require_pose=require_pose,
@@ -384,6 +424,8 @@ def consider_promote_keyframe(
         "reason": decision.reason,
         "current_kf": int(current_kf),
         "n_landmarks": int(len(seed_out.get("landmarks", []))),
+        "n_linked_landmarks_candidate": int(decision.stats.get("n_linked_landmarks_candidate", 0)),
+        "promotion_vetoed_for_low_links": bool(decision.stats.get("promotion_vetoed_for_low_links", False)),
     }
 
     return KeyframeUpdateResult(

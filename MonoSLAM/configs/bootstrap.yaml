@@ -43,3 +43,6 @@ bootstrap:
     depth_sanity_min: 0.7
     translation_norm: 1.0
     baseline_override: null
+
+pnp:
+  threshold_px: 8.0
