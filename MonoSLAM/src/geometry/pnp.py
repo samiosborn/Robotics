@@ -61,6 +61,32 @@ def _landmark_observation_count(lm: dict) -> int:
     return int(n_obs)
 
 
+# Read the explicit birth source for a landmark
+def _landmark_birth_source(lm: dict) -> str | None:
+    # Read birth source metadata
+    birth_source = lm.get("birth_source", None)
+    if not isinstance(birth_source, str):
+        return None
+
+    return str(birth_source)
+
+
+# Determine whether a landmark is explicitly bootstrap-born for pose support
+def _landmark_is_bootstrap_born(lm: dict) -> bool:
+    return _landmark_birth_source(lm) == "bootstrap"
+
+
+# Build an empty PnP correspondence bundle
+def _empty_pnp_correspondences() -> PnPCorrespondences:
+    return PnPCorrespondences(
+        X_w=np.zeros((3, 0), dtype=np.float64),
+        x_cur=np.zeros((2, 0), dtype=np.float64),
+        landmark_ids=np.zeros((0,), dtype=np.int64),
+        cur_feat_idx=np.zeros((0,), dtype=np.int64),
+        kf_feat_idx=np.zeros((0,), dtype=np.int64),
+    )
+
+
 # Slice a PnP correspondence bundle consistently across all fields
 def _slice_pnp_correspondences(corrs: PnPCorrespondences, idx) -> PnPCorrespondences:
     # Convert indexer
@@ -262,7 +288,29 @@ def build_pnp_correspondences(
     track_out: dict,
     *,
     min_landmark_observations: int = 2,
+    allow_bootstrap_landmarks_for_pose: bool = True,
+    min_post_bootstrap_observations_for_pose: int = 3,
 ) -> PnPCorrespondences:
+    corrs, _ = build_pnp_correspondences_with_stats(
+        seed,
+        track_out,
+        min_landmark_observations=min_landmark_observations,
+        allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
+        min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
+    )
+
+    return corrs
+
+
+# Build 2D–3D correspondences from seed and tracking output with pose-support stats
+def build_pnp_correspondences_with_stats(
+    seed: dict,
+    track_out: dict,
+    *,
+    min_landmark_observations: int = 2,
+    allow_bootstrap_landmarks_for_pose: bool = True,
+    min_post_bootstrap_observations_for_pose: int = 3,
+) -> tuple[PnPCorrespondences, dict]:
     # --- Checks ---
     # Seed must be a dict
     if not isinstance(seed, dict):
@@ -275,6 +323,11 @@ def build_pnp_correspondences(
     min_landmark_observations = check_int_gt0(
         min_landmark_observations,
         name="min_landmark_observations",
+    )
+    allow_bootstrap_landmarks_for_pose = bool(allow_bootstrap_landmarks_for_pose)
+    min_post_bootstrap_observations_for_pose = check_int_gt0(
+        min_post_bootstrap_observations_for_pose,
+        name="min_post_bootstrap_observations_for_pose",
     )
 
     # Read landmark id map from keyframe features to landmarks
@@ -326,6 +379,16 @@ def build_pnp_correspondences(
     cur_idx_keep: list[int] = []
     kf_idx_keep: list[int] = []
 
+    # Start pose-support stats
+    stats = {
+        "n_corr_raw": 0,
+        "n_corr_bootstrap_born": 0,
+        "n_corr_post_bootstrap_born": 0,
+        "n_corr_after_pose_filter": 0,
+        "n_corr_bootstrap_used": 0,
+        "n_corr_post_bootstrap_used": 0,
+    }
+
     # Walk tracked correspondences
     for i in range(kf_feat_idx.size):
         # Keyframe feature index
@@ -347,11 +410,6 @@ def build_pnp_correspondences(
         if lm is None:
             continue
 
-        # Require enough landmark observations
-        n_obs = _landmark_observation_count(lm)
-        if n_obs < min_landmark_observations:
-            continue
-
         # Read world point
         X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
         if X_w.size != 3:
@@ -366,6 +424,30 @@ def build_pnp_correspondences(
         if not np.isfinite(x).all():
             continue
 
+        # Classify the landmark origin and update raw counts
+        n_obs = _landmark_observation_count(lm)
+        bootstrap_born = _landmark_is_bootstrap_born(lm)
+
+        stats["n_corr_raw"] += 1
+        if bootstrap_born:
+            stats["n_corr_bootstrap_born"] += 1
+        else:
+            stats["n_corr_post_bootstrap_born"] += 1
+
+        # Apply the origin-aware pose-support gate
+        if bootstrap_born:
+            if not bool(allow_bootstrap_landmarks_for_pose):
+                continue
+            min_obs_required = int(min_landmark_observations)
+        else:
+            min_obs_required = max(
+                int(min_landmark_observations),
+                int(min_post_bootstrap_observations_for_pose),
+            )
+
+        if n_obs < int(min_obs_required):
+            continue
+
         # Append valid correspondence
         X_cols.append(X_w.reshape(3, 1))
         x_cols.append(x.reshape(2, 1))
@@ -373,15 +455,15 @@ def build_pnp_correspondences(
         cur_idx_keep.append(int(cur_feat_idx[i]))
         kf_idx_keep.append(feat1)
 
+        # Update kept pose-support counts
+        if bootstrap_born:
+            stats["n_corr_bootstrap_used"] += 1
+        else:
+            stats["n_corr_post_bootstrap_used"] += 1
+
     # Return empty bundle if nothing survived
     if len(X_cols) == 0:
-        return PnPCorrespondences(
-            X_w=np.zeros((3, 0), dtype=np.float64),
-            x_cur=np.zeros((2, 0), dtype=np.float64),
-            landmark_ids=np.zeros((0,), dtype=np.int64),
-            cur_feat_idx=np.zeros((0,), dtype=np.int64),
-            kf_feat_idx=np.zeros((0,), dtype=np.int64),
-        )
+        return _empty_pnp_correspondences(), stats
 
     # Stack into canonical arrays
     X_w = np.hstack(X_cols)
@@ -394,13 +476,16 @@ def build_pnp_correspondences(
     X_w = check_points_3xN(X_w, name="X_w", dtype=float, finite=True)
     x_cur = check_points_2xN(x_cur, name="x_cur", dtype=float, finite=True)
 
+    # Record the final kept correspondence count
+    stats["n_corr_after_pose_filter"] = int(X_w.shape[1])
+
     return PnPCorrespondences(
         X_w=X_w,
         x_cur=x_cur,
         landmark_ids=landmark_ids_arr,
         cur_feat_idx=cur_feat_idx_arr,
         kf_feat_idx=kf_feat_idx_arr,
-    )
+    ), stats
 
 
 # Estimate camera pose from 2D–3D correspondences with linear DLT PnP

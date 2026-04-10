@@ -36,6 +36,8 @@ def build_two_view_seed(x1, x2, *, idx_init, X_valid, R1, t1) -> dict:
             {
                 "id": int(lm_id),
                 "X_w": np.asarray(X_w, dtype=np.float64),
+                "birth_source": "bootstrap",
+                "birth_kf": 1,
                 "obs": [
                     {"kf": 0, "feat": j, "xy": np.asarray(x1[:, j], dtype=np.float64)},
                     {"kf": 1, "feat": j, "xy": np.asarray(x2[:, j], dtype=np.float64)},

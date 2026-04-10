@@ -662,6 +662,8 @@ def append_new_landmarks_to_seed(
         landmark = {
             "id": lm_id,
             "X_w": X_i,
+            "birth_source": "map_growth",
+            "birth_kf": int(current_kf),
             "obs": obs,
             "descriptor": descriptor_i,
             "quality": {

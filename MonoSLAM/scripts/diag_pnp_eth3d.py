@@ -22,12 +22,14 @@ from slam.tracking import track_against_keyframe
 def _pnp_solver_cfg() -> dict:
     return {
         "num_trials": 1000,
-        "sample_size": 6,
+        "sample_size": 8,
         "min_inliers": 12,
         "ransac_seed": 0,
         "min_points": 6,
         "rank_tol": 1e-10,
         "min_cheirality_ratio": 0.5,
+        "allow_bootstrap_landmarks_for_pose": True,
+        "min_post_bootstrap_observations_for_pose": 3,
         "eps": 1e-12,
         "refit": True,
         "refine_nonlinear": True,
@@ -80,7 +82,6 @@ def _run_threshold_diag(corrs, K: np.ndarray, *, threshold_px: float, pnp_cfg: d
     row = {
         "threshold_px": float(threshold_px),
         "n_pnp_corr": int(n_pnp_corr),
-        "n_corr_after_filter": int(n_pnp_corr),
         "n_inliers": 0,
         "ok": False,
         "reason": None,
@@ -263,7 +264,11 @@ def main() -> None:
     )
 
     max_frames = dataset_cfg.get("max_frames", None)
-    n_effective = len(seq) if max_frames is None else min(len(seq), int(max_frames))
+    min_required_frames = int(i1 + 1 + num_track)
+    if max_frames is None:
+        n_effective = len(seq)
+    else:
+        n_effective = min(len(seq), max(int(max_frames), int(min_required_frames)))
     if n_effective <= 0:
         raise ValueError("Loaded ETH3D sequence is empty")
 
@@ -351,6 +356,8 @@ def main() -> None:
             rank_tol=float(pnp_cfg["rank_tol"]),
             min_cheirality_ratio=float(pnp_cfg["min_cheirality_ratio"]),
             min_landmark_observations=int(min_landmark_observations),
+            allow_bootstrap_landmarks_for_pose=bool(pnp_cfg["allow_bootstrap_landmarks_for_pose"]),
+            min_post_bootstrap_observations_for_pose=int(pnp_cfg["min_post_bootstrap_observations_for_pose"]),
             eps=float(pnp_cfg["eps"]),
             refit=bool(pnp_cfg["refit"]),
             refine_nonlinear=bool(pnp_cfg["refine_nonlinear"]),
@@ -379,8 +386,12 @@ def main() -> None:
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
             threshold_px=frontend_kwargs["pnp_threshold_px"],
+            min_landmark_observations=int(min_landmark_observations),
             keyframe_kf=ref_keyframe_index,
             current_kf=i,
+            sample_size=int(pnp_cfg["sample_size"]),
+            allow_bootstrap_landmarks_for_pose=bool(pnp_cfg["allow_bootstrap_landmarks_for_pose"]),
+            min_post_bootstrap_observations_for_pose=int(pnp_cfg["min_post_bootstrap_observations_for_pose"]),
         )
 
         # Record the frame context in the JSONL log
@@ -395,9 +406,23 @@ def main() -> None:
             "base_pose_ok": bool(base_pose_out.get("ok", False)),
             "base_pose_reason": base_pose_stats.get("reason", None),
             "base_n_pnp_corr": int(base_pose_stats.get("n_corr", 0)),
-            "n_corr_after_filter": int(base_pose_stats.get("n_corr_after_filter", base_pose_stats.get("n_corr", 0))),
+            "base_n_pnp_corr_raw": int(base_pose_stats.get("n_corr_raw", 0)),
+            "base_n_pnp_corr_bootstrap_born": int(base_pose_stats.get("n_corr_bootstrap_born", 0)),
+            "base_n_pnp_corr_post_bootstrap_born": int(base_pose_stats.get("n_corr_post_bootstrap_born", 0)),
+            "n_corr_after_pose_filter": int(base_pose_stats.get("n_corr_after_pose_filter", base_pose_stats.get("n_corr", 0))),
+            "n_corr_bootstrap_used": int(base_pose_stats.get("n_corr_bootstrap_used", 0)),
+            "n_corr_post_bootstrap_used": int(base_pose_stats.get("n_corr_post_bootstrap_used", 0)),
             "base_n_pnp_inliers": int(base_pose_stats.get("n_pnp_inliers", 0)),
             "min_landmark_observations": int(base_pose_stats.get("min_landmark_observations", min_landmark_observations)),
+            "allow_bootstrap_landmarks_for_pose": bool(
+                base_pose_stats.get("allow_bootstrap_landmarks_for_pose", pnp_cfg["allow_bootstrap_landmarks_for_pose"])
+            ),
+            "min_post_bootstrap_observations_for_pose": int(
+                base_pose_stats.get(
+                    "min_post_bootstrap_observations_for_pose",
+                    pnp_cfg["min_post_bootstrap_observations_for_pose"],
+                )
+            ),
             "landmark_observation_histogram": base_pose_stats.get("landmark_observation_histogram", {}),
             "configured_threshold_px": float(frontend_kwargs["pnp_threshold_px"]),
             "pipeline_ok": bool(frontend_out.get("ok", False)),
@@ -429,7 +454,10 @@ def main() -> None:
         print(
             f"frame {i}: ref_kf={ref_keyframe_index} "
             f"n_track_inliers={int(track_stats.get('n_inliers', 0))} "
-            f"n_corr_after_filter={int(base_pose_stats.get('n_corr_after_filter', base_pose_stats.get('n_corr', 0)))} "
+            f"n_corr_raw={int(base_pose_stats.get('n_corr_raw', 0))} "
+            f"n_corr_after_pose_filter={int(base_pose_stats.get('n_corr_after_pose_filter', base_pose_stats.get('n_corr', 0)))} "
+            f"n_corr_bootstrap_used={int(base_pose_stats.get('n_corr_bootstrap_used', 0))} "
+            f"n_corr_post_used={int(base_pose_stats.get('n_corr_post_bootstrap_used', 0))} "
             f"min_obs={int(base_pose_stats.get('min_landmark_observations', min_landmark_observations))} "
             f"configured_ok={bool(base_pose_out.get('ok', False))} "
             f"promoted={bool(frontend_out.get('stats', {}).get('keyframe_promoted', False))}"
