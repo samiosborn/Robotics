@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from core.checks import align_bool_mask_1d, as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
-from geometry.camera import projection_matrix, reprojection_errors_sq, world_to_camera_points
+from geometry.camera import camera_centre, projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
 
 
@@ -66,6 +66,10 @@ def append_tracked_observations_to_seed(
     pose_out: dict,
     *,
     current_kf: int,
+    K: np.ndarray | None = None,
+    track_out: dict | None = None,
+    max_append_reproj_error_px_existing: float = 2.0,
+    eps: float = 1e-12,
 ) -> tuple[dict, dict]:
     # --- Checks ---
     # Check containers
@@ -74,6 +78,14 @@ def append_tracked_observations_to_seed(
 
     # Check frame index
     current_kf = check_int_ge0(current_kf, name="current_kf")
+
+    # Check append controls
+    max_append_reproj_error_px_existing = check_positive(
+        max_append_reproj_error_px_existing,
+        name="max_append_reproj_error_px_existing",
+        eps=0.0,
+    )
+    eps = check_positive(eps, name="eps", eps=0.0)
 
     # Read correspondence bundle
     corrs = pose_out["corrs"]
@@ -151,23 +163,78 @@ def append_tracked_observations_to_seed(
         "n_duplicate": 0,
         "n_missing_landmark": 0,
         "current_kf": int(current_kf),
+        "max_append_reproj_error_px_existing": float(max_append_reproj_error_px_existing),
+        "n_append_candidates_existing": 0,
+        "n_append_pnp_inliers": int(pnp_inlier_mask.sum()),
+        "n_append_pnp_inliers_added": 0,
+        "n_append_extra_reproj_tested": 0,
+        "n_append_extra_reproj_pass": 0,
+        "n_append_extra_reproj_added": 0,
+        "n_append_total": 0,
+        "n_append_duplicates": 0,
+        "n_append_total_bootstrap_born": 0,
+        "n_append_total_map_growth_born": 0,
+        "n_append_pnp_inliers_added_bootstrap_born": 0,
+        "n_append_pnp_inliers_added_map_growth_born": 0,
+        "n_append_extra_reproj_added_bootstrap_born": 0,
+        "n_append_extra_reproj_added_map_growth_born": 0,
+        "n_landmarks_with_obs_current_kf_after_append": 0,
     }
 
-    # Early exit on no correspondences
-    if N == 0:
-        seed["last_tracked_observation_append_stats"] = stats
-        return seed, stats
+    # Record landmark birth-source stats for appended observations
+    def _record_birth_source_append(lm: dict, *, pnp_inlier: bool, extra_reproj: bool) -> None:
+        birth_source = lm.get("birth_source", None)
+        if birth_source == "bootstrap":
+            stats["n_append_total_bootstrap_born"] += 1
+            if bool(pnp_inlier):
+                stats["n_append_pnp_inliers_added_bootstrap_born"] += 1
+            if bool(extra_reproj):
+                stats["n_append_extra_reproj_added_bootstrap_born"] += 1
+        elif birth_source == "map_growth":
+            stats["n_append_total_map_growth_born"] += 1
+            if bool(pnp_inlier):
+                stats["n_append_pnp_inliers_added_map_growth_born"] += 1
+            if bool(extra_reproj):
+                stats["n_append_extra_reproj_added_map_growth_born"] += 1
 
-    # Append one current-frame observation per inlier landmark track
-    for i in np.flatnonzero(pnp_inlier_mask):
-        lm_id = int(landmark_ids[i])
-        feat_idx = int(cur_feat_idx[i])
-        xy = np.asarray(x_cur[:, i], dtype=np.float64).reshape(2,)
+    # Count landmarks linked to this frame after the append step
+    def _count_landmarks_with_current_observation() -> int:
+        n_linked = 0
+        for lm in landmarks:
+            if not isinstance(lm, dict):
+                continue
 
-        lm_pos = landmark_pos_by_id.get(lm_id, None)
+            obs = lm.get("obs", None)
+            if not isinstance(obs, list):
+                continue
+
+            linked = False
+            for ob in obs:
+                if not isinstance(ob, dict):
+                    continue
+                if int(ob.get("kf", -1)) != int(current_kf):
+                    continue
+                linked = True
+                break
+
+            if linked:
+                n_linked += 1
+
+        return int(n_linked)
+
+    # Append one current-frame observation if it is not already present
+    def _append_current_observation(
+        lm_id: int,
+        feat_idx: int,
+        xy,
+        *,
+        pnp_inlier: bool,
+        extra_reproj: bool,
+    ) -> bool:
+        lm_pos = landmark_pos_by_id.get(int(lm_id), None)
         if lm_pos is None:
             stats["n_missing_landmark"] += 1
-            continue
+            return False
 
         lm = landmarks[lm_pos]
         obs = lm.get("obs", None)
@@ -187,21 +254,161 @@ def append_tracked_observations_to_seed(
 
         if duplicate:
             stats["n_duplicate"] += 1
+            stats["n_append_duplicates"] += 1
             lm["obs"] = obs
-            continue
+            return False
 
         obs.append(
             {
                 "kf": int(current_kf),
                 "feat": int(feat_idx),
-                "xy": xy,
+                "xy": np.asarray(xy, dtype=np.float64).reshape(2,),
             }
         )
         lm["obs"] = obs
         stats["n_added"] += 1
+        stats["n_append_total"] += 1
+        if bool(pnp_inlier):
+            stats["n_append_pnp_inliers_added"] += 1
+        if bool(extra_reproj):
+            stats["n_append_extra_reproj_added"] += 1
+        _record_birth_source_append(lm, pnp_inlier=bool(pnp_inlier), extra_reproj=bool(extra_reproj))
+
+        return True
+
+    # Append one current-frame observation per inlier landmark track
+    pnp_inlier_pairs: set[tuple[int, int]] = set()
+    for i in np.flatnonzero(pnp_inlier_mask):
+        lm_id = int(landmark_ids[i])
+        feat_idx = int(cur_feat_idx[i])
+        xy = np.asarray(x_cur[:, i], dtype=np.float64).reshape(2,)
+
+        pnp_inlier_pairs.add((int(lm_id), int(feat_idx)))
+        _append_current_observation(
+            lm_id,
+            feat_idx,
+            xy,
+            pnp_inlier=True,
+            extra_reproj=False,
+        )
+
+    # Append additional existing-landmark tracks that fit the recovered pose
+    if track_out is not None and K is not None:
+        track_out = check_dict(track_out, name="track_out")
+
+        K_checked = check_matrix_3x3(K, name="K", dtype=float, finite=False)
+        R_cur = check_matrix_3x3(pose_out.get("R", None), name="pose_out['R']", dtype=float, finite=True)
+        t_cur = check_vector_3(pose_out.get("t", None), name="pose_out['t']", dtype=float, finite=True)
+
+        landmark_id_by_feat1 = check_index_array_1d(
+            seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)),
+            name="seed['landmark_id_by_feat1']",
+            dtype=np.int64,
+            allow_negative=True,
+        )
+
+        kf_feat_idx_track = check_index_array_1d(
+            track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)),
+            name="track_out['kf_feat_idx']",
+            dtype=np.int64,
+            allow_negative=True,
+        )
+
+        cur_feat_idx_track = check_index_array_1d(
+            track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)),
+            name="track_out['cur_feat_idx']",
+            dtype=np.int64,
+            allow_negative=True,
+        )
+
+        kf_feat_idx_track, cur_feat_idx_track = check_1d_pair_same_length(
+            kf_feat_idx_track,
+            cur_feat_idx_track,
+            nameA="track_out['kf_feat_idx']",
+            nameB="track_out['cur_feat_idx']",
+        )
+
+        M = int(kf_feat_idx_track.size)
+        xy_cur_track = check_points_xy_N2_rows(
+            track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)),
+            M,
+            name="track_out['xy_cur']",
+            dtype=float,
+            finite=True,
+        )
+
+        valid_kf = (kf_feat_idx_track >= 0) & (kf_feat_idx_track < int(landmark_id_by_feat1.size))
+        valid_cur = cur_feat_idx_track >= 0
+        mapped_existing = np.zeros((M,), dtype=bool)
+        if np.any(valid_kf):
+            mapped_existing[valid_kf] = landmark_id_by_feat1[kf_feat_idx_track[valid_kf]] >= 0
+
+        append_candidate_mask = valid_kf & valid_cur & mapped_existing
+        append_candidate_idx = np.flatnonzero(append_candidate_mask).astype(np.int64, copy=False)
+        stats["n_append_candidates_existing"] = int(append_candidate_idx.size)
+
+        X_cols: list[np.ndarray] = []
+        x_cols: list[np.ndarray] = []
+        lm_ids_extra: list[int] = []
+        feat_idx_extra: list[int] = []
+
+        for track_i in append_candidate_idx:
+            lm_id = int(landmark_id_by_feat1[int(kf_feat_idx_track[track_i])])
+            feat_idx = int(cur_feat_idx_track[track_i])
+            if (int(lm_id), int(feat_idx)) in pnp_inlier_pairs:
+                continue
+
+            lm_pos = landmark_pos_by_id.get(int(lm_id), None)
+            if lm_pos is None:
+                stats["n_missing_landmark"] += 1
+                continue
+
+            lm = landmarks[lm_pos]
+            X_w_i = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+            if X_w_i.size != 3:
+                continue
+            if not np.isfinite(X_w_i).all():
+                continue
+
+            x_i = np.asarray(xy_cur_track[track_i, :2], dtype=np.float64).reshape(2,)
+            if not np.isfinite(x_i).all():
+                continue
+
+            X_cols.append(X_w_i.reshape(3, 1))
+            x_cols.append(x_i.reshape(2, 1))
+            lm_ids_extra.append(int(lm_id))
+            feat_idx_extra.append(int(feat_idx))
+
+        stats["n_append_extra_reproj_tested"] = int(len(lm_ids_extra))
+
+        if len(lm_ids_extra) > 0:
+            X_extra = np.hstack(X_cols)
+            x_extra = np.hstack(x_cols)
+
+            X_c_extra = world_to_camera_points(R_cur, t_cur, X_extra)
+            err_sq = np.asarray(reprojection_errors_sq(K_checked, R_cur, t_cur, X_extra, x_extra), dtype=np.float64).reshape(-1)
+            err_sq[~np.isfinite(err_sq)] = np.inf
+
+            pass_mask = (
+                np.isfinite(err_sq)
+                & (err_sq <= float(max_append_reproj_error_px_existing ** 2))
+                & np.isfinite(X_c_extra).all(axis=0)
+                & (X_c_extra[2, :] > float(eps))
+            )
+            stats["n_append_extra_reproj_pass"] = int(np.sum(pass_mask))
+
+            for extra_i in np.flatnonzero(pass_mask):
+                _append_current_observation(
+                    int(lm_ids_extra[int(extra_i)]),
+                    int(feat_idx_extra[int(extra_i)]),
+                    np.asarray(x_extra[:, int(extra_i)], dtype=np.float64),
+                    pnp_inlier=False,
+                    extra_reproj=True,
+                )
 
     # Pack back into the seed
     seed["landmarks"] = landmarks
+    stats["n_landmarks_with_obs_current_kf_after_append"] = _count_landmarks_with_current_observation()
     seed["last_tracked_observation_append_stats"] = stats
 
     return seed, stats
@@ -420,8 +627,8 @@ def triangulate_new_landmarks(
         )
 
     # Camera centres in world coordinates
-    C_kf = -R_kf.T @ t_kf
-    C_cur = -R_cur.T @ t_cur
+    C_kf = camera_centre(R_kf, t_kf)
+    C_cur = camera_centre(R_cur, t_cur)
 
     # Baseline length
     baseline = float(np.linalg.norm(C_cur - C_kf))

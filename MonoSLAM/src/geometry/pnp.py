@@ -5,11 +5,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import check_3xN_2xN_cols, check_3xN_pair, check_int_gt0, check_matrix_3x3, check_points_2xN, check_points_3xN, check_positive
-from geometry.camera import pixel_to_normalised, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
+from core.checks import align_bool_mask_1d, check_3xN_2xN_cols, check_3xN_pair, check_int_ge0, check_int_gt0, check_matrix_3x3, check_points_2xN, check_points_3xN, check_positive
+from geometry.camera import camera_centre, pixel_to_normalised, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
 from geometry.lie import hat
-from geometry.rotation import axis_angle_to_rotmat
-from geometry.pose import apply_left_pose_increment_wc
+from geometry.rotation import angle_between_rotmats
+from geometry.pose import angle_between_translations, apply_left_pose_increment_wc
 
 # Bundle of 2D–3D correspondences for PnP
 @dataclass(frozen=True)
@@ -206,6 +206,603 @@ def _pnp_inlier_mask_from_pose(X_w, x_cur, K, R, t, *, threshold_px=3.0, eps=1e-
     return inlier_mask, d_sq
 
 
+# Read image height and width from an image shape tuple
+def _image_shape_hw(image_shape) -> tuple[int, int]:
+    shape = tuple(image_shape)
+    if len(shape) < 2:
+        raise ValueError(f"image_shape must have at least two entries; got {image_shape}")
+
+    H = check_int_gt0(int(shape[0]), name="image_shape[0]")
+    W = check_int_gt0(int(shape[1]), name="image_shape[1]")
+
+    return int(H), int(W)
+
+
+# Find connected components in a boolean adjacency matrix
+def _connected_components_from_adjacency(adjacency: np.ndarray) -> tuple[list[list[int]], np.ndarray]:
+    adjacency = np.asarray(adjacency, dtype=bool)
+    if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
+        raise ValueError(f"adjacency must be a square matrix; got {adjacency.shape}")
+
+    N = int(adjacency.shape[0])
+    visited = np.zeros((N,), dtype=bool)
+    component_id_by_item = np.full((N,), -1, dtype=np.int64)
+    components: list[list[int]] = []
+
+    for i in range(N):
+        if bool(visited[i]):
+            continue
+
+        component_id = int(len(components))
+        stack = [int(i)]
+        visited[i] = True
+        members: list[int] = []
+        while len(stack) > 0:
+            j = int(stack.pop())
+            members.append(j)
+            component_id_by_item[j] = component_id
+            neighbours = np.nonzero(adjacency[j] & ~visited)[0]
+            for k in neighbours:
+                visited[int(k)] = True
+                stack.append(int(k))
+
+        components.append(members)
+
+    return components, component_id_by_item
+
+
+# Score spatial coverage of PnP inlier pixels in the current image
+def pnp_inlier_spatial_coverage(x_cur, inlier_mask, image_shape, *, grid_cols: int = 4, grid_rows: int = 3) -> dict:
+    # Check image shape
+    H, W = _image_shape_hw(image_shape)
+
+    # Check grid controls
+    grid_cols = check_int_gt0(grid_cols, name="grid_cols")
+    grid_rows = check_int_gt0(grid_rows, name="grid_rows")
+
+    # Check current image points and inlier mask
+    x_cur = check_points_2xN(x_cur, name="x_cur", dtype=float, finite=True)
+    N = int(x_cur.shape[1])
+    inlier_mask = align_bool_mask_1d(inlier_mask, N, name="pnp_inlier_mask")
+
+    # Start with an empty occupancy grid
+    grid = [[0 for _ in range(int(grid_cols))] for _ in range(int(grid_rows))]
+    xy = np.asarray(x_cur[:, inlier_mask].T, dtype=np.float64)
+    xy = xy[np.isfinite(xy).all(axis=1)]
+    n_inliers = int(xy.shape[0])
+
+    if n_inliers == 0:
+        return {
+            "n_inliers": 0,
+            "image_width": int(W),
+            "image_height": int(H),
+            "grid_cols": int(grid_cols),
+            "grid_rows": int(grid_rows),
+            "occupied_cells": 0,
+            "max_cell_count": 0,
+            "max_cell_fraction": None,
+            "bbox": None,
+            "bbox_area_fraction": None,
+            "occupancy_grid": grid,
+        }
+
+    # Clip pixels to the image support for grid and area accounting
+    xy_clip = xy.copy()
+    xy_clip[:, 0] = np.clip(xy_clip[:, 0], 0.0, float(W - 1))
+    xy_clip[:, 1] = np.clip(xy_clip[:, 1], 0.0, float(H - 1))
+
+    # Fill the coarse occupancy grid
+    for p in xy_clip:
+        col = int(np.floor((float(p[0]) / max(float(W), 1.0)) * int(grid_cols)))
+        row = int(np.floor((float(p[1]) / max(float(H), 1.0)) * int(grid_rows)))
+        col = int(np.clip(col, 0, int(grid_cols) - 1))
+        row = int(np.clip(row, 0, int(grid_rows) - 1))
+        grid[row][col] += 1
+
+    # Compute cell occupancy and image-space bounding box
+    occupied_cells = int(sum(1 for row in grid for value in row if int(value) > 0))
+    max_cell_count = int(max(max(row) for row in grid))
+    max_cell_fraction = float(max_cell_count / max(n_inliers, 1))
+
+    xmin = float(np.min(xy_clip[:, 0]))
+    ymin = float(np.min(xy_clip[:, 1]))
+    xmax = float(np.max(xy_clip[:, 0]))
+    ymax = float(np.max(xy_clip[:, 1]))
+    bbox_w = max(0.0, xmax - xmin)
+    bbox_h = max(0.0, ymax - ymin)
+    image_area = max(float(W * H), 1.0)
+    bbox_area_fraction = float((bbox_w * bbox_h) / image_area)
+
+    return {
+        "n_inliers": int(n_inliers),
+        "image_width": int(W),
+        "image_height": int(H),
+        "grid_cols": int(grid_cols),
+        "grid_rows": int(grid_rows),
+        "occupied_cells": int(occupied_cells),
+        "max_cell_count": int(max_cell_count),
+        "max_cell_fraction": max_cell_fraction,
+        "bbox": [xmin, ymin, xmax, ymax],
+        "bbox_area_fraction": bbox_area_fraction,
+        "occupancy_grid": grid,
+    }
+
+
+# Score connected components of PnP inlier pixels in the current image
+def pnp_inlier_component_support(x_cur, inlier_mask, image_shape, *, radius_px: float = 80.0) -> dict:
+    # Check image shape
+    H, W = _image_shape_hw(image_shape)
+
+    # Check component radius
+    radius_px = check_positive(radius_px, name="radius_px", eps=0.0)
+
+    # Check current image points and inlier mask
+    x_cur = check_points_2xN(x_cur, name="x_cur", dtype=float, finite=True)
+    N = int(x_cur.shape[1])
+    inlier_mask = align_bool_mask_1d(inlier_mask, N, name="pnp_inlier_mask")
+
+    # Collect finite inlier pixels
+    xy = np.asarray(x_cur[:, inlier_mask].T, dtype=np.float64)
+    xy = xy[np.isfinite(xy).all(axis=1)]
+    n_inliers = int(xy.shape[0])
+
+    if n_inliers == 0:
+        return {
+            "n_inliers": 0,
+            "image_width": int(W),
+            "image_height": int(H),
+            "radius_px": float(radius_px),
+            "component_count": 0,
+            "largest_component_size": 0,
+            "largest_component_fraction": None,
+            "largest_component_bbox": None,
+            "largest_component_bbox_area_fraction": None,
+            "component_sizes": [],
+            "component_bboxes": [],
+            "component_bbox_area_fractions": [],
+            "component_id_by_inlier": [],
+        }
+
+    # Clip pixels to the image support for area accounting
+    xy_clip = xy.copy()
+    xy_clip[:, 0] = np.clip(xy_clip[:, 0], 0.0, float(W - 1))
+    xy_clip[:, 1] = np.clip(xy_clip[:, 1], 0.0, float(H - 1))
+
+    # Build a radius adjacency matrix
+    dxy = xy_clip[:, None, :] - xy_clip[None, :, :]
+    dist_sq = np.sum(dxy * dxy, axis=2)
+    radius_sq = float(radius_px) * float(radius_px)
+    adjacency = dist_sq <= radius_sq
+
+    # Find connected components with a small explicit stack
+    components, component_id_by_inlier = _connected_components_from_adjacency(adjacency)
+
+    # Summarise each component bbox
+    image_area = max(float(W * H), 1.0)
+    component_sizes: list[int] = []
+    component_bboxes: list[list[float]] = []
+    component_bbox_area_fractions: list[float] = []
+    for members in components:
+        pts = xy_clip[np.asarray(members, dtype=np.int64)]
+        xmin = float(np.min(pts[:, 0]))
+        ymin = float(np.min(pts[:, 1]))
+        xmax = float(np.max(pts[:, 0]))
+        ymax = float(np.max(pts[:, 1]))
+        bbox_w = max(0.0, xmax - xmin)
+        bbox_h = max(0.0, ymax - ymin)
+        bbox_area_fraction = float((bbox_w * bbox_h) / image_area)
+
+        component_sizes.append(int(len(members)))
+        component_bboxes.append([xmin, ymin, xmax, ymax])
+        component_bbox_area_fractions.append(bbox_area_fraction)
+
+    # Select the largest component
+    largest_component_index = int(np.argmax(np.asarray(component_sizes, dtype=np.int64)))
+    largest_component_size = int(component_sizes[largest_component_index])
+    largest_component_fraction = float(largest_component_size / max(n_inliers, 1))
+
+    return {
+        "n_inliers": int(n_inliers),
+        "image_width": int(W),
+        "image_height": int(H),
+        "radius_px": float(radius_px),
+        "component_count": int(len(components)),
+        "largest_component_size": int(largest_component_size),
+        "largest_component_fraction": largest_component_fraction,
+        "largest_component_bbox": component_bboxes[largest_component_index],
+        "largest_component_bbox_area_fraction": float(component_bbox_area_fractions[largest_component_index]),
+        "component_sizes": component_sizes,
+        "component_bboxes": component_bboxes,
+        "component_bbox_area_fractions": component_bbox_area_fractions,
+        "component_id_by_inlier": [int(v) for v in component_id_by_inlier.tolist()],
+    }
+
+
+# Evaluate configured spatial-coverage rejection reasons
+def pnp_spatial_coverage_gate_reasons(
+    coverage: dict,
+    *,
+    min_occupied_cells: int,
+    max_single_cell_fraction: float,
+    min_bbox_area_fraction: float,
+) -> list[str]:
+    coverage = coverage if isinstance(coverage, dict) else {}
+    gate_reasons: list[str] = []
+    occupied_cells = int(coverage.get("occupied_cells", 0))
+    max_cell_fraction = coverage.get("max_cell_fraction", None)
+    bbox_area_fraction = coverage.get("bbox_area_fraction", None)
+
+    if occupied_cells < int(min_occupied_cells):
+        gate_reasons.append("occupied_cells_low")
+    if max_cell_fraction is None or float(max_cell_fraction) > float(max_single_cell_fraction):
+        gate_reasons.append("single_cell_fraction_high")
+    if bbox_area_fraction is None or float(bbox_area_fraction) < float(min_bbox_area_fraction):
+        gate_reasons.append("bbox_area_fraction_low")
+
+    return gate_reasons
+
+
+# Evaluate configured component-support rejection reasons
+def pnp_component_support_gate_reasons(
+    component_support: dict,
+    *,
+    min_component_count: int,
+    max_largest_component_fraction: float,
+    min_largest_component_bbox_area_fraction: float,
+) -> list[str]:
+    component_support = component_support if isinstance(component_support, dict) else {}
+    gate_reasons: list[str] = []
+    component_count = int(component_support.get("component_count", 0))
+    largest_component_fraction = component_support.get("largest_component_fraction", None)
+    largest_component_bbox_area_fraction = component_support.get("largest_component_bbox_area_fraction", None)
+
+    if component_count < int(min_component_count):
+        gate_reasons.append("component_count_low")
+    if largest_component_fraction is None or float(largest_component_fraction) > float(max_largest_component_fraction):
+        gate_reasons.append("largest_component_fraction_high")
+    if largest_component_bbox_area_fraction is None or float(largest_component_bbox_area_fraction) < float(min_largest_component_bbox_area_fraction):
+        gate_reasons.append("largest_component_bbox_area_fraction_low")
+
+    return gate_reasons
+
+
+# Classify threshold-stability diagnostics from pose and support comparisons
+def pnp_threshold_stability_flags(
+    *,
+    ref_pose_ok: bool,
+    compare_pose_ok: bool,
+    ref_threshold_px: float,
+    compare_threshold_px: float,
+    support_iou,
+    support_union: int,
+    translation_direction_delta_deg,
+    camera_centre_direction_delta_deg=None,
+    min_support_iou: float = 0.25,
+    max_translation_direction_angle_deg: float = 120.0,
+    max_camera_centre_direction_angle_deg: float = 120.0,
+    disjoint_support_iou: float = 0.05,
+    camera_center_direction_delta_deg=None,
+    max_camera_center_direction_angle_deg: float | None = None,
+) -> dict:
+    if camera_center_direction_delta_deg is not None:
+        camera_centre_direction_delta_deg = camera_center_direction_delta_deg
+    if max_camera_center_direction_angle_deg is not None:
+        max_camera_centre_direction_angle_deg = max_camera_center_direction_angle_deg
+
+    ref_is_looser = float(ref_threshold_px) > float(compare_threshold_px)
+    compare_is_looser = float(compare_threshold_px) > float(ref_threshold_px)
+    one_solution_only_at_looser = (bool(ref_pose_ok) != bool(compare_pose_ok)) and (
+        (bool(ref_pose_ok) and bool(ref_is_looser)) or (bool(compare_pose_ok) and bool(compare_is_looser))
+    )
+    one_solution_only_at_stricter = (bool(ref_pose_ok) != bool(compare_pose_ok)) and (
+        (bool(ref_pose_ok) and bool(compare_is_looser)) or (bool(compare_pose_ok) and bool(ref_is_looser))
+    )
+
+    supports_effectively_disjoint = bool(compare_pose_ok) and support_iou is not None and int(support_union) > 0 and float(support_iou) <= float(disjoint_support_iou)
+    support_iou_low = bool(compare_pose_ok) and support_iou is not None and float(support_iou) < float(min_support_iou)
+    translation_direction_disagrees = translation_direction_delta_deg is not None and float(translation_direction_delta_deg) > float(max_translation_direction_angle_deg)
+    camera_centre_direction_disagrees = camera_centre_direction_delta_deg is not None and float(camera_centre_direction_delta_deg) > float(max_camera_centre_direction_angle_deg)
+
+    instability_reasons: list[str] = []
+    if bool(one_solution_only_at_looser):
+        instability_reasons.append("looser_solution_only")
+    if bool(supports_effectively_disjoint):
+        instability_reasons.append("support_effectively_disjoint")
+    elif bool(support_iou_low):
+        instability_reasons.append("support_iou_low")
+    if bool(translation_direction_disagrees):
+        instability_reasons.append("translation_direction_disagreement")
+    if bool(camera_centre_direction_disagrees):
+        instability_reasons.append("camera_centre_direction_disagreement")
+
+    unstable = len(instability_reasons) > 0
+
+    return {
+        "one_solution_only_at_looser_threshold": bool(one_solution_only_at_looser),
+        "one_solution_only_at_stricter_threshold": bool(one_solution_only_at_stricter),
+        "supports_effectively_disjoint": bool(supports_effectively_disjoint),
+        "support_iou_low": bool(support_iou_low),
+        "translation_direction_disagrees": bool(translation_direction_disagrees),
+        "camera_centre_direction_disagrees": bool(camera_centre_direction_disagrees),
+        "unstable": bool(unstable),
+        "instability_reasons": instability_reasons,
+        "classification": "unstable" if bool(unstable) else ("stable" if bool(compare_pose_ok) else "unavailable"),
+    }
+
+
+# Convert correspondence pixels to canonical (N,2) image coordinates
+def _as_correspondence_xy_N2(xy, *, name: str) -> np.ndarray:
+    # Convert array
+    arr = np.asarray(xy, dtype=np.float64)
+
+    # Accept the tracking convention
+    if arr.ndim == 2 and arr.shape[1] == 2:
+        out = arr
+
+    # Accept the PnP convention
+    elif arr.ndim == 2 and arr.shape[0] == 2:
+        out = arr.T
+
+    else:
+        raise ValueError(f"{name} must be (N,2) or (2,N); got {arr.shape}")
+
+    # Require finite pixels
+    if not np.isfinite(out).all():
+        raise ValueError(f"{name} must contain only finite values")
+
+    return np.asarray(out, dtype=np.float64)
+
+
+# Score tracked pose candidates by local displacement consistency in keyframe image space
+def pnp_local_displacement_consistency_mask(
+    xy_kf,
+    xy_cur,
+    *,
+    radius_px: float = 80.0,
+    min_neighbours: int = 3,
+    max_median_residual_px: float = 12.0,
+    min_keep: int = 0,
+    min_neighbors: int | None = None,
+) -> tuple[np.ndarray, dict]:
+    # Check image coordinates
+    xy_kf = _as_correspondence_xy_N2(xy_kf, name="xy_kf")
+    xy_cur = _as_correspondence_xy_N2(xy_cur, name="xy_cur")
+    if xy_kf.shape != xy_cur.shape:
+        raise ValueError(f"xy_kf and xy_cur must have the same shape; got {xy_kf.shape} and {xy_cur.shape}")
+
+    # Check controls
+    if min_neighbors is not None:
+        min_neighbours = min_neighbors
+    radius_px = check_positive(radius_px, name="radius_px", eps=0.0)
+    min_neighbours = check_int_ge0(min_neighbours, name="min_neighbours")
+    max_median_residual_px = check_positive(max_median_residual_px, name="max_median_residual_px", eps=0.0)
+    min_keep = check_int_ge0(min_keep, name="min_keep")
+
+    # Read correspondence count
+    N = int(xy_kf.shape[0])
+
+    # Start from a keep-all mask for empty inputs
+    if N == 0:
+        stats = {
+            "n_input": 0,
+            "n_keep": 0,
+            "n_removed": 0,
+            "radius_px": float(radius_px),
+            "min_neighbours": int(min_neighbours),
+            "max_median_residual_px": float(max_median_residual_px),
+            "min_keep": int(min_keep),
+            "min_keep_fallback": False,
+            "n_too_few_neighbours": 0,
+            "n_motion_inconsistent": 0,
+            "neighbour_count_min": None,
+            "neighbour_count_median": None,
+            "neighbour_count_max": None,
+            "residual_median_px": None,
+            "residual_p75_px": None,
+            "residual_p90_px": None,
+            "residual_max_px": None,
+        }
+        return np.zeros((0,), dtype=bool), stats
+
+    # Compute local neighbourhoods in the reference keyframe
+    dxy_kf = xy_kf[:, None, :] - xy_kf[None, :, :]
+    dist_kf = np.sqrt(np.sum(dxy_kf * dxy_kf, axis=2))
+    neighbour_mask = (dist_kf <= float(radius_px)) & ~np.eye(N, dtype=bool)
+    neighbour_count = np.sum(neighbour_mask, axis=1).astype(np.int64)
+
+    # Compute current-frame displacement vectors
+    displacement = xy_cur - xy_kf
+    residual_px = np.full((N,), np.nan, dtype=np.float64)
+    keep = np.ones((N,), dtype=bool)
+
+    # Compare each displacement with the local median displacement
+    for i in range(N):
+        local = neighbour_mask[i]
+        if int(neighbour_count[i]) < int(min_neighbours):
+            keep[i] = False
+            continue
+        if int(neighbour_count[i]) == 0:
+            keep[i] = True
+            continue
+
+        local_disp = displacement[local]
+        median_disp = np.median(local_disp, axis=0)
+        residual_px[i] = float(np.linalg.norm(displacement[i] - median_disp))
+        keep[i] = bool(residual_px[i] <= float(max_median_residual_px))
+
+    # Preserve the bundle when the configured floor would be violated
+    min_keep_fallback = False
+    if int(min_keep) > 0 and int(np.sum(keep)) < int(min_keep):
+        min_keep_fallback = True
+        keep = np.ones((N,), dtype=bool)
+
+    # Summarise residuals where a local model was available
+    finite_residual = residual_px[np.isfinite(residual_px)]
+    if int(finite_residual.size) == 0:
+        residual_median_px = None
+        residual_p75_px = None
+        residual_p90_px = None
+        residual_max_px = None
+    else:
+        residual_median_px = float(np.median(finite_residual))
+        residual_p75_px = float(np.percentile(finite_residual, 75))
+        residual_p90_px = float(np.percentile(finite_residual, 90))
+        residual_max_px = float(np.max(finite_residual))
+
+    # Pack compact diagnostic stats
+    too_few_neighbours = neighbour_count < int(min_neighbours)
+    motion_inconsistent = np.isfinite(residual_px) & (residual_px > float(max_median_residual_px))
+    stats = {
+        "n_input": int(N),
+        "n_keep": int(np.sum(keep)),
+        "n_removed": int(N - int(np.sum(keep))),
+        "radius_px": float(radius_px),
+        "min_neighbours": int(min_neighbours),
+        "max_median_residual_px": float(max_median_residual_px),
+        "min_keep": int(min_keep),
+        "min_keep_fallback": bool(min_keep_fallback),
+        "n_too_few_neighbours": int(np.sum(too_few_neighbours)),
+        "n_motion_inconsistent": int(np.sum(motion_inconsistent)),
+        "neighbour_count_min": int(np.min(neighbour_count)),
+        "neighbour_count_median": float(np.median(neighbour_count)),
+        "neighbour_count_max": int(np.max(neighbour_count)),
+        "residual_median_px": residual_median_px,
+        "residual_p75_px": residual_p75_px,
+        "residual_p90_px": residual_p90_px,
+        "residual_max_px": residual_max_px,
+    }
+
+    return np.asarray(keep, dtype=bool), stats
+
+
+# Summarise current-image radius density
+def _spatial_radius_density_stats(xy: np.ndarray, *, radius_px: float, max_points_per_radius: int) -> dict:
+    # Convert image points
+    xy = _as_correspondence_xy_N2(xy, name="xy")
+    N = int(xy.shape[0])
+
+    # Return an empty summary
+    if N == 0:
+        return {
+            "count": 0,
+            "radius_px": float(radius_px),
+            "max_points_per_radius": int(max_points_per_radius),
+            "n_dense_points": 0,
+            "density_count_min": None,
+            "density_count_median": None,
+            "density_count_max": None,
+            "component_count": 0,
+            "largest_component_count": 0,
+            "largest_component_fraction": None,
+        }
+
+    # Compute pairwise radius neighbourhoods
+    dxy = xy[:, None, :] - xy[None, :, :]
+    dist = np.sqrt(np.sum(dxy * dxy, axis=2))
+    neighbour_mask = dist <= float(radius_px)
+    density_count = np.sum(neighbour_mask, axis=1).astype(np.int64)
+
+    # Find connected radius components
+    components, _ = _connected_components_from_adjacency(neighbour_mask)
+    component_sizes = [int(len(members)) for members in components]
+
+    # Pack density and component stats
+    largest_component_count = int(max(component_sizes)) if len(component_sizes) > 0 else 0
+    return {
+        "count": int(N),
+        "radius_px": float(radius_px),
+        "max_points_per_radius": int(max_points_per_radius),
+        "n_dense_points": int(np.sum(density_count > int(max_points_per_radius))),
+        "density_count_min": int(np.min(density_count)),
+        "density_count_median": float(np.median(density_count)),
+        "density_count_max": int(np.max(density_count)),
+        "component_count": int(len(component_sizes)),
+        "largest_component_count": int(largest_component_count),
+        "largest_component_fraction": float(largest_component_count / max(N, 1)),
+    }
+
+
+# Thin current-image pose-support points by a local radius cap
+def pnp_current_image_spatial_thinning_mask(
+    xy_cur,
+    *,
+    radius_px: float = 20.0,
+    max_points_per_radius: int = 16,
+    min_keep: int = 0,
+) -> tuple[np.ndarray, dict]:
+    # Check image coordinates
+    xy_cur = _as_correspondence_xy_N2(xy_cur, name="xy_cur")
+
+    # Check controls
+    radius_px = check_positive(radius_px, name="radius_px", eps=0.0)
+    max_points_per_radius = check_int_gt0(max_points_per_radius, name="max_points_per_radius")
+    min_keep = check_int_ge0(min_keep, name="min_keep")
+
+    # Read correspondence count
+    N = int(xy_cur.shape[0])
+
+    # Start from an empty keep mask
+    if N == 0:
+        stats = {
+            "n_input": 0,
+            "n_keep": 0,
+            "n_removed": 0,
+            "radius_px": float(radius_px),
+            "max_points_per_radius": int(max_points_per_radius),
+            "min_keep": int(min_keep),
+            "min_keep_fallback": False,
+            "before": _spatial_radius_density_stats(xy_cur, radius_px=float(radius_px), max_points_per_radius=int(max_points_per_radius)),
+            "after": _spatial_radius_density_stats(xy_cur, radius_px=float(radius_px), max_points_per_radius=int(max_points_per_radius)),
+        }
+        return np.zeros((0,), dtype=bool), stats
+
+    # Compute local density in the current image
+    dxy = xy_cur[:, None, :] - xy_cur[None, :, :]
+    dist = np.sqrt(np.sum(dxy * dxy, axis=2))
+    radius_mask = dist <= float(radius_px)
+    density_count = np.sum(radius_mask, axis=1).astype(np.int64)
+
+    # Keep sparse candidates first to preserve broad support
+    order = np.lexsort((np.arange(N, dtype=np.int64), density_count))
+    keep = np.zeros((N,), dtype=bool)
+    kept_count_by_candidate_radius = np.zeros((N,), dtype=np.int64)
+
+    # Greedily accept candidates without breaking the local radius cap
+    for idx_raw in order:
+        idx = int(idx_raw)
+        affected = radius_mask[:, idx]
+        affected_kept = affected & keep
+
+        if int(kept_count_by_candidate_radius[idx]) + 1 > int(max_points_per_radius):
+            continue
+        if np.any(kept_count_by_candidate_radius[affected_kept] + 1 > int(max_points_per_radius)):
+            continue
+
+        keep[idx] = True
+        kept_count_by_candidate_radius[affected] += 1
+
+    # Preserve the bundle when the configured floor would be violated
+    min_keep_fallback = False
+    if int(min_keep) > 0 and int(np.sum(keep)) < int(min_keep):
+        min_keep_fallback = True
+        keep = np.ones((N,), dtype=bool)
+
+    # Summarise thinning behaviour
+    stats = {
+        "n_input": int(N),
+        "n_keep": int(np.sum(keep)),
+        "n_removed": int(N - int(np.sum(keep))),
+        "radius_px": float(radius_px),
+        "max_points_per_radius": int(max_points_per_radius),
+        "min_keep": int(min_keep),
+        "min_keep_fallback": bool(min_keep_fallback),
+        "before": _spatial_radius_density_stats(xy_cur, radius_px=float(radius_px), max_points_per_radius=int(max_points_per_radius)),
+        "after": _spatial_radius_density_stats(xy_cur[keep], radius_px=float(radius_px), max_points_per_radius=int(max_points_per_radius)),
+    }
+
+    return np.asarray(keep, dtype=bool), stats
+
+
 # Build the Gauss-Newton linear system for pose-only reprojection refinement
 def _linearise_pose_only_reprojection(X_w, x_cur, K, R, t, eps=1e-12):
     # --- Checks ---
@@ -290,13 +887,35 @@ def build_pnp_correspondences(
     min_landmark_observations: int = 2,
     allow_bootstrap_landmarks_for_pose: bool = True,
     min_post_bootstrap_observations_for_pose: int = 3,
+    enable_local_consistency_filter: bool = False,
+    local_consistency_radius_px: float = 80.0,
+    local_consistency_min_neighbours: int = 3,
+    local_consistency_max_median_residual_px: float = 12.0,
+    local_consistency_min_keep: int = 0,
+    enable_spatial_thinning_filter: bool = False,
+    spatial_thinning_radius_px: float = 20.0,
+    spatial_thinning_max_points_per_radius: int = 16,
+    spatial_thinning_min_keep: int = 0,
+    local_consistency_min_neighbors: int | None = None,
 ) -> PnPCorrespondences:
+    if local_consistency_min_neighbors is not None:
+        local_consistency_min_neighbours = local_consistency_min_neighbors
+
     corrs, _ = build_pnp_correspondences_with_stats(
         seed,
         track_out,
         min_landmark_observations=min_landmark_observations,
         allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
         min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
+        enable_local_consistency_filter=enable_local_consistency_filter,
+        local_consistency_radius_px=local_consistency_radius_px,
+        local_consistency_min_neighbours=local_consistency_min_neighbours,
+        local_consistency_max_median_residual_px=local_consistency_max_median_residual_px,
+        local_consistency_min_keep=local_consistency_min_keep,
+        enable_spatial_thinning_filter=enable_spatial_thinning_filter,
+        spatial_thinning_radius_px=spatial_thinning_radius_px,
+        spatial_thinning_max_points_per_radius=spatial_thinning_max_points_per_radius,
+        spatial_thinning_min_keep=spatial_thinning_min_keep,
     )
 
     return corrs
@@ -310,6 +929,16 @@ def build_pnp_correspondences_with_stats(
     min_landmark_observations: int = 2,
     allow_bootstrap_landmarks_for_pose: bool = True,
     min_post_bootstrap_observations_for_pose: int = 3,
+    enable_local_consistency_filter: bool = False,
+    local_consistency_radius_px: float = 80.0,
+    local_consistency_min_neighbours: int = 3,
+    local_consistency_max_median_residual_px: float = 12.0,
+    local_consistency_min_keep: int = 0,
+    enable_spatial_thinning_filter: bool = False,
+    spatial_thinning_radius_px: float = 20.0,
+    spatial_thinning_max_points_per_radius: int = 16,
+    spatial_thinning_min_keep: int = 0,
+    local_consistency_min_neighbors: int | None = None,
 ) -> tuple[PnPCorrespondences, dict]:
     # --- Checks ---
     # Seed must be a dict
@@ -328,6 +957,41 @@ def build_pnp_correspondences_with_stats(
     min_post_bootstrap_observations_for_pose = check_int_gt0(
         min_post_bootstrap_observations_for_pose,
         name="min_post_bootstrap_observations_for_pose",
+    )
+    enable_local_consistency_filter = bool(enable_local_consistency_filter)
+    if local_consistency_min_neighbors is not None:
+        local_consistency_min_neighbours = local_consistency_min_neighbors
+    local_consistency_radius_px = check_positive(
+        local_consistency_radius_px,
+        name="local_consistency_radius_px",
+        eps=0.0,
+    )
+    local_consistency_min_neighbours = check_int_ge0(
+        local_consistency_min_neighbours,
+        name="local_consistency_min_neighbours",
+    )
+    local_consistency_max_median_residual_px = check_positive(
+        local_consistency_max_median_residual_px,
+        name="local_consistency_max_median_residual_px",
+        eps=0.0,
+    )
+    local_consistency_min_keep = check_int_ge0(
+        local_consistency_min_keep,
+        name="local_consistency_min_keep",
+    )
+    enable_spatial_thinning_filter = bool(enable_spatial_thinning_filter)
+    spatial_thinning_radius_px = check_positive(
+        spatial_thinning_radius_px,
+        name="spatial_thinning_radius_px",
+        eps=0.0,
+    )
+    spatial_thinning_max_points_per_radius = check_int_gt0(
+        spatial_thinning_max_points_per_radius,
+        name="spatial_thinning_max_points_per_radius",
+    )
+    spatial_thinning_min_keep = check_int_ge0(
+        spatial_thinning_min_keep,
+        name="spatial_thinning_min_keep",
     )
 
     # Read landmark id map from keyframe features to landmarks
@@ -353,6 +1017,11 @@ def build_pnp_correspondences_with_stats(
         dtype=np.float64,
     )
 
+    xy_kf = np.asarray(
+        track_out.get("xy_kf", np.zeros((0, 2), dtype=np.float64)),
+        dtype=np.float64,
+    )
+
     # Require aligned tracking outputs
     if kf_feat_idx.ndim != 1:
         raise ValueError(f"kf_feat_idx must be 1D; got {kf_feat_idx.shape}")
@@ -368,6 +1037,12 @@ def build_pnp_correspondences_with_stats(
         raise ValueError(
             f"xy_cur and tracked feature indices must have same N; got {xy_cur.shape[0]} and {kf_feat_idx.size}"
         )
+    if xy_kf.ndim != 2 or xy_kf.shape[1] != 2:
+        raise ValueError(f"xy_kf must be (N,2); got {xy_kf.shape}")
+    if xy_kf.shape[0] != kf_feat_idx.size:
+        raise ValueError(
+            f"xy_kf and tracked feature indices must have same N; got {xy_kf.shape[0]} and {kf_feat_idx.size}"
+        )
 
     # Build landmark lookup
     lm_by_id = _landmark_dict_by_id(seed)
@@ -375,6 +1050,7 @@ def build_pnp_correspondences_with_stats(
     # Collect valid correspondences
     X_cols: list[np.ndarray] = []
     x_cols: list[np.ndarray] = []
+    x_kf_rows: list[np.ndarray] = []
     landmark_ids: list[int] = []
     cur_idx_keep: list[int] = []
     kf_idx_keep: list[int] = []
@@ -385,8 +1061,33 @@ def build_pnp_correspondences_with_stats(
         "n_corr_bootstrap_born": 0,
         "n_corr_post_bootstrap_born": 0,
         "n_corr_after_pose_filter": 0,
+        "n_corr_after_local_consistency_filter": 0,
+        "n_corr_after_spatial_thinning_filter": 0,
         "n_corr_bootstrap_used": 0,
         "n_corr_post_bootstrap_used": 0,
+        "n_corr_bootstrap_after_local_consistency": 0,
+        "n_corr_post_bootstrap_after_local_consistency": 0,
+        "n_corr_bootstrap_after_spatial_thinning": 0,
+        "n_corr_post_bootstrap_after_spatial_thinning": 0,
+        "pnp_local_consistency_filter_enabled": bool(enable_local_consistency_filter),
+        "pnp_local_consistency_filter_evaluated": False,
+        "pnp_local_consistency_filter_applied": False,
+        "pnp_local_consistency_filter_removed": 0,
+        "pnp_local_consistency_filter_reason": None,
+        "pnp_local_consistency_radius_px": float(local_consistency_radius_px),
+        "pnp_local_consistency_min_neighbours": int(local_consistency_min_neighbours),
+        "pnp_local_consistency_max_median_residual_px": float(local_consistency_max_median_residual_px),
+        "pnp_local_consistency_min_keep": int(local_consistency_min_keep),
+        "pnp_local_consistency_stats": None,
+        "pnp_spatial_thinning_filter_enabled": bool(enable_spatial_thinning_filter),
+        "pnp_spatial_thinning_filter_evaluated": False,
+        "pnp_spatial_thinning_filter_applied": False,
+        "pnp_spatial_thinning_filter_removed": 0,
+        "pnp_spatial_thinning_filter_reason": None,
+        "pnp_spatial_thinning_radius_px": float(spatial_thinning_radius_px),
+        "pnp_spatial_thinning_max_points_per_radius": int(spatial_thinning_max_points_per_radius),
+        "pnp_spatial_thinning_min_keep": int(spatial_thinning_min_keep),
+        "pnp_spatial_thinning_stats": None,
     }
 
     # Walk tracked correspondences
@@ -424,6 +1125,13 @@ def build_pnp_correspondences_with_stats(
         if not np.isfinite(x).all():
             continue
 
+        # Read keyframe image point
+        x_kf = np.asarray(xy_kf[i], dtype=np.float64).reshape(-1)
+        if x_kf.size != 2:
+            continue
+        if not np.isfinite(x_kf).all():
+            continue
+
         # Classify the landmark origin and update raw counts
         n_obs = _landmark_observation_count(lm)
         bootstrap_born = _landmark_is_bootstrap_born(lm)
@@ -451,6 +1159,7 @@ def build_pnp_correspondences_with_stats(
         # Append valid correspondence
         X_cols.append(X_w.reshape(3, 1))
         x_cols.append(x.reshape(2, 1))
+        x_kf_rows.append(x_kf.reshape(1, 2))
         landmark_ids.append(lm_id)
         cur_idx_keep.append(int(cur_feat_idx[i]))
         kf_idx_keep.append(feat1)
@@ -468,6 +1177,7 @@ def build_pnp_correspondences_with_stats(
     # Stack into canonical arrays
     X_w = np.hstack(X_cols)
     x_cur = np.hstack(x_cols)
+    xy_kf_keep = np.vstack(x_kf_rows)
     landmark_ids_arr = np.asarray(landmark_ids, dtype=np.int64)
     cur_feat_idx_arr = np.asarray(cur_idx_keep, dtype=np.int64)
     kf_feat_idx_arr = np.asarray(kf_idx_keep, dtype=np.int64)
@@ -478,14 +1188,68 @@ def build_pnp_correspondences_with_stats(
 
     # Record the final kept correspondence count
     stats["n_corr_after_pose_filter"] = int(X_w.shape[1])
+    stats["n_corr_after_local_consistency_filter"] = int(X_w.shape[1])
+    stats["n_corr_after_spatial_thinning_filter"] = int(X_w.shape[1])
+    stats["n_corr_bootstrap_after_local_consistency"] = int(stats["n_corr_bootstrap_used"])
+    stats["n_corr_post_bootstrap_after_local_consistency"] = int(stats["n_corr_post_bootstrap_used"])
+    stats["n_corr_bootstrap_after_spatial_thinning"] = int(stats["n_corr_bootstrap_used"])
+    stats["n_corr_post_bootstrap_after_spatial_thinning"] = int(stats["n_corr_post_bootstrap_used"])
 
-    return PnPCorrespondences(
+    # Build the correspondence bundle before the diagnostic local filter
+    corrs = PnPCorrespondences(
         X_w=X_w,
         x_cur=x_cur,
         landmark_ids=landmark_ids_arr,
         cur_feat_idx=cur_feat_idx_arr,
         kf_feat_idx=kf_feat_idx_arr,
-    ), stats
+    )
+
+    # Optionally reject locally inconsistent pose-support tracks
+    if bool(enable_local_consistency_filter):
+        keep_mask, local_stats = pnp_local_displacement_consistency_mask(
+            xy_kf_keep,
+            x_cur.T,
+            radius_px=float(local_consistency_radius_px),
+            min_neighbours=int(local_consistency_min_neighbours),
+            max_median_residual_px=float(local_consistency_max_median_residual_px),
+            min_keep=int(local_consistency_min_keep),
+        )
+        keep_mask = align_bool_mask_1d(keep_mask, int(X_w.shape[1]), name="pnp_local_consistency_keep_mask")
+        stats["pnp_local_consistency_filter_evaluated"] = True
+        stats["pnp_local_consistency_filter_applied"] = True
+        stats["pnp_local_consistency_filter_removed"] = int(np.sum(~keep_mask))
+        stats["pnp_local_consistency_stats"] = local_stats
+
+        corrs = _slice_pnp_correspondences(corrs, keep_mask)
+        birth_bootstrap = np.asarray([_landmark_is_bootstrap_born(lm_by_id.get(int(lm_id), {})) for lm_id in corrs.landmark_ids], dtype=bool)
+        stats["n_corr_after_local_consistency_filter"] = int(corrs.X_w.shape[1])
+        stats["n_corr_bootstrap_after_local_consistency"] = int(np.sum(birth_bootstrap))
+        stats["n_corr_post_bootstrap_after_local_consistency"] = int(corrs.X_w.shape[1] - int(np.sum(birth_bootstrap)))
+        stats["n_corr_after_spatial_thinning_filter"] = int(corrs.X_w.shape[1])
+        stats["n_corr_bootstrap_after_spatial_thinning"] = int(np.sum(birth_bootstrap))
+        stats["n_corr_post_bootstrap_after_spatial_thinning"] = int(corrs.X_w.shape[1] - int(np.sum(birth_bootstrap)))
+
+    # Optionally thin dense current-image pose-support clusters
+    if bool(enable_spatial_thinning_filter):
+        keep_mask, thinning_stats = pnp_current_image_spatial_thinning_mask(
+            corrs.x_cur,
+            radius_px=float(spatial_thinning_radius_px),
+            max_points_per_radius=int(spatial_thinning_max_points_per_radius),
+            min_keep=int(spatial_thinning_min_keep),
+        )
+        keep_mask = align_bool_mask_1d(keep_mask, int(corrs.X_w.shape[1]), name="pnp_spatial_thinning_keep_mask")
+        stats["pnp_spatial_thinning_filter_evaluated"] = True
+        stats["pnp_spatial_thinning_filter_applied"] = True
+        stats["pnp_spatial_thinning_filter_removed"] = int(np.sum(~keep_mask))
+        stats["pnp_spatial_thinning_stats"] = thinning_stats
+
+        corrs = _slice_pnp_correspondences(corrs, keep_mask)
+        birth_bootstrap = np.asarray([_landmark_is_bootstrap_born(lm_by_id.get(int(lm_id), {})) for lm_id in corrs.landmark_ids], dtype=bool)
+        stats["n_corr_after_spatial_thinning_filter"] = int(corrs.X_w.shape[1])
+        stats["n_corr_bootstrap_after_spatial_thinning"] = int(np.sum(birth_bootstrap))
+        stats["n_corr_post_bootstrap_after_spatial_thinning"] = int(corrs.X_w.shape[1] - int(np.sum(birth_bootstrap)))
+
+    return corrs, stats
 
 
 # Estimate camera pose from 2D–3D correspondences with linear DLT PnP
@@ -677,7 +1441,7 @@ def refine_pose_pnp(
         step_norm = float(np.linalg.norm(delta))
 
         # Update pose
-        R_new, t_new = apply_left_pose_increment(R, t, delta, eps=eps)
+        R_new, t_new = apply_left_pose_increment_wc(R, t, delta, eps=eps)
 
         # Score updated pose
         try:
@@ -944,3 +1708,217 @@ def estimate_pose_pnp_ransac(
     stats["mean_inlier_err_sq"] = None if not np.isfinite(best_mean_err) else float(best_mean_err)
 
     return best_R, best_t, best_mask, stats
+
+
+# Compare an accepted PnP pose against a nearby threshold on the same correspondences
+def pnp_threshold_stability_diagnostic(
+    corrs: PnPCorrespondences,
+    K,
+    R_ref,
+    t_ref,
+    ref_inlier_mask,
+    *,
+    ref_threshold_px: float,
+    compare_threshold_px: float,
+    num_trials=1000,
+    sample_size=6,
+    min_inliers=12,
+    seed=0,
+    min_points=6,
+    rank_tol=1e-10,
+    min_cheirality_ratio=0.5,
+    eps=1e-12,
+    refit=True,
+    refine_nonlinear=True,
+    refine_max_iters=15,
+    refine_damping=1e-6,
+    refine_step_tol=1e-9,
+    refine_improvement_tol=1e-9,
+    min_support_iou: float = 0.25,
+    max_translation_direction_angle_deg: float = 120.0,
+    max_camera_centre_direction_angle_deg: float = 120.0,
+    disjoint_support_iou: float = 0.05,
+    max_camera_center_direction_angle_deg: float | None = None,
+) -> dict:
+    # Check intrinsics
+    K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
+
+    # Check correspondence arrays
+    X_w, x_cur = check_3xN_2xN_cols(corrs.X_w, corrs.x_cur, nameX="corrs.X_w", namex="corrs.x_cur", dtype=float, finite=True)
+    N = int(X_w.shape[1])
+
+    # Check solver controls
+    ref_threshold_px = check_positive(ref_threshold_px, name="ref_threshold_px", eps=0.0)
+    compare_threshold_px = check_positive(compare_threshold_px, name="compare_threshold_px", eps=0.0)
+    num_trials = check_int_gt0(num_trials, name="num_trials")
+    sample_size = check_int_gt0(sample_size, name="sample_size")
+    min_inliers = check_int_gt0(min_inliers, name="min_inliers")
+    min_points = check_int_gt0(min_points, name="min_points")
+    rank_tol = check_positive(rank_tol, name="rank_tol", eps=0.0)
+    eps = check_positive(eps, name="eps", eps=0.0)
+
+    # Check stability controls
+    min_support_iou = float(min_support_iou)
+    max_translation_direction_angle_deg = check_positive(
+        max_translation_direction_angle_deg,
+        name="max_translation_direction_angle_deg",
+        eps=0.0,
+    )
+    if max_camera_center_direction_angle_deg is not None:
+        max_camera_centre_direction_angle_deg = max_camera_center_direction_angle_deg
+    max_camera_centre_direction_angle_deg = check_positive(
+        max_camera_centre_direction_angle_deg,
+        name="max_camera_centre_direction_angle_deg",
+        eps=0.0,
+    )
+    disjoint_support_iou = float(disjoint_support_iou)
+    if not np.isfinite(min_support_iou) or min_support_iou < 0.0 or min_support_iou > 1.0:
+        raise ValueError(f"min_support_iou must be in [0,1]; got {min_support_iou}")
+    if not np.isfinite(disjoint_support_iou) or disjoint_support_iou < 0.0 or disjoint_support_iou > 1.0:
+        raise ValueError(f"disjoint_support_iou must be in [0,1]; got {disjoint_support_iou}")
+
+    # Read accepted pose and support
+    ref_ok = (R_ref is not None) and (t_ref is not None)
+    ref_mask = align_bool_mask_1d(ref_inlier_mask, N, name="ref_inlier_mask")
+    ref_inliers = int(np.sum(ref_mask))
+
+    # Start with an unavailable comparison
+    out = {
+        "evaluated": False,
+        "classification": "unavailable",
+        "reason": None,
+        "ref_threshold_px": float(ref_threshold_px),
+        "compare_threshold_px": float(compare_threshold_px),
+        "ref_pose_ok": bool(ref_ok),
+        "compare_pose_ok": False,
+        "compare_pose_reason": None,
+        "ref_inliers": int(ref_inliers),
+        "compare_inliers": 0,
+        "support_overlap": 0,
+        "support_union": int(ref_inliers),
+        "support_iou": None,
+        "support_overlap_over_ref": None,
+        "support_overlap_over_compare": None,
+        "rotation_delta_deg": None,
+        "translation_direction_delta_deg": None,
+        "camera_centre_direction_delta_deg": None,
+        "one_solution_only_at_looser_threshold": False,
+        "one_solution_only_at_stricter_threshold": False,
+        "supports_effectively_disjoint": False,
+        "support_iou_low": False,
+        "translation_direction_disagrees": False,
+        "camera_centre_direction_disagrees": False,
+        "unstable": False,
+        "instability_reasons": [],
+        "min_support_iou": float(min_support_iou),
+        "max_translation_direction_angle_deg": float(max_translation_direction_angle_deg),
+        "max_camera_centre_direction_angle_deg": float(max_camera_centre_direction_angle_deg),
+        "disjoint_support_iou": float(disjoint_support_iou),
+    }
+
+    # Stop if the reference pose is unavailable
+    if not bool(ref_ok):
+        out["reason"] = "reference_pose_missing"
+        return out
+
+    # Stop when RANSAC cannot draw a valid comparison sample
+    if N < int(sample_size):
+        out["reason"] = "too_few_correspondences_for_ransac"
+        return out
+
+    # Estimate the comparison pose without changing the accepted solution
+    try:
+        R_cmp, t_cmp, cmp_mask, cmp_stats = estimate_pose_pnp_ransac(
+            corrs,
+            K,
+            num_trials=int(num_trials),
+            sample_size=int(sample_size),
+            threshold_px=float(compare_threshold_px),
+            min_inliers=int(min_inliers),
+            seed=int(seed),
+            min_points=int(min_points),
+            rank_tol=float(rank_tol),
+            min_cheirality_ratio=float(min_cheirality_ratio),
+            eps=float(eps),
+            refit=bool(refit),
+            refine_nonlinear=bool(refine_nonlinear),
+            refine_max_iters=int(refine_max_iters),
+            refine_damping=float(refine_damping),
+            refine_step_tol=float(refine_step_tol),
+            refine_improvement_tol=float(refine_improvement_tol),
+        )
+    except Exception as exc:
+        out["evaluated"] = True
+        out["reason"] = "comparison_pnp_error"
+        out["compare_pose_reason"] = str(exc)
+        return out
+
+    # Read comparison pose and support
+    cmp_stats = cmp_stats if isinstance(cmp_stats, dict) else {}
+    compare_ok = (R_cmp is not None) and (t_cmp is not None)
+    cmp_mask = align_bool_mask_1d(cmp_mask, N, name="compare_inlier_mask")
+    compare_inliers = int(np.sum(cmp_mask))
+    overlap = ref_mask & cmp_mask
+    union = ref_mask | cmp_mask
+    n_overlap = int(np.sum(overlap))
+    n_union = int(np.sum(union))
+    support_iou = None if n_union == 0 else float(n_overlap / n_union)
+
+    out.update(
+        {
+            "evaluated": True,
+            "reason": None,
+            "compare_pose_ok": bool(compare_ok),
+            "compare_pose_reason": cmp_stats.get("reason", None),
+            "compare_inliers": int(compare_inliers),
+            "support_overlap": int(n_overlap),
+            "support_union": int(n_union),
+            "support_iou": support_iou,
+            "support_overlap_over_ref": None if ref_inliers == 0 else float(n_overlap / max(ref_inliers, 1)),
+            "support_overlap_over_compare": None if compare_inliers == 0 else float(n_overlap / max(compare_inliers, 1)),
+        }
+    )
+
+    # Compare pose directions when both solutions exist
+    if bool(compare_ok):
+        R_ref_arr = np.asarray(R_ref, dtype=np.float64)
+        R_cmp_arr = np.asarray(R_cmp, dtype=np.float64)
+        t_ref_arr = np.asarray(t_ref, dtype=np.float64).reshape(3)
+        t_cmp_arr = np.asarray(t_cmp, dtype=np.float64).reshape(3)
+
+        try:
+            out["rotation_delta_deg"] = float(np.degrees(angle_between_rotmats(R_ref_arr, R_cmp_arr)))
+        except Exception:
+            out["rotation_delta_deg"] = None
+
+        try:
+            out["translation_direction_delta_deg"] = float(np.degrees(angle_between_translations(t_ref_arr, t_cmp_arr)))
+        except Exception:
+            out["translation_direction_delta_deg"] = None
+
+        try:
+            C_ref = camera_centre(R_ref_arr, t_ref_arr)
+            C_cmp = camera_centre(R_cmp_arr, t_cmp_arr)
+            out["camera_centre_direction_delta_deg"] = float(np.degrees(angle_between_translations(C_ref, C_cmp)))
+        except Exception:
+            out["camera_centre_direction_delta_deg"] = None
+
+    # Flag the diagnostic instability modes
+    out.update(
+        pnp_threshold_stability_flags(
+            ref_pose_ok=bool(ref_ok),
+            compare_pose_ok=bool(compare_ok),
+            ref_threshold_px=float(ref_threshold_px),
+            compare_threshold_px=float(compare_threshold_px),
+            support_iou=support_iou,
+            support_union=int(n_union),
+            translation_direction_delta_deg=out["translation_direction_delta_deg"],
+            camera_centre_direction_delta_deg=out["camera_centre_direction_delta_deg"],
+            min_support_iou=float(min_support_iou),
+            max_translation_direction_angle_deg=float(max_translation_direction_angle_deg),
+            max_camera_centre_direction_angle_deg=float(max_camera_centre_direction_angle_deg),
+            disjoint_support_iou=float(disjoint_support_iou),
+        )
+    )
+
+    return out

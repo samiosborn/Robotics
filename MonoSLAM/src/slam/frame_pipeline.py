@@ -10,7 +10,7 @@ from core.checks import check_int_ge0, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
-from slam.pnp_frontend import estimate_pose_from_seed
+from slam.pnp_frontend import estimate_pose_from_seed, pnp_diagnostic_summary_stats
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
 
@@ -50,12 +50,41 @@ def process_frame_against_seed(
     refine_damping: float = 1e-6,
     refine_step_tol: float = 1e-9,
     refine_improvement_tol: float = 1e-9,
+    image_shape: tuple[int, int] | None = None,
+    enable_pnp_spatial_gate: bool = True,
+    pnp_spatial_grid_cols: int = 4,
+    pnp_spatial_grid_rows: int = 3,
+    min_pnp_inlier_cells: int = 1,
+    max_pnp_single_cell_fraction: float = 1.0,
+    min_pnp_bbox_area_fraction: float = 0.01,
+    enable_pnp_component_gate: bool = False,
+    pnp_component_radius_px: float = 80.0,
+    max_pnp_largest_component_fraction: float = 1.0,
+    min_pnp_component_count: int = 0,
+    min_pnp_largest_component_bbox_area_fraction: float = 0.0,
+    enable_pnp_local_consistency_filter: bool = False,
+    pnp_local_consistency_radius_px: float = 80.0,
+    pnp_local_consistency_min_neighbours: int = 3,
+    pnp_local_consistency_max_median_residual_px: float = 12.0,
+    pnp_local_consistency_min_keep: int = 0,
+    enable_pnp_spatial_thinning_filter: bool = False,
+    pnp_spatial_thinning_radius_px: float = 20.0,
+    pnp_spatial_thinning_max_points_per_radius: int = 16,
+    pnp_spatial_thinning_min_keep: int = 0,
+    enable_pnp_threshold_stability_diagnostic: bool = False,
+    pnp_threshold_stability_compare_px: float | None = None,
+    pnp_threshold_stability_min_support_iou: float = 0.25,
+    pnp_threshold_stability_max_translation_direction_deg: float = 120.0,
+    pnp_threshold_stability_max_camera_centre_direction_deg: float = 120.0,
+    pnp_threshold_stability_disjoint_iou: float = 0.05,
+    enable_pnp_threshold_stability_gate: bool = False,
     keyframe_kf: int = 1,
     current_kf: int = -1,
     grow_map: bool = True,
     min_parallax_deg: float = 1.0,
     max_depth_ratio: float = 200.0,
     max_reproj_error_px: float | None = 3.0,
+    max_append_reproj_error_px_existing: float = 2.0,
     consider_keyframe: bool = True,
     keyframe_min_track_inliers: int = 80,
     keyframe_min_pnp_inliers: int = 40,
@@ -64,6 +93,8 @@ def process_frame_against_seed(
     keyframe_min_translation_m: float = 0.10,
     keyframe_min_rotation_deg: float = 5.0,
     keyframe_require_pose: bool = True,
+    pnp_local_consistency_min_neighbors: int | None = None,
+    pnp_threshold_stability_max_camera_center_direction_deg: float | None = None,
 ) -> dict[str, Any]:
     # --- Checks ---
     # Check intrinsics
@@ -77,6 +108,13 @@ def process_frame_against_seed(
     if not isinstance(F_cfg, dict):
         raise ValueError("F_cfg must be a dict")
 
+    # Read current image shape for PnP spatial coverage checks
+    if image_shape is None:
+        cur_im_arr = np.asarray(cur_im)
+        if cur_im_arr.ndim < 2:
+            raise ValueError(f"cur_im must have at least two dimensions; got {cur_im_arr.shape}")
+        image_shape = (int(cur_im_arr.shape[0]), int(cur_im_arr.shape[1]))
+
     # Check frame indices
     keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
     current_kf = int(current_kf)
@@ -88,6 +126,11 @@ def process_frame_against_seed(
     max_depth_ratio = check_positive(max_depth_ratio, name="max_depth_ratio", eps=0.0)
     if max_reproj_error_px is not None:
         max_reproj_error_px = check_positive(max_reproj_error_px, name="max_reproj_error_px", eps=0.0)
+    max_append_reproj_error_px_existing = check_positive(
+        max_append_reproj_error_px_existing,
+        name="max_append_reproj_error_px_existing",
+        eps=0.0,
+    )
 
     # Check keyframe-promotion controls
     keyframe_min_track_inliers = check_int_ge0(keyframe_min_track_inliers, name="keyframe_min_track_inliers")
@@ -103,6 +146,12 @@ def process_frame_against_seed(
     # Require a valid current keyframe index when promotion is enabled
     if bool(consider_keyframe) and current_kf < 0:
         raise ValueError("current_kf must be >= 0 when consider_keyframe is True")
+
+    # Apply compatibility aliases at the process boundary
+    if pnp_local_consistency_min_neighbors is not None:
+        pnp_local_consistency_min_neighbours = pnp_local_consistency_min_neighbors
+    if pnp_threshold_stability_max_camera_center_direction_deg is not None:
+        pnp_threshold_stability_max_camera_centre_direction_deg = pnp_threshold_stability_max_camera_center_direction_deg
 
     # Track current frame against the reference keyframe
     track_out = track_against_keyframe(
@@ -175,6 +224,34 @@ def process_frame_against_seed(
         refine_damping=refine_damping,
         refine_step_tol=refine_step_tol,
         refine_improvement_tol=refine_improvement_tol,
+        image_shape=image_shape,
+        enable_pnp_spatial_gate=enable_pnp_spatial_gate,
+        pnp_spatial_grid_cols=pnp_spatial_grid_cols,
+        pnp_spatial_grid_rows=pnp_spatial_grid_rows,
+        min_pnp_inlier_cells=min_pnp_inlier_cells,
+        max_pnp_single_cell_fraction=max_pnp_single_cell_fraction,
+        min_pnp_bbox_area_fraction=min_pnp_bbox_area_fraction,
+        enable_pnp_component_gate=enable_pnp_component_gate,
+        pnp_component_radius_px=pnp_component_radius_px,
+        max_pnp_largest_component_fraction=max_pnp_largest_component_fraction,
+        min_pnp_component_count=min_pnp_component_count,
+        min_pnp_largest_component_bbox_area_fraction=min_pnp_largest_component_bbox_area_fraction,
+        enable_pnp_local_consistency_filter=enable_pnp_local_consistency_filter,
+        pnp_local_consistency_radius_px=pnp_local_consistency_radius_px,
+        pnp_local_consistency_min_neighbours=pnp_local_consistency_min_neighbours,
+        pnp_local_consistency_max_median_residual_px=pnp_local_consistency_max_median_residual_px,
+        pnp_local_consistency_min_keep=pnp_local_consistency_min_keep,
+        enable_pnp_spatial_thinning_filter=enable_pnp_spatial_thinning_filter,
+        pnp_spatial_thinning_radius_px=pnp_spatial_thinning_radius_px,
+        pnp_spatial_thinning_max_points_per_radius=pnp_spatial_thinning_max_points_per_radius,
+        pnp_spatial_thinning_min_keep=pnp_spatial_thinning_min_keep,
+        enable_pnp_threshold_stability_diagnostic=enable_pnp_threshold_stability_diagnostic,
+        pnp_threshold_stability_compare_px=pnp_threshold_stability_compare_px,
+        pnp_threshold_stability_min_support_iou=pnp_threshold_stability_min_support_iou,
+        pnp_threshold_stability_max_translation_direction_deg=pnp_threshold_stability_max_translation_direction_deg,
+        pnp_threshold_stability_max_camera_centre_direction_deg=pnp_threshold_stability_max_camera_centre_direction_deg,
+        pnp_threshold_stability_disjoint_iou=pnp_threshold_stability_disjoint_iou,
+        enable_pnp_threshold_stability_gate=enable_pnp_threshold_stability_gate,
     )
 
     # Read pose stats
@@ -190,6 +267,7 @@ def process_frame_against_seed(
             "n_track_inliers": int(track_stats.get("n_inliers", 0)),
             "n_pnp_corr": int(pose_stats.get("n_corr", 0)),
             "n_pnp_inliers": int(pose_stats.get("n_pnp_inliers", 0)),
+            **pnp_diagnostic_summary_stats(pose_stats, pnp_component_radius_px=pnp_component_radius_px),
             "n_new_candidates": 0,
             "n_new_triangulated": 0,
             "n_new_added": 0,
@@ -214,6 +292,10 @@ def process_frame_against_seed(
         seed,
         pose_out,
         current_kf=current_kf,
+        K=K,
+        track_out=track_out,
+        max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
+        eps=eps,
     )
     map_growth_out = None
 
@@ -285,11 +367,22 @@ def process_frame_against_seed(
         "n_track_inliers": int(track_stats.get("n_inliers", 0)),
         "n_pnp_corr": int(pose_stats.get("n_corr", 0)),
         "n_pnp_inliers": int(pose_stats.get("n_pnp_inliers", 0)),
+        **pnp_diagnostic_summary_stats(pose_stats, pnp_component_radius_px=pnp_component_radius_px),
         "n_tracked_obs_added": int(tracked_obs_stats.get("n_added", 0)),
+        "n_append_candidates_existing": int(tracked_obs_stats.get("n_append_candidates_existing", 0)),
+        "n_append_pnp_inliers": int(tracked_obs_stats.get("n_append_pnp_inliers", 0)),
+        "n_append_extra_reproj_pass": int(tracked_obs_stats.get("n_append_extra_reproj_pass", 0)),
+        "n_append_total": int(tracked_obs_stats.get("n_append_total", 0)),
+        "n_append_duplicates": int(tracked_obs_stats.get("n_append_duplicates", 0)),
+        "n_landmarks_with_obs_current_kf_after_append": int(
+            tracked_obs_stats.get("n_landmarks_with_obs_current_kf_after_append", 0)
+        ),
+        "max_append_reproj_error_px_existing": float(max_append_reproj_error_px_existing),
         "n_new_candidates": int(map_stats.get("n_candidates", 0)),
         "n_new_triangulated": int(map_stats.get("n_triangulated_valid", 0)),
         "n_new_added": int(map_stats.get("n_added", 0)),
         "seed_landmarks_after": int(len(seed_out.get("landmarks", []))),
+        "n_linked_landmarks_candidate": int(keyframe_stats.get("n_linked_landmarks_candidate", 0)),
         "keyframe_make": bool(keyframe_stats.get("make_keyframe", False)),
         "keyframe_promoted": bool(keyframe_stats.get("promoted", False)),
         "keyframe_reason": keyframe_stats.get("reason", None),

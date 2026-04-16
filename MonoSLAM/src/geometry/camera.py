@@ -25,7 +25,7 @@ def projection_matrix(K, R, t):
 
 
 # Compute camera centre in world coordinates
-def camera_center(R, t):
+def camera_centre(R, t):
     # --- Checks ---
     # Check rotation
     R = check_matrix_3x3(R, name="R", dtype=float, finite=False)
@@ -36,6 +36,10 @@ def camera_center(R, t):
     C = -R.T @ t
 
     return C
+
+
+# Compatibility alias for the established public API
+camera_center = camera_centre
 
 
 # Transform world points into camera coordinates
@@ -159,7 +163,7 @@ class Camera:
         self.P = projection_matrix(self.K, self.R, self.t)
 
         # Cache camera centre
-        self.C = camera_center(self.R, self.t)
+        self.C = camera_centre(self.R, self.t)
 
     # Project world points to image pixels
     def project(self, X_w):

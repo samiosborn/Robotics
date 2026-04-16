@@ -1,2 +1,1 @@
-"""Core utilities shared across modules."""
-
+# Core utilities shared across modules

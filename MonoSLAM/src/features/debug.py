@@ -128,7 +128,7 @@ def print_brief_hamming_diagnostics(
         print("brief_debug[hamming]: invalid levelsB shape")
         return
 
-    # Level gating matches match_brief_hamming_with_scale_gate behavior.
+    # Level gating matches match_brief_hamming_with_scale_gate behaviour
     M = (
         np.abs(levelsA[:, None].astype(np.int64) - levelsB[None, :].astype(np.int64))
         <= int(scale_gate)

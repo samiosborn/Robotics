@@ -2,7 +2,7 @@
 
 ransac:
   seed: 0
-  
+
   F:
     num_trials: 2000
     sample_size: 8
@@ -12,7 +12,7 @@ ransac:
     shrink_guard: 0.8
     recompute_mask: true
     noise_sigma_px: null
-  
+
   H:
     num_trials: 2000
     normalise: true
@@ -22,7 +22,8 @@ ransac:
 bootstrap:
   eps: 1e-9
 
-  mask_policy: "F" # "F" or "cheirality" or "intersection"
+  # "F", "cheirality", or "intersection"
+  mask_policy: "F"
 
   planar:
     gamma: 1.2
@@ -46,3 +47,10 @@ bootstrap:
 
 pnp:
   threshold_px: 8.0
+  enable_pnp_threshold_stability_diagnostic: false
+  enable_pnp_threshold_stability_gate: false
+  pnp_threshold_stability_compare_px: 12.0
+  pnp_threshold_stability_min_support_iou: 0.25
+  pnp_threshold_stability_max_translation_direction_deg: 120.0
+  pnp_threshold_stability_max_camera_centre_direction_deg: 120.0
+  pnp_threshold_stability_disjoint_iou: 0.05

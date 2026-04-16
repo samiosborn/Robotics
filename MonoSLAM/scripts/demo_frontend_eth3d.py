@@ -2,94 +2,17 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
-import sys
 
 import numpy as np
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-sys.path.insert(0, str(SRC))
-
-from core.checks import check_dir, check_file, check_int_ge0, check_int_gt0, check_positive
-from utils.load_config import load_config
+from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
+from core.checks import check_dir, check_int_ge0, check_int_gt0
 from datasets.eth3d import load_eth3d_sequence
 from features.viz import draw_matches
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-
-
-# Load greyscale image for visualisation
-def _load_pil_greyscale(path: Path) -> Image.Image:
-    return Image.open(str(check_file(path, name="image"))).convert("L")
-
-
-# Resolve profile include path
-def _resolve_include_path(rel_path: str, profile_path: Path) -> Path:
-    p = Path(rel_path)
-    if p.is_absolute():
-        return check_file(p, name="include")
-    # Profile includes are written from repo root
-    return check_file(ROOT / p, name="include")
-
-
-# Load profile and build runtime config
-def _load_runtime_cfg(profile_path: Path) -> tuple[dict, np.ndarray]:
-    profile_cfg = load_config(check_file(profile_path, name="profile"))
-
-    includes = profile_cfg["includes"]
-    camera_cfg = load_config(_resolve_include_path(includes["camera"], profile_path))
-    features_cfg = load_config(_resolve_include_path(includes["features"], profile_path))
-    bootstrap_cfg = load_config(_resolve_include_path(includes["bootstrap"], profile_path))
-
-    K_cfg = camera_cfg["camera"]["K"]
-    K = np.array(
-        [
-            [float(K_cfg["fx"]), 0.0, float(K_cfg["cx"])],
-            [0.0, float(K_cfg["fy"]), float(K_cfg["cy"])],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
-    )
-
-    runtime_cfg = {
-        "profile": profile_cfg.get("profile", {}),
-        "dataset": profile_cfg.get("dataset", {}),
-        "run": profile_cfg.get("run", {}),
-        "features": features_cfg,
-        "ransac": bootstrap_cfg["ransac"],
-        "bootstrap": bootstrap_cfg["bootstrap"],
-        "pnp": bootstrap_cfg.get("pnp", {}),
-    }
-
-    return runtime_cfg, K
-
-
-# Build keyword arguments for the current frontend and tracking APIs
-def _frontend_kwargs_from_cfg(cfg: dict) -> dict:
-    if not isinstance(cfg, dict):
-        raise ValueError("cfg must be a dict")
-
-    features_cfg = cfg["features"]
-    ransac_cfg = cfg["ransac"]
-    bootstrap_cfg = cfg["bootstrap"]
-    pnp_cfg = cfg.get("pnp", {})
-
-    return {
-        "feature_cfg": features_cfg,
-        "F_cfg": ransac_cfg["F"],
-        "H_cfg": ransac_cfg["H"],
-        "bootstrap_cfg": bootstrap_cfg,
-        "pnp_threshold_px": check_positive(pnp_cfg.get("threshold_px", 3.0), name="pnp.threshold_px", eps=0.0),
-    }
-
-
-# Append one JSONL record
-def _append_jsonl(path: Path, row: dict) -> None:
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 # Build one compact per-frame summary
@@ -247,12 +170,14 @@ def main() -> None:
     parser.add_argument("--num_track", type=int, default=5)
     # Maximum number of drawn matches
     parser.add_argument("--max_draw", type=int, default=200)
+    _add_pnp_threshold_stability_args(parser)
 
     args = parser.parse_args()
 
     profile_path = Path(args.profile).expanduser().resolve()
     cfg, K = _load_runtime_cfg(profile_path)
     frontend_kwargs = _frontend_kwargs_from_cfg(cfg)
+    frontend_kwargs["pnp_frontend_kwargs"] = _apply_pnp_threshold_stability_cli_overrides(frontend_kwargs["pnp_frontend_kwargs"], args)
 
     dataset_cfg = cfg["dataset"]
     run_cfg = cfg["run"]
@@ -369,9 +294,9 @@ def main() -> None:
             cur_im,
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
-            threshold_px=frontend_kwargs["pnp_threshold_px"],
             keyframe_kf=keyframe_index,
             current_kf=i,
+            **frontend_kwargs["pnp_frontend_kwargs"],
         )
         seed = out["seed"]
         track_out = out["track_out"]

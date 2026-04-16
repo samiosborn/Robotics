@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
-from geometry.camera import camera_center
+from geometry.camera import camera_centre
 from geometry.rotation import angle_between_rotmats
 from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
@@ -252,8 +252,8 @@ def should_make_keyframe(
     t_cur = check_vector_3(pose_out["t"], name="pose_out['t']", dtype=float, finite=False)
 
     # Compute camera centres
-    C_kf = camera_center(R_kf, t_kf)
-    C_cur = camera_center(R_cur, t_cur)
+    C_kf = camera_centre(R_kf, t_kf)
+    C_cur = camera_centre(R_cur, t_cur)
 
     # Compute motion since the current reference keyframe
     translation_m = float(np.linalg.norm(C_cur - C_kf))
