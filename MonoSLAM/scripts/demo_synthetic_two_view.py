@@ -14,13 +14,11 @@ from geometry.essential import essential_from_pose, decompose_essential
 from geometry.triangulation import disambiguate_pose_cheirality
 from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations
-from utils.compat import install_two_view_compat_shims
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.parse_known_args()
-    install_two_view_compat_shims()
 
     # Generate scene data
     scene_data = generate_two_view_scene(n_points=1)

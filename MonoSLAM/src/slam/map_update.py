@@ -43,7 +43,7 @@ class TriangulatedLandmarkBatch:
     X_w: np.ndarray
     # Validity mask over the input candidate bundle
     valid_mask: np.ndarray
-    # Debug / acceptance statistics
+    # Diagnostic and acceptance statistics
     stats: dict
 
 
@@ -894,7 +894,7 @@ def append_new_landmarks_to_seed(
     seed["landmarks"] = landmarks
     seed["landmark_id_by_feat1"] = landmark_id_by_feat1
 
-    # Store append stats for debugging
+    # Store append diagnostics
     seed["last_append_stats"] = {
         "n_in_batch": int(track_idx.size),
         "n_added": int(n_added),

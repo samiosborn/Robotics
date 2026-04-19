@@ -10,7 +10,8 @@ from core.checks import check_int_ge0, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
-from slam.pnp_frontend import estimate_pose_from_seed, pnp_diagnostic_summary_stats
+from slam.pnp_frontend import estimate_pose_from_seed
+from slam.pnp_stats import pnp_diagnostic_summary_stats
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
 
@@ -93,8 +94,6 @@ def process_frame_against_seed(
     keyframe_min_translation_m: float = 0.10,
     keyframe_min_rotation_deg: float = 5.0,
     keyframe_require_pose: bool = True,
-    pnp_local_consistency_min_neighbors: int | None = None,
-    pnp_threshold_stability_max_camera_center_direction_deg: float | None = None,
 ) -> dict[str, Any]:
     # --- Checks ---
     # Check intrinsics
@@ -146,12 +145,6 @@ def process_frame_against_seed(
     # Require a valid current keyframe index when promotion is enabled
     if bool(consider_keyframe) and current_kf < 0:
         raise ValueError("current_kf must be >= 0 when consider_keyframe is True")
-
-    # Apply compatibility aliases at the process boundary
-    if pnp_local_consistency_min_neighbors is not None:
-        pnp_local_consistency_min_neighbours = pnp_local_consistency_min_neighbors
-    if pnp_threshold_stability_max_camera_center_direction_deg is not None:
-        pnp_threshold_stability_max_camera_centre_direction_deg = pnp_threshold_stability_max_camera_center_direction_deg
 
     # Track current frame against the reference keyframe
     track_out = track_against_keyframe(

@@ -13,14 +13,12 @@ from synthetic.two_view import generate_two_view_scene
 from geometry.distances import sampson_distances_sq
 from geometry.fundamental import estimate_fundamental, estimate_fundamental_ransac
 from geometry.camera import Camera
-from geometry.evaluation import evaluate_two_view_model
-from utils.compat import install_two_view_compat_shims
+from demo_fundamental_8point import evaluate_two_view_model
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.parse_known_args()
-
-    install_two_view_compat_shims()
 
     # Generate scene (with noise and outliers)
     noise_sigma = 2

@@ -9,7 +9,8 @@ import numpy as np
 
 from core.checks import as_2xN_points, check_int_gt0, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures, detect_and_describe_image
-from slam.bootstrap import bootstrap_two_view, planar_check
+from geometry.degeneracy import planar_degeneracy_from_masks
+from slam.bootstrap import bootstrap_two_view
 from slam.matching import MatchBundle, match_frames, matched_keypoints_xy
 from slam.seed import attach_feature_bookkeeping_to_seed
 from slam.two_view_consensus import estimate_fundamental_consensus, estimate_homography_consensus, recover_pose_from_fundamental_consensus, select_two_view_mask
@@ -104,7 +105,7 @@ def estimate_two_view(
 
     # Run a planar diagnostic when both masks exist
     if F_mask is not None and H_mask is not None:
-        planar_degen, planar_stats = planar_check(
+        planar_degen, planar_stats = planar_degeneracy_from_masks(
             mask_F=F_mask,
             mask_H=H_mask,
             gamma=planar_gamma,

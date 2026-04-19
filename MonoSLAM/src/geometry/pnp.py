@@ -478,17 +478,10 @@ def pnp_threshold_stability_flags(
     translation_direction_delta_deg,
     camera_centre_direction_delta_deg=None,
     min_support_iou: float = 0.25,
-    max_translation_direction_angle_deg: float = 120.0,
-    max_camera_centre_direction_angle_deg: float = 120.0,
+    max_translation_direction_deg: float = 120.0,
+    max_camera_centre_direction_deg: float = 120.0,
     disjoint_support_iou: float = 0.05,
-    camera_center_direction_delta_deg=None,
-    max_camera_center_direction_angle_deg: float | None = None,
 ) -> dict:
-    if camera_center_direction_delta_deg is not None:
-        camera_centre_direction_delta_deg = camera_center_direction_delta_deg
-    if max_camera_center_direction_angle_deg is not None:
-        max_camera_centre_direction_angle_deg = max_camera_center_direction_angle_deg
-
     ref_is_looser = float(ref_threshold_px) > float(compare_threshold_px)
     compare_is_looser = float(compare_threshold_px) > float(ref_threshold_px)
     one_solution_only_at_looser = (bool(ref_pose_ok) != bool(compare_pose_ok)) and (
@@ -500,8 +493,8 @@ def pnp_threshold_stability_flags(
 
     supports_effectively_disjoint = bool(compare_pose_ok) and support_iou is not None and int(support_union) > 0 and float(support_iou) <= float(disjoint_support_iou)
     support_iou_low = bool(compare_pose_ok) and support_iou is not None and float(support_iou) < float(min_support_iou)
-    translation_direction_disagrees = translation_direction_delta_deg is not None and float(translation_direction_delta_deg) > float(max_translation_direction_angle_deg)
-    camera_centre_direction_disagrees = camera_centre_direction_delta_deg is not None and float(camera_centre_direction_delta_deg) > float(max_camera_centre_direction_angle_deg)
+    translation_direction_disagrees = translation_direction_delta_deg is not None and float(translation_direction_delta_deg) > float(max_translation_direction_deg)
+    camera_centre_direction_disagrees = camera_centre_direction_delta_deg is not None and float(camera_centre_direction_delta_deg) > float(max_camera_centre_direction_deg)
 
     instability_reasons: list[str] = []
     if bool(one_solution_only_at_looser):
@@ -562,7 +555,6 @@ def pnp_local_displacement_consistency_mask(
     min_neighbours: int = 3,
     max_median_residual_px: float = 12.0,
     min_keep: int = 0,
-    min_neighbors: int | None = None,
 ) -> tuple[np.ndarray, dict]:
     # Check image coordinates
     xy_kf = _as_correspondence_xy_N2(xy_kf, name="xy_kf")
@@ -571,8 +563,6 @@ def pnp_local_displacement_consistency_mask(
         raise ValueError(f"xy_kf and xy_cur must have the same shape; got {xy_kf.shape} and {xy_cur.shape}")
 
     # Check controls
-    if min_neighbors is not None:
-        min_neighbours = min_neighbors
     radius_px = check_positive(radius_px, name="radius_px", eps=0.0)
     min_neighbours = check_int_ge0(min_neighbours, name="min_neighbours")
     max_median_residual_px = check_positive(max_median_residual_px, name="max_median_residual_px", eps=0.0)
@@ -879,48 +869,6 @@ def _linearise_pose_only_reprojection(X_w, x_cur, K, R, t, eps=1e-12):
     return J, r, valid
 
 
-# Build 2D–3D correspondences from seed and tracking output
-def build_pnp_correspondences(
-    seed: dict,
-    track_out: dict,
-    *,
-    min_landmark_observations: int = 2,
-    allow_bootstrap_landmarks_for_pose: bool = True,
-    min_post_bootstrap_observations_for_pose: int = 3,
-    enable_local_consistency_filter: bool = False,
-    local_consistency_radius_px: float = 80.0,
-    local_consistency_min_neighbours: int = 3,
-    local_consistency_max_median_residual_px: float = 12.0,
-    local_consistency_min_keep: int = 0,
-    enable_spatial_thinning_filter: bool = False,
-    spatial_thinning_radius_px: float = 20.0,
-    spatial_thinning_max_points_per_radius: int = 16,
-    spatial_thinning_min_keep: int = 0,
-    local_consistency_min_neighbors: int | None = None,
-) -> PnPCorrespondences:
-    if local_consistency_min_neighbors is not None:
-        local_consistency_min_neighbours = local_consistency_min_neighbors
-
-    corrs, _ = build_pnp_correspondences_with_stats(
-        seed,
-        track_out,
-        min_landmark_observations=min_landmark_observations,
-        allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
-        min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
-        enable_local_consistency_filter=enable_local_consistency_filter,
-        local_consistency_radius_px=local_consistency_radius_px,
-        local_consistency_min_neighbours=local_consistency_min_neighbours,
-        local_consistency_max_median_residual_px=local_consistency_max_median_residual_px,
-        local_consistency_min_keep=local_consistency_min_keep,
-        enable_spatial_thinning_filter=enable_spatial_thinning_filter,
-        spatial_thinning_radius_px=spatial_thinning_radius_px,
-        spatial_thinning_max_points_per_radius=spatial_thinning_max_points_per_radius,
-        spatial_thinning_min_keep=spatial_thinning_min_keep,
-    )
-
-    return corrs
-
-
 # Build 2D–3D correspondences from seed and tracking output with pose-support stats
 def build_pnp_correspondences_with_stats(
     seed: dict,
@@ -938,7 +886,6 @@ def build_pnp_correspondences_with_stats(
     spatial_thinning_radius_px: float = 20.0,
     spatial_thinning_max_points_per_radius: int = 16,
     spatial_thinning_min_keep: int = 0,
-    local_consistency_min_neighbors: int | None = None,
 ) -> tuple[PnPCorrespondences, dict]:
     # --- Checks ---
     # Seed must be a dict
@@ -959,8 +906,6 @@ def build_pnp_correspondences_with_stats(
         name="min_post_bootstrap_observations_for_pose",
     )
     enable_local_consistency_filter = bool(enable_local_consistency_filter)
-    if local_consistency_min_neighbors is not None:
-        local_consistency_min_neighbours = local_consistency_min_neighbors
     local_consistency_radius_px = check_positive(
         local_consistency_radius_px,
         name="local_consistency_radius_px",
@@ -1195,7 +1140,7 @@ def build_pnp_correspondences_with_stats(
     stats["n_corr_bootstrap_after_spatial_thinning"] = int(stats["n_corr_bootstrap_used"])
     stats["n_corr_post_bootstrap_after_spatial_thinning"] = int(stats["n_corr_post_bootstrap_used"])
 
-    # Build the correspondence bundle before the diagnostic local filter
+    # Build the correspondence bundle before local consistency filtering
     corrs = PnPCorrespondences(
         X_w=X_w,
         x_cur=x_cur,
@@ -1735,10 +1680,9 @@ def pnp_threshold_stability_diagnostic(
     refine_step_tol=1e-9,
     refine_improvement_tol=1e-9,
     min_support_iou: float = 0.25,
-    max_translation_direction_angle_deg: float = 120.0,
-    max_camera_centre_direction_angle_deg: float = 120.0,
+    max_translation_direction_deg: float = 120.0,
+    max_camera_centre_direction_deg: float = 120.0,
     disjoint_support_iou: float = 0.05,
-    max_camera_center_direction_angle_deg: float | None = None,
 ) -> dict:
     # Check intrinsics
     K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
@@ -1759,16 +1703,14 @@ def pnp_threshold_stability_diagnostic(
 
     # Check stability controls
     min_support_iou = float(min_support_iou)
-    max_translation_direction_angle_deg = check_positive(
-        max_translation_direction_angle_deg,
-        name="max_translation_direction_angle_deg",
+    max_translation_direction_deg = check_positive(
+        max_translation_direction_deg,
+        name="max_translation_direction_deg",
         eps=0.0,
     )
-    if max_camera_center_direction_angle_deg is not None:
-        max_camera_centre_direction_angle_deg = max_camera_center_direction_angle_deg
-    max_camera_centre_direction_angle_deg = check_positive(
-        max_camera_centre_direction_angle_deg,
-        name="max_camera_centre_direction_angle_deg",
+    max_camera_centre_direction_deg = check_positive(
+        max_camera_centre_direction_deg,
+        name="max_camera_centre_direction_deg",
         eps=0.0,
     )
     disjoint_support_iou = float(disjoint_support_iou)
@@ -1811,8 +1753,8 @@ def pnp_threshold_stability_diagnostic(
         "unstable": False,
         "instability_reasons": [],
         "min_support_iou": float(min_support_iou),
-        "max_translation_direction_angle_deg": float(max_translation_direction_angle_deg),
-        "max_camera_centre_direction_angle_deg": float(max_camera_centre_direction_angle_deg),
+        "max_translation_direction_deg": float(max_translation_direction_deg),
+        "max_camera_centre_direction_deg": float(max_camera_centre_direction_deg),
         "disjoint_support_iou": float(disjoint_support_iou),
     }
 
@@ -1915,8 +1857,8 @@ def pnp_threshold_stability_diagnostic(
             translation_direction_delta_deg=out["translation_direction_delta_deg"],
             camera_centre_direction_delta_deg=out["camera_centre_direction_delta_deg"],
             min_support_iou=float(min_support_iou),
-            max_translation_direction_angle_deg=float(max_translation_direction_angle_deg),
-            max_camera_centre_direction_angle_deg=float(max_camera_centre_direction_angle_deg),
+            max_translation_direction_deg=float(max_translation_direction_deg),
+            max_camera_centre_direction_deg=float(max_camera_centre_direction_deg),
             disjoint_support_iou=float(disjoint_support_iou),
         )
     )

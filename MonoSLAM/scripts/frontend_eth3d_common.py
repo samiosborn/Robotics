@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from core.checks import check_file
-from slam.pnp_frontend import pnp_frontend_kwargs_from_cfg, pnp_threshold_stability_cfg_from_pnp, pnp_threshold_stability_defaults
+from slam.pnp_config import pnp_frontend_kwargs_from_cfg, pnp_threshold_stability_cfg_from_pnp, pnp_threshold_stability_defaults
 from utils.load_config import load_config
 
 
@@ -48,14 +48,11 @@ def add_pnp_threshold_stability_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--pnp_threshold_stability_min_support_iou", type=float, default=None)
 
     # Maximum translation-direction disagreement before the accepted pose is flagged unstable
-    parser.add_argument("--pnp_threshold_stability_max_translation_direction_deg", "--pnp_threshold_stability_max_translation_dir_deg", type=float, default=None)
+    parser.add_argument("--pnp_threshold_stability_max_translation_direction_deg", type=float, default=None)
 
     # Maximum camera-centre direction disagreement before the accepted pose is flagged unstable
     parser.add_argument(
         "--pnp_threshold_stability_max_camera_centre_direction_deg",
-        "--pnp_threshold_stability_max_camera_centre_dir_deg",
-        "--pnp_threshold_stability_max_camera_center_direction_deg",
-        "--pnp_threshold_stability_max_camera_center_dir_deg",
         dest="pnp_threshold_stability_max_camera_centre_direction_deg",
         type=float,
         default=None,

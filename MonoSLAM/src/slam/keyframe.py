@@ -20,7 +20,7 @@ class KeyframeDecision:
     make_keyframe: bool
     # Short reason for the decision
     reason: str | None
-    # Debug statistics used by the decision rule
+    # Diagnostic statistics used by the decision rule
     stats: dict
 
 
@@ -337,7 +337,7 @@ def promote_frame_to_keyframe(
     # Store the current keyframe id for bookkeeping
     seed["keyframe_kf"] = int(current_kf)
 
-    # Store promotion stats for debugging
+    # Store promotion diagnostics
     seed["last_keyframe_promotion"] = {
         "current_kf": int(current_kf),
         "n_feat": int(n_feat),

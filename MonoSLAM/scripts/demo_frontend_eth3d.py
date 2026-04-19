@@ -162,11 +162,11 @@ def main() -> None:
     # Optional output override
     parser.add_argument("--out_dir", type=str, default=None)
 
-    # Fixed bootstrap frame 0
+    # Bootstrap source frame index
     parser.add_argument("--i0", type=int, default=0)
-    # Fixed bootstrap frame 1
+    # Bootstrap target frame index
     parser.add_argument("--i1", type=int, default=1)
-    # Number of later frames to process
+    # Number of subsequent frames to process
     parser.add_argument("--num_track", type=int, default=5)
     # Maximum number of drawn matches
     parser.add_argument("--max_draw", type=int, default=200)
@@ -197,7 +197,7 @@ def main() -> None:
     check_dir(dataset_root, name="dataset_root")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Open the lightweight run log
+    # Prepare the lightweight run log
     log_path = out_dir / "frontend_log.jsonl"
 
     i0 = check_int_ge0(args.i0, name="i0")

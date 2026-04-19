@@ -38,10 +38,6 @@ def camera_centre(R, t):
     return C
 
 
-# Compatibility alias for the established public API
-camera_center = camera_centre
-
-
 # Transform world points into camera coordinates
 def world_to_camera_points(R, t, X_w):
     # --- Checks ---

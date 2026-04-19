@@ -171,7 +171,7 @@ def print_brief_hamming_diagnostics(
     if p50 > (0.45 * n_bits_f):
         print(
             f"brief_debug[warn]: p50(best_d) is high ({p50:.1f} > {0.45 * n_bits_f:.1f}); "
-            "matches may be weak/random"
+            "matches may be weak or random"
         )
     if p50 < (0.05 * n_bits_f):
         print(

@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 
 from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
 
-from core.checks import align_bool_mask_1d, check_dir, check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_positive
+from core.checks import align_bool_mask_1d, check_dir, check_int_ge0, check_int_gt0, check_positive
 from datasets.eth3d import load_eth3d_sequence
 from geometry.camera import camera_centre, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
 from geometry.pose import angle_between_translations
@@ -17,12 +17,14 @@ from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thi
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-from slam.pnp_frontend import estimate_pose_from_seed, pnp_frontend_kwargs_from_cfg, pnp_support_diagnostic_stats, pnp_support_gate_stats
+from slam.pnp_config import pnp_frontend_kwargs_from_cfg
+from slam.pnp_frontend import estimate_pose_from_seed
+from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
 from slam.tracking import track_against_keyframe
 
 
-# Colours for the diagnostic-only frame-4 spatial groups
-_FRAME4_SPATIAL_GROUPS = {
+# Colours for threshold-pair spatial diagnostic groups
+_THRESHOLD_PAIR_SPATIAL_GROUPS = {
     "pnp_8px_inliers": {
         "label": "8 px PnP inliers",
         "colour": (30, 220, 80),
@@ -47,7 +49,6 @@ _FRAME4_SPATIAL_GROUPS = {
 # Build the diagnostic PnP solver settings from the shared frontend config parser
 def _pnp_solver_cfg(profile_pnp_cfg: dict | None = None) -> dict:
     source = {
-        "sample_size": 8,
         "pnp_threshold_stability_compare_px": 12.0,
     }
     if isinstance(profile_pnp_cfg, dict):
@@ -72,6 +73,43 @@ def _parse_thresholds(values: list[float]) -> list[float]:
     if len(values) == 0:
         raise ValueError("Expected at least one threshold")
     return [check_positive(v, name="threshold_px", eps=0.0) for v in values]
+
+
+# Apply diagnostic PnP command-line overrides through the canonical config parser
+def _apply_diagnostic_pnp_cli_overrides(pnp_cfg: dict, args: argparse.Namespace) -> dict:
+    raw = dict(pnp_cfg)
+    raw.update(
+        {
+            "enable_pnp_spatial_gate": bool(args.enable_pnp_spatial_gate),
+            "pnp_spatial_grid_cols": args.pnp_spatial_grid_cols,
+            "pnp_spatial_grid_rows": args.pnp_spatial_grid_rows,
+            "min_pnp_inlier_cells": args.min_pnp_inlier_cells,
+            "max_pnp_single_cell_fraction": args.max_pnp_single_cell_fraction,
+            "min_pnp_bbox_area_fraction": args.min_pnp_bbox_area_fraction,
+            "enable_pnp_component_gate": bool(args.enable_pnp_component_gate),
+            "pnp_component_radius_px": args.pnp_component_radius_px,
+            "max_pnp_largest_component_fraction": args.max_pnp_largest_component_fraction,
+            "min_pnp_component_count": args.min_pnp_component_count,
+            "min_pnp_largest_component_bbox_area_fraction": args.min_pnp_largest_component_bbox_area_fraction,
+            "enable_pnp_local_consistency_filter": bool(args.enable_pnp_local_consistency_filter),
+            "pnp_local_consistency_radius_px": args.pnp_local_consistency_radius_px,
+            "pnp_local_consistency_min_neighbours": args.pnp_local_consistency_min_neighbours,
+            "pnp_local_consistency_max_median_residual_px": args.pnp_local_consistency_max_median_residual_px,
+            "pnp_local_consistency_min_keep": args.pnp_local_consistency_min_keep,
+            "enable_pnp_spatial_thinning_filter": bool(args.enable_pnp_spatial_thinning_filter),
+            "pnp_spatial_thinning_radius_px": args.pnp_spatial_thinning_radius_px,
+            "pnp_spatial_thinning_max_points_per_radius": args.pnp_spatial_thinning_max_points_per_radius,
+            "pnp_spatial_thinning_min_keep": args.pnp_spatial_thinning_min_keep,
+        }
+    )
+
+    apply_local_consistency_filter_to_pipeline = bool(args.apply_pnp_local_consistency_filter_to_pipeline)
+    apply_spatial_thinning_filter_to_pipeline = bool(args.apply_pnp_spatial_thinning_filter_to_pipeline)
+    out = pnp_frontend_kwargs_from_cfg(raw)
+    out["apply_pnp_local_consistency_filter_to_pipeline"] = apply_local_consistency_filter_to_pipeline
+    out["apply_pnp_spatial_thinning_filter_to_pipeline"] = apply_spatial_thinning_filter_to_pipeline
+
+    return _apply_pnp_threshold_stability_cli_overrides(out, args)
 
 
 # Measure final pose quality for logging
@@ -103,7 +141,7 @@ def _pose_metrics(corrs, K: np.ndarray, R, t, *, eps: float) -> dict:
 
 
 # Run one threshold sweep item on a fixed correspondence set
-def _run_threshold_diag(corrs, K: np.ndarray, *, threshold_px: float, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
+def _run_threshold_diagnostic(corrs, K: np.ndarray, *, threshold_px: float, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
     n_pnp_corr = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
 
     row = {
@@ -354,7 +392,7 @@ def _non_pnp_reprojection_block(errors_px: np.ndarray, positive_depth: np.ndarra
     }
 
 
-# Run PnP once for the frame-4 pose comparison
+# Run PnP once for the threshold-pair pose comparison
 def _run_pnp_pose_for_comparison(corrs, K: np.ndarray, *, threshold_px: float, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
     N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
     out = {
@@ -454,16 +492,16 @@ def _run_pnp_pose_for_comparison(corrs, K: np.ndarray, *, threshold_px: float, p
     return out
 
 
-# Run the fixed 8 px and 12 px PnP pair once for frame-4 diagnostics
-def _frame4_pnp_8px_12px_pose_pair(corrs, K: np.ndarray, *, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
+# Run the fixed 8 px and 12 px PnP pair once for threshold-pair diagnostics
+def _threshold_pair_pose_pair(corrs, K: np.ndarray, *, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
     return {
         "pose_8px": _run_pnp_pose_for_comparison(corrs, K, threshold_px=8.0, pnp_cfg=pnp_cfg, image_shape=image_shape),
         "pose_12px": _run_pnp_pose_for_comparison(corrs, K, threshold_px=12.0, pnp_cfg=pnp_cfg, image_shape=image_shape),
     }
 
 
-# Build reusable frame-4 threshold group masks
-def _frame4_threshold_group_masks(pose_pair: dict, N: int, *, include_12px_all: bool = False) -> dict[str, np.ndarray]:
+# Build reusable threshold-pair group masks
+def _threshold_pair_group_masks(pose_pair: dict, N: int, *, include_12px_all: bool = False) -> dict[str, np.ndarray]:
     mask_8 = align_bool_mask_1d(pose_pair["pose_8px"]["inlier_mask"], N, name="pnp_8px_inlier_mask")
     mask_12 = align_bool_mask_1d(pose_pair["pose_12px"]["inlier_mask"], N, name="pnp_12px_inlier_mask")
     mask_12_only = mask_12 & ~mask_8
@@ -688,8 +726,8 @@ def _nearest_distance_summary(xy_a: np.ndarray, xy_b: np.ndarray, image_size: tu
     d = xy_a[:, None, :] - xy_b[None, :, :]
     dist = np.sqrt(np.sum(d * d, axis=2))
     nearest = np.concatenate([np.min(dist, axis=1), np.min(dist, axis=0)])
-    diag = float(np.hypot(float(image_size[0]), float(image_size[1])))
-    diag = max(diag, 1.0)
+    image_diagonal = float(np.hypot(float(image_size[0]), float(image_size[1])))
+    image_diagonal = max(image_diagonal, 1.0)
 
     return {
         "count": int(nearest.size),
@@ -697,7 +735,7 @@ def _nearest_distance_summary(xy_a: np.ndarray, xy_b: np.ndarray, image_size: tu
         "median_px": float(np.median(nearest)),
         "mean_px": float(np.mean(nearest)),
         "p75_px": float(np.percentile(nearest, 75)),
-        "median_fraction": float(np.median(nearest) / diag),
+        "median_fraction": float(np.median(nearest) / image_diagonal),
     }
 
 
@@ -776,7 +814,7 @@ def _classify_spatial_relationship(reference: dict, current: dict) -> str:
 
 
 # Draw diagnostic correspondences in colour on the image pair
-def _draw_frame4_spatial_groups(img_ref, img_cur, kps_ref: np.ndarray, kps_cur: np.ndarray, ia: np.ndarray, ib: np.ndarray, groups: list[tuple[str, np.ndarray]], out_path: Path) -> None:
+def _draw_threshold_pair_spatial_groups(img_ref, img_cur, kps_ref: np.ndarray, kps_cur: np.ndarray, ia: np.ndarray, ib: np.ndarray, groups: list[tuple[str, np.ndarray]], out_path: Path) -> None:
     out_path = Path(out_path)
     A = img_ref.convert("RGB")
     B = img_cur.convert("RGB")
@@ -796,7 +834,7 @@ def _draw_frame4_spatial_groups(img_ref, img_cur, kps_ref: np.ndarray, kps_cur: 
     N = min(int(ia.size), int(ib.size))
 
     for group_name, mask in groups:
-        spec = _FRAME4_SPATIAL_GROUPS[group_name]
+        spec = _THRESHOLD_PAIR_SPATIAL_GROUPS[group_name]
         mask = align_bool_mask_1d(mask, N, name=f"{group_name}_mask")
         colour = tuple(int(v) for v in spec["colour"])
         alpha = int(spec["alpha"])
@@ -826,7 +864,7 @@ def _draw_frame4_spatial_groups(img_ref, img_cur, kps_ref: np.ndarray, kps_cur: 
 
     y = 12
     for group_name, mask in groups:
-        spec = _FRAME4_SPATIAL_GROUPS[group_name]
+        spec = _THRESHOLD_PAIR_SPATIAL_GROUPS[group_name]
         colour = tuple(int(v) for v in spec["colour"])
         n_group = int(np.sum(align_bool_mask_1d(mask, N, name=f"{group_name}_legend_mask")))
         legend.rectangle((12, y + 2, 24, y + 14), fill=(colour[0], colour[1], colour[2], 255))
@@ -854,9 +892,9 @@ def _format_optional_point(value) -> str:
 
 
 # Format the threshold-stability diagnostic line
-def _format_pnp_threshold_stability_diag(stability: dict | None) -> str:
+def _format_pnp_threshold_stability_diagnostic(stability: dict | None) -> str:
     if not isinstance(stability, dict):
-        return "  pnp_threshold_stability: unavailable reason=missing_diag"
+        return "  pnp_threshold_stability: unavailable reason=missing_diagnostic"
 
     reasons = stability.get("instability_reasons", [])
     if isinstance(reasons, list):
@@ -867,63 +905,63 @@ def _format_pnp_threshold_stability_diag(stability: dict | None) -> str:
         reason_text = "None"
 
     return (
-        f"  pnp_threshold_stability: class={stability.get('classification', 'unavailable')} "
-        f"thresholds={_format_optional_float(stability.get('ref_threshold_px', None), digits=0)}"
+        f"  pnp_threshold_stability: classification={stability.get('classification', 'unavailable')} "
+        f"threshold_px={_format_optional_float(stability.get('ref_threshold_px', None), digits=0)}"
         f"->{_format_optional_float(stability.get('compare_threshold_px', None), digits=0)} "
-        f"ref_ok={bool(stability.get('ref_pose_ok', False))} "
-        f"cmp_ok={bool(stability.get('compare_pose_ok', False))} "
-        f"n_ref={int(stability.get('ref_inliers', 0))} "
-        f"n_cmp={int(stability.get('compare_inliers', 0))} "
+        f"reference_ok={bool(stability.get('ref_pose_ok', False))} "
+        f"compare_ok={bool(stability.get('compare_pose_ok', False))} "
+        f"reference_inliers={int(stability.get('ref_inliers', 0))} "
+        f"compare_inliers={int(stability.get('compare_inliers', 0))} "
         f"iou={_format_optional_float(stability.get('support_iou', None), digits=3)} "
-        f"rot_deg={_format_optional_float(stability.get('rotation_delta_deg', None), digits=2)} "
-        f"t_dir_deg={_format_optional_float(stability.get('translation_direction_delta_deg', None), digits=2)} "
-        f"C_dir_deg={_format_optional_float(stability.get('camera_centre_direction_delta_deg', None), digits=2)} "
+        f"rotation_delta_deg={_format_optional_float(stability.get('rotation_delta_deg', None), digits=2)} "
+        f"translation_direction_delta_deg={_format_optional_float(stability.get('translation_direction_delta_deg', None), digits=2)} "
+        f"camera_centre_direction_delta_deg={_format_optional_float(stability.get('camera_centre_direction_delta_deg', None), digits=2)} "
         f"looser_only={bool(stability.get('one_solution_only_at_looser_threshold', False))} "
         f"disjoint={bool(stability.get('supports_effectively_disjoint', False))} "
         f"reasons={reason_text}"
     )
 
 
-# Format one frame-4 spatial diagnostic group line
-def _format_frame4_spatial_group(group_name: str, group: dict) -> str:
+# Format one threshold-pair spatial diagnostic group line
+def _format_threshold_pair_spatial_group(group_name: str, group: dict) -> str:
     current = group["current"]
     reference = group["reference"]
     score = group["match_score"]
 
     return (
-        f"  frame4_spatial_group: group={group_name} "
+        f"  threshold_pair_spatial_group: group={group_name} "
         f"count={int(group['count'])} "
-        f"cur_bbox={_format_optional_point(current['bbox'])} "
-        f"cur_area_frac={_format_optional_float(current['bbox_area_fraction'], digits=3)} "
-        f"cur_centroid={_format_optional_point(current['centroid'])} "
-        f"cur_grid={current['occupancy_grid']} "
-        f"cur_max_cell_frac={_format_optional_float(current['max_cell_fraction'], digits=2)} "
-        f"cur_concentrated={bool(current['heavily_concentrated'])} "
-        f"cur_border_frac={_format_optional_float(current['border_fraction'], digits=2)} "
-        f"ref_bbox={_format_optional_point(reference['bbox'])} "
-        f"ref_area_frac={_format_optional_float(reference['bbox_area_fraction'], digits=3)} "
-        f"ref_centroid={_format_optional_point(reference['centroid'])} "
-        f"ref_grid={reference['occupancy_grid']} "
-        f"ref_max_cell_frac={_format_optional_float(reference['max_cell_fraction'], digits=2)} "
-        f"ref_concentrated={bool(reference['heavily_concentrated'])} "
+        f"current_bbox={_format_optional_point(current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(current['bbox_area_fraction'], digits=3)} "
+        f"current_centroid={_format_optional_point(current['centroid'])} "
+        f"current_grid={current['occupancy_grid']} "
+        f"current_max_cell_fraction={_format_optional_float(current['max_cell_fraction'], digits=2)} "
+        f"current_concentrated={bool(current['heavily_concentrated'])} "
+        f"current_border_fraction={_format_optional_float(current['border_fraction'], digits=2)} "
+        f"reference_bbox={_format_optional_point(reference['bbox'])} "
+        f"reference_area_fraction={_format_optional_float(reference['bbox_area_fraction'], digits=3)} "
+        f"reference_centroid={_format_optional_point(reference['centroid'])} "
+        f"reference_grid={reference['occupancy_grid']} "
+        f"reference_max_cell_fraction={_format_optional_float(reference['max_cell_fraction'], digits=2)} "
+        f"reference_concentrated={bool(reference['heavily_concentrated'])} "
         f"score_mean={_format_optional_float(score['mean'], digits=2)} "
         f"score_median={_format_optional_float(score['median'], digits=2)}"
     )
 
 
-# Format frame-4 spatial diagnostic terminal lines
-def _format_frame4_spatial_diag(diag: dict) -> list[str]:
-    if not isinstance(diag, dict) or not bool(diag.get("ok", False)):
-        return [f"  frame4_spatial_diag: unavailable reason={diag.get('reason', None) if isinstance(diag, dict) else None}"]
+# Format threshold-pair spatial diagnostic terminal lines
+def _format_threshold_pair_spatial_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_spatial: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
 
-    paths = diag["visualisation_paths"]
-    relationship = diag["relationship_8px_vs_12px_only"]
-    cur = relationship["current"]
-    ref = relationship["reference"]
+    paths = diagnostic["visualisation_paths"]
+    relationship = diagnostic["relationship_8px_vs_12px_only"]
+    current = relationship["current"]
+    reference = relationship["reference"]
 
     lines = [
         (
-            f"  frame4_spatial_paths: combined={paths['combined']} "
+            f"  threshold_pair_spatial_paths: combined={paths['combined']} "
             f"group8={paths['pnp_8px_inliers']} "
             f"group12only={paths['pnp_12px_only_inliers']} "
             f"rejected={paths['rejected_by_both']}"
@@ -931,26 +969,26 @@ def _format_frame4_spatial_diag(diag: dict) -> list[str]:
     ]
 
     for group_name in ["pnp_8px_inliers", "pnp_12px_only_inliers", "rejected_by_both"]:
-        lines.append(_format_frame4_spatial_group(group_name, diag["groups"][group_name]))
+        lines.append(_format_threshold_pair_spatial_group(group_name, diagnostic["groups"][group_name]))
 
     lines.append(
-        f"  frame4_spatial_relationship: classification={relationship['classification']} "
-        f"cur_bbox_iou={_format_optional_float(cur['bbox_iou'], digits=3)} "
-        f"cur_centroid_dist_frac={_format_optional_float(cur['centroid_distance_fraction'], digits=3)} "
-        f"cur_nn_median_px={_format_optional_float(cur['nearest_distance']['median_px'], digits=2)} "
-        f"cur_grid_overlap={_format_optional_float(cur['grid_overlap_fraction'], digits=2)} "
-        f"ref_bbox_iou={_format_optional_float(ref['bbox_iou'], digits=3)} "
-        f"ref_centroid_dist_frac={_format_optional_float(ref['centroid_distance_fraction'], digits=3)} "
-        f"ref_nn_median_px={_format_optional_float(ref['nearest_distance']['median_px'], digits=2)} "
-        f"ref_grid_overlap={_format_optional_float(ref['grid_overlap_fraction'], digits=2)} "
-        f"score_semantics={diag['match_score_semantics']}"
+        f"  threshold_pair_spatial_relationship: classification={relationship['classification']} "
+        f"current_bbox_iou={_format_optional_float(current['bbox_iou'], digits=3)} "
+        f"current_centroid_distance_fraction={_format_optional_float(current['centroid_distance_fraction'], digits=3)} "
+        f"current_nearest_median_px={_format_optional_float(current['nearest_distance']['median_px'], digits=2)} "
+        f"current_grid_overlap={_format_optional_float(current['grid_overlap_fraction'], digits=2)} "
+        f"reference_bbox_iou={_format_optional_float(reference['bbox_iou'], digits=3)} "
+        f"reference_centroid_distance_fraction={_format_optional_float(reference['centroid_distance_fraction'], digits=3)} "
+        f"reference_nearest_median_px={_format_optional_float(reference['nearest_distance']['median_px'], digits=2)} "
+        f"reference_grid_overlap={_format_optional_float(reference['grid_overlap_fraction'], digits=2)} "
+        f"score_semantics={diagnostic['match_score_semantics']}"
     )
 
     return lines
 
 
-# Build and export the frame-4 spatial diagnostic
-def _build_frame4_pnp_spatial_diag(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, track_out: dict, corrs, out_dir: Path, *, pose_pair: dict, name_suffix: str = "") -> dict:
+# Build and export the threshold-pair spatial diagnostic
+def _build_threshold_pair_spatial_diagnostic(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, track_out: dict, corrs, out_dir: Path, *, pose_pair: dict, name_suffix: str = "") -> dict:
     N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
 
     out = {
@@ -986,17 +1024,17 @@ def _build_frame4_pnp_spatial_diag(seq, ref_keyframe_index: int, frame_index: in
         out["reason"] = "correspondence_feature_index_length_mismatch"
         return out
 
-    group_masks = _frame4_threshold_group_masks(pose_pair, N)
+    group_masks = _threshold_pair_group_masks(pose_pair, N)
     mask_8 = group_masks["pnp_8px_inliers"]
     mask_12_only = group_masks["pnp_12px_only_inliers"]
 
     suffix = "" if str(name_suffix).strip() == "" else f"_{str(name_suffix).strip()}"
-    combined_path = out_dir / f"frame4_pnp_spatial{suffix}_groups_combined.png"
+    combined_path = out_dir / f"threshold_pair_pnp_spatial{suffix}_groups_combined.png"
     group_paths = {
         "combined": str(combined_path),
-        "pnp_8px_inliers": str(out_dir / f"frame4_pnp_spatial{suffix}_8px_inliers.png"),
-        "pnp_12px_only_inliers": str(out_dir / f"frame4_pnp_spatial{suffix}_12px_only_inliers.png"),
-        "rejected_by_both": str(out_dir / f"frame4_pnp_spatial{suffix}_rejected_by_both.png"),
+        "pnp_8px_inliers": str(out_dir / f"threshold_pair_pnp_spatial{suffix}_8px_inliers.png"),
+        "pnp_12px_only_inliers": str(out_dir / f"threshold_pair_pnp_spatial{suffix}_12px_only_inliers.png"),
+        "rejected_by_both": str(out_dir / f"threshold_pair_pnp_spatial{suffix}_rejected_by_both.png"),
     }
 
     draw_order = [
@@ -1004,10 +1042,10 @@ def _build_frame4_pnp_spatial_diag(seq, ref_keyframe_index: int, frame_index: in
         ("pnp_12px_only_inliers", group_masks["pnp_12px_only_inliers"]),
         ("pnp_8px_inliers", group_masks["pnp_8px_inliers"]),
     ]
-    _draw_frame4_spatial_groups(img_ref, img_cur, kps_ref, kps_cur, ia, ib, draw_order, combined_path)
+    _draw_threshold_pair_spatial_groups(img_ref, img_cur, kps_ref, kps_cur, ia, ib, draw_order, combined_path)
 
     for group_name in ["pnp_8px_inliers", "pnp_12px_only_inliers", "rejected_by_both"]:
-        _draw_frame4_spatial_groups(
+        _draw_threshold_pair_spatial_groups(
             img_ref,
             img_cur,
             kps_ref,
@@ -1030,7 +1068,7 @@ def _build_frame4_pnp_spatial_diag(seq, ref_keyframe_index: int, frame_index: in
     for group_name, mask in group_masks.items():
         mask = np.asarray(mask, dtype=bool).reshape(-1)
         groups_out[group_name] = {
-            "label": str(_FRAME4_SPATIAL_GROUPS[group_name]["label"]),
+            "label": str(_THRESHOLD_PAIR_SPATIAL_GROUPS[group_name]["label"]),
             "count": int(np.sum(mask)),
             "reference": _point_spatial_summary(xy_ref[mask], img_ref.size),
             "current": _point_spatial_summary(xy_cur[mask], img_cur.size),
@@ -1072,8 +1110,8 @@ def _build_frame4_pnp_spatial_diag(seq, ref_keyframe_index: int, frame_index: in
     return out
 
 
-# Build a frame-4 diagnostic for the local displacement-consistency filter
-def _build_frame4_local_consistency_diag(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, corrs, *, pose_pair: dict, pnp_cfg: dict) -> dict:
+# Build a threshold-pair diagnostic for the local displacement-consistency filter
+def _build_threshold_pair_local_consistency_diagnostic(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, corrs, *, pose_pair: dict, pnp_cfg: dict) -> dict:
     N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
 
     out = {
@@ -1123,7 +1161,7 @@ def _build_frame4_local_consistency_diag(seq, ref_keyframe_index: int, frame_ind
     keep_mask = align_bool_mask_1d(keep_mask, N, name="local_consistency_keep_mask")
     removed_mask = ~keep_mask
 
-    group_masks = _frame4_threshold_group_masks(pose_pair, N)
+    group_masks = _threshold_pair_group_masks(pose_pair, N)
 
     removed_by_group = {}
     for group_name, group_mask in group_masks.items():
@@ -1157,45 +1195,45 @@ def _build_frame4_local_consistency_diag(seq, ref_keyframe_index: int, frame_ind
     return out
 
 
-# Format the frame-4 local consistency diagnostic
-def _format_frame4_local_consistency_diag(diag: dict) -> list[str]:
-    if not isinstance(diag, dict) or not bool(diag.get("ok", False)):
-        return [f"  frame4_local_consistency: unavailable reason={diag.get('reason', None) if isinstance(diag, dict) else None}"]
+# Format the threshold-pair local consistency diagnostic
+def _format_threshold_pair_local_consistency_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_local_consistency: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
 
-    stats = diag["filter_stats"]
-    removed = diag["removed_by_group"]
-    rem_cur = diag["removed_spatial"]["current"]
+    stats = diagnostic["filter_stats"]
+    removed = diagnostic["removed_by_group"]
+    removed_current = diagnostic["removed_spatial"]["current"]
 
     line_filter = (
-        f"  frame4_local_consistency: before={int(diag['n_pose_eligible_before'])} "
-        f"after={int(diag['n_pose_eligible_after'])} "
-        f"removed={int(diag['n_removed'])} "
+        f"  threshold_pair_local_consistency: before={int(diagnostic['n_pose_eligible_before'])} "
+        f"after={int(diagnostic['n_pose_eligible_after'])} "
+        f"removed={int(diagnostic['n_removed'])} "
         f"too_few_neighbours={int(stats.get('n_too_few_neighbours', 0))} "
         f"motion_inconsistent={int(stats.get('n_motion_inconsistent', 0))} "
-        f"resid_med={_format_optional_float(stats.get('residual_median_px', None), digits=2)} "
-        f"resid_p90={_format_optional_float(stats.get('residual_p90_px', None), digits=2)}"
+        f"residual_median_px={_format_optional_float(stats.get('residual_median_px', None), digits=2)} "
+        f"residual_p90_px={_format_optional_float(stats.get('residual_p90_px', None), digits=2)}"
     )
 
     line_groups = (
-        f"  frame4_local_consistency_removed_groups: "
-        f"pnp8={int(removed['pnp_8px_inliers']['removed'])}/{int(removed['pnp_8px_inliers']['count'])} "
-        f"pnp12only={int(removed['pnp_12px_only_inliers']['removed'])}/{int(removed['pnp_12px_only_inliers']['count'])} "
+        f"  threshold_pair_local_consistency_removed_groups: "
+        f"pnp_8px={int(removed['pnp_8px_inliers']['removed'])}/{int(removed['pnp_8px_inliers']['count'])} "
+        f"pnp_12px_only={int(removed['pnp_12px_only_inliers']['removed'])}/{int(removed['pnp_12px_only_inliers']['count'])} "
         f"rejected={int(removed['rejected_by_both']['removed'])}/{int(removed['rejected_by_both']['count'])}"
     )
 
     line_spatial = (
-        f"  frame4_local_consistency_removed_spatial: "
-        f"cur_bbox={_format_optional_point(rem_cur['bbox'])} "
-        f"cur_area_frac={_format_optional_float(rem_cur['bbox_area_fraction'], digits=3)} "
-        f"cur_grid={rem_cur['occupancy_grid']} "
-        f"cur_max_cell_frac={_format_optional_float(rem_cur['max_cell_fraction'], digits=2)}"
+        f"  threshold_pair_local_consistency_removed_spatial: "
+        f"current_bbox={_format_optional_point(removed_current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(removed_current['bbox_area_fraction'], digits=3)} "
+        f"current_grid={removed_current['occupancy_grid']} "
+        f"current_max_cell_fraction={_format_optional_float(removed_current['max_cell_fraction'], digits=2)}"
     )
 
     return [line_filter, line_groups, line_spatial]
 
 
-# Build a frame-4 diagnostic for current-image spatial thinning
-def _build_frame4_spatial_thinning_diag(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, corrs, *, pose_pair: dict, pnp_cfg: dict) -> dict:
+# Build a threshold-pair diagnostic for current-image spatial thinning
+def _build_threshold_pair_spatial_thinning_diagnostic(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, corrs, *, pose_pair: dict, pnp_cfg: dict) -> dict:
     N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
 
     out = {
@@ -1243,7 +1281,7 @@ def _build_frame4_spatial_thinning_diag(seq, ref_keyframe_index: int, frame_inde
     keep_mask = align_bool_mask_1d(keep_mask, N, name="spatial_thinning_keep_mask")
     removed_mask = ~keep_mask
 
-    group_masks = _frame4_threshold_group_masks(pose_pair, N, include_12px_all=True)
+    group_masks = _threshold_pair_group_masks(pose_pair, N, include_12px_all=True)
 
     removed_by_group = {}
     for group_name, group_mask in group_masks.items():
@@ -1277,54 +1315,54 @@ def _build_frame4_spatial_thinning_diag(seq, ref_keyframe_index: int, frame_inde
     return out
 
 
-# Format the frame-4 current-image spatial thinning diagnostic
-def _format_frame4_spatial_thinning_diag(diag: dict) -> list[str]:
-    if not isinstance(diag, dict) or not bool(diag.get("ok", False)):
-        return [f"  frame4_spatial_thinning: unavailable reason={diag.get('reason', None) if isinstance(diag, dict) else None}"]
+# Format the threshold-pair current-image spatial thinning diagnostic
+def _format_threshold_pair_spatial_thinning_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_spatial_thinning: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
 
-    stats = diag["filter_stats"]
+    stats = diagnostic["filter_stats"]
     before = stats.get("before", {})
     after = stats.get("after", {})
-    removed = diag["removed_by_group"]
-    rem_cur = diag["removed_spatial"]["current"]
-    kept_cur = diag["kept_spatial"]["current"]
+    removed = diagnostic["removed_by_group"]
+    removed_current = diagnostic["removed_spatial"]["current"]
+    kept_current = diagnostic["kept_spatial"]["current"]
 
     line_filter = (
-        f"  frame4_spatial_thinning: before={int(diag['n_pose_eligible_before'])} "
-        f"after={int(diag['n_pose_eligible_after'])} "
-        f"removed={int(diag['n_removed'])} "
+        f"  threshold_pair_spatial_thinning: before={int(diagnostic['n_pose_eligible_before'])} "
+        f"after={int(diagnostic['n_pose_eligible_after'])} "
+        f"removed={int(diagnostic['n_removed'])} "
         f"radius={float(stats.get('radius_px', 0.0)):.1f} "
         f"cap={int(stats.get('max_points_per_radius', 0))} "
         f"dense_before={int(before.get('n_dense_points', 0))} "
         f"dense_after={int(after.get('n_dense_points', 0))} "
         f"density_max_before={int(before.get('density_count_max', 0) or 0)} "
         f"density_max_after={int(after.get('density_count_max', 0) or 0)} "
-        f"largest_comp_before={int(before.get('largest_component_count', 0))} "
-        f"largest_comp_after={int(after.get('largest_component_count', 0))}"
+        f"largest_component_before={int(before.get('largest_component_count', 0))} "
+        f"largest_component_after={int(after.get('largest_component_count', 0))}"
     )
 
     line_groups = (
-        f"  frame4_spatial_thinning_removed_groups: "
-        f"pnp8={int(removed['pnp_8px_inliers']['removed'])}/{int(removed['pnp_8px_inliers']['count'])} "
-        f"pnp12all={int(removed['pnp_12px_all_inliers']['removed'])}/{int(removed['pnp_12px_all_inliers']['count'])} "
-        f"pnp12only={int(removed['pnp_12px_only_inliers']['removed'])}/{int(removed['pnp_12px_only_inliers']['count'])} "
+        f"  threshold_pair_spatial_thinning_removed_groups: "
+        f"pnp_8px={int(removed['pnp_8px_inliers']['removed'])}/{int(removed['pnp_8px_inliers']['count'])} "
+        f"pnp_12px_all={int(removed['pnp_12px_all_inliers']['removed'])}/{int(removed['pnp_12px_all_inliers']['count'])} "
+        f"pnp_12px_only={int(removed['pnp_12px_only_inliers']['removed'])}/{int(removed['pnp_12px_only_inliers']['count'])} "
         f"rejected={int(removed['rejected_by_both']['removed'])}/{int(removed['rejected_by_both']['count'])}"
     )
 
     line_removed_spatial = (
-        f"  frame4_spatial_thinning_removed_spatial: "
-        f"cur_bbox={_format_optional_point(rem_cur['bbox'])} "
-        f"cur_area_frac={_format_optional_float(rem_cur['bbox_area_fraction'], digits=3)} "
-        f"cur_grid={rem_cur['occupancy_grid']} "
-        f"cur_max_cell_frac={_format_optional_float(rem_cur['max_cell_fraction'], digits=2)}"
+        f"  threshold_pair_spatial_thinning_removed_spatial: "
+        f"current_bbox={_format_optional_point(removed_current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(removed_current['bbox_area_fraction'], digits=3)} "
+        f"current_grid={removed_current['occupancy_grid']} "
+        f"current_max_cell_fraction={_format_optional_float(removed_current['max_cell_fraction'], digits=2)}"
     )
 
     line_kept_spatial = (
-        f"  frame4_spatial_thinning_kept_spatial: "
-        f"cur_bbox={_format_optional_point(kept_cur['bbox'])} "
-        f"cur_area_frac={_format_optional_float(kept_cur['bbox_area_fraction'], digits=3)} "
-        f"cur_cells={int(kept_cur['occupied_cells'])} "
-        f"cur_max_cell_frac={_format_optional_float(kept_cur['max_cell_fraction'], digits=2)}"
+        f"  threshold_pair_spatial_thinning_kept_spatial: "
+        f"current_bbox={_format_optional_point(kept_current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(kept_current['bbox_area_fraction'], digits=3)} "
+        f"current_cells={int(kept_current['occupied_cells'])} "
+        f"current_max_cell_fraction={_format_optional_float(kept_current['max_cell_fraction'], digits=2)}"
     )
 
     return [line_filter, line_groups, line_removed_spatial, line_kept_spatial]
@@ -1399,8 +1437,8 @@ def _birth_source_masks(seed: dict, landmark_ids: np.ndarray) -> dict:
     }
 
 
-# Compare frame-4 PnP poses at 8 px and 12 px
-def _compare_frame4_pnp_8px_12px(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: dict, pose_pair: dict | None = None) -> dict:
+# Compare threshold-pair PnP poses at 8 px and 12 px
+def _compare_threshold_pair_poses(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: dict, pose_pair: dict | None = None) -> dict:
     N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
     all_mask = np.ones((N,), dtype=bool)
 
@@ -1411,8 +1449,8 @@ def _compare_frame4_pnp_8px_12px(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: d
         "pose_8px_ok": False,
         "pose_12px_ok": False,
         "rotation_diff_deg": None,
-        "translation_direction_angle_deg": None,
-        "camera_centre_direction_angle_deg": None,
+        "translation_direction_delta_deg": None,
+        "camera_centre_direction_delta_deg": None,
         "inliers_8px": 0,
         "inliers_12px": 0,
         "inlier_overlap": 0,
@@ -1445,11 +1483,11 @@ def _compare_frame4_pnp_8px_12px(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: d
 
     # Run both PnP thresholds on the same correspondence bundle
     if pose_pair is None:
-        pose_pair = _frame4_pnp_8px_12px_pose_pair(corrs, K, pnp_cfg=pnp_cfg)
+        pose_pair = _threshold_pair_pose_pair(corrs, K, pnp_cfg=pnp_cfg)
     pose_8 = pose_pair["pose_8px"]
     pose_12 = pose_pair["pose_12px"]
 
-    group_masks = _frame4_threshold_group_masks(pose_pair, N, include_12px_all=True)
+    group_masks = _threshold_pair_group_masks(pose_pair, N, include_12px_all=True)
     mask_8 = group_masks["pnp_8px_inliers"]
     mask_12 = group_masks["pnp_12px_all_inliers"]
     overlap = mask_8 & mask_12
@@ -1492,21 +1530,21 @@ def _compare_frame4_pnp_8px_12px(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: d
         t_12 = np.asarray(pose_12["t"], dtype=np.float64).reshape(3)
 
         try:
-            translation_direction_angle_deg = float(np.degrees(angle_between_translations(t_8, t_12)))
+            translation_direction_delta_deg = float(np.degrees(angle_between_translations(t_8, t_12)))
         except Exception:
-            translation_direction_angle_deg = None
+            translation_direction_delta_deg = None
 
         C_8 = camera_centre(R_8, t_8)
         C_12 = camera_centre(R_12, t_12)
 
         try:
-            camera_centre_direction_angle_deg = float(np.degrees(angle_between_translations(C_8, C_12)))
+            camera_centre_direction_delta_deg = float(np.degrees(angle_between_translations(C_8, C_12)))
         except Exception:
-            camera_centre_direction_angle_deg = None
+            camera_centre_direction_delta_deg = None
 
         out["rotation_diff_deg"] = float(np.degrees(angle_between_rotmats(R_8, R_12)))
-        out["translation_direction_angle_deg"] = translation_direction_angle_deg
-        out["camera_centre_direction_angle_deg"] = camera_centre_direction_angle_deg
+        out["translation_direction_delta_deg"] = translation_direction_delta_deg
+        out["camera_centre_direction_delta_deg"] = camera_centre_direction_delta_deg
         out["reprojection_all_8px"] = _pose_reprojection_block(corrs, K, R_8, t_8, all_mask, eps=float(pnp_cfg["eps"]))
         out["reprojection_all_12px"] = _pose_reprojection_block(corrs, K, R_12, t_12, all_mask, eps=float(pnp_cfg["eps"]))
         out["unique_12px"]["reprojection_under_8px"] = _pose_reprojection_block(corrs, K, R_8, t_8, unique_12, eps=float(pnp_cfg["eps"]))
@@ -1520,11 +1558,11 @@ def _compare_frame4_pnp_8px_12px(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: d
         compare_threshold_px=12.0,
         support_iou=out.get("inlier_iou", None),
         support_union=int(n_union),
-        translation_direction_delta_deg=out["translation_direction_angle_deg"],
-        camera_centre_direction_delta_deg=out["camera_centre_direction_angle_deg"],
+        translation_direction_delta_deg=out["translation_direction_delta_deg"],
+        camera_centre_direction_delta_deg=out["camera_centre_direction_delta_deg"],
         min_support_iou=float(pnp_cfg.get("pnp_threshold_stability_min_support_iou", 0.25)),
-        max_translation_direction_angle_deg=float(pnp_cfg.get("pnp_threshold_stability_max_translation_direction_deg", 120.0)),
-        max_camera_centre_direction_angle_deg=float(pnp_cfg.get("pnp_threshold_stability_max_camera_centre_direction_deg", 120.0)),
+        max_translation_direction_deg=float(pnp_cfg.get("pnp_threshold_stability_max_translation_direction_deg", 120.0)),
+        max_camera_centre_direction_deg=float(pnp_cfg.get("pnp_threshold_stability_max_camera_centre_direction_deg", 120.0)),
         disjoint_support_iou=float(pnp_cfg.get("pnp_threshold_stability_disjoint_iou", 0.05)),
     )
     out.update(
@@ -1661,24 +1699,24 @@ def _analyse_non_pnp_pose_eligible_reprojection(seed: dict, pose_out: dict, K: n
     return out
 
 
-# Format the frame-4 non-PnP reprojection diagnostic
-def _format_non_pnp_reprojection_diag(diag: dict) -> list[str]:
-    if not isinstance(diag, dict) or not bool(diag.get("ok", False)):
-        return [f"  frame4_non_pnp_reproj: unavailable reason={diag.get('reason', None) if isinstance(diag, dict) else None}"]
+# Format the threshold-pair non-PnP reprojection diagnostic
+def _format_non_pnp_reprojection_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_non_pnp_reprojection: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
 
-    all_block = diag["all"]
+    all_block = diagnostic["all"]
     summary = all_block["error_px"]
     hist = all_block["hist_px"]
-    birth = diag["by_birth_source"]
+    birth = diagnostic["by_birth_source"]
     bootstrap_summary = birth["bootstrap"]["error_px"]
     map_growth_summary = birth["map_growth"]["error_px"]
 
     line_total = (
-        f"  frame4_non_pnp_reproj: n={int(diag['n_non_pnp'])} "
+        f"  threshold_pair_non_pnp_reprojection: n={int(diagnostic['n_non_pnp'])} "
         f"usable={int(summary['count'])} "
         f"positive_depth={int(all_block['n_positive_depth'])} "
         f"non_positive_depth={int(all_block['n_non_positive_depth'])} "
-        f"nonfinite_reproj={int(all_block['n_nonfinite_reprojection'])} "
+        f"nonfinite_reprojection={int(all_block['n_nonfinite_reprojection'])} "
         f"min={_format_optional_px(summary['min'])} "
         f"median={_format_optional_px(summary['median'])} "
         f"p75={_format_optional_px(summary['p75'])} "
@@ -1688,7 +1726,7 @@ def _format_non_pnp_reprojection_diag(diag: dict) -> list[str]:
     )
 
     line_hist = (
-        f"  frame4_non_pnp_bins: <=2={int(hist['le_2_px'])} "
+        f"  threshold_pair_non_pnp_bins: <=2={int(hist['le_2_px'])} "
         f"2-3={int(hist['gt_2_le_3_px'])} "
         f"3-5={int(hist['gt_3_le_5_px'])} "
         f"5-8={int(hist['gt_5_le_8_px'])} "
@@ -1698,7 +1736,7 @@ def _format_non_pnp_reprojection_diag(diag: dict) -> list[str]:
     )
 
     line_birth = (
-        f"  frame4_non_pnp_birth: bootstrap_n={int(birth['bootstrap']['n_total'])} "
+        f"  threshold_pair_non_pnp_birth: bootstrap_n={int(birth['bootstrap']['n_total'])} "
         f"bootstrap_median={_format_optional_px(bootstrap_summary['median'])} "
         f"map_growth_n={int(birth['map_growth']['n_total'])} "
         f"map_growth_median={_format_optional_px(map_growth_summary['median'])}"
@@ -1707,19 +1745,19 @@ def _format_non_pnp_reprojection_diag(diag: dict) -> list[str]:
     return [line_total, line_hist, line_birth]
 
 
-# Format the frame-4 8 px vs 12 px PnP comparison
-def _format_frame4_pnp_pose_comparison(diag: dict) -> list[str]:
-    if not isinstance(diag, dict):
-        return ["  frame4_pnp_8v12: unavailable reason=missing_diag"]
+# Format the threshold-pair PnP comparison
+def _format_threshold_pair_pose_comparison(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict):
+        return ["  threshold_pair_pnp_comparison: unavailable reason=missing_diagnostic"]
 
-    all_8 = diag["reprojection_all_8px"]["error_px"]
-    all_12 = diag["reprojection_all_12px"]["error_px"]
-    unique_8 = diag["unique_12px"]["reprojection_under_8px"]["error_px"]
-    unique_12 = diag["unique_12px"]["reprojection_under_12px"]["error_px"]
-    birth = diag["unique_12px"]["birth_source"]
-    comp_8 = diag.get("component_8px", {}) if isinstance(diag.get("component_8px", {}), dict) else {}
-    comp_12 = diag.get("component_12px", {}) if isinstance(diag.get("component_12px", {}), dict) else {}
-    stability_reasons = diag.get("threshold_stability_reasons", [])
+    all_8 = diagnostic["reprojection_all_8px"]["error_px"]
+    all_12 = diagnostic["reprojection_all_12px"]["error_px"]
+    unique_8 = diagnostic["unique_12px"]["reprojection_under_8px"]["error_px"]
+    unique_12 = diagnostic["unique_12px"]["reprojection_under_12px"]["error_px"]
+    birth = diagnostic["unique_12px"]["birth_source"]
+    component_8 = diagnostic.get("component_8px", {}) if isinstance(diagnostic.get("component_8px", {}), dict) else {}
+    component_12 = diagnostic.get("component_12px", {}) if isinstance(diagnostic.get("component_12px", {}), dict) else {}
+    stability_reasons = diagnostic.get("threshold_stability_reasons", [])
     if isinstance(stability_reasons, list):
         stability_reason_text = ",".join(str(v) for v in stability_reasons)
     else:
@@ -1728,63 +1766,63 @@ def _format_frame4_pnp_pose_comparison(diag: dict) -> list[str]:
         stability_reason_text = "None"
 
     line_pose = (
-        f"  frame4_pnp_8v12_pose: ok8={bool(diag.get('pose_8px_ok', False))} "
-        f"ok12={bool(diag.get('pose_12px_ok', False))} "
-        f"rot_deg={_format_optional_px(diag.get('rotation_diff_deg', None))} "
-        f"t_dir_deg={_format_optional_px(diag.get('translation_direction_angle_deg', None))} "
-        f"C_dir_deg={_format_optional_px(diag.get('camera_centre_direction_angle_deg', None))}"
+        f"  threshold_pair_pnp_pose: pose_8px_ok={bool(diagnostic.get('pose_8px_ok', False))} "
+        f"pose_12px_ok={bool(diagnostic.get('pose_12px_ok', False))} "
+        f"rotation_delta_deg={_format_optional_px(diagnostic.get('rotation_diff_deg', None))} "
+        f"translation_direction_delta_deg={_format_optional_px(diagnostic.get('translation_direction_delta_deg', None))} "
+        f"camera_centre_direction_delta_deg={_format_optional_px(diagnostic.get('camera_centre_direction_delta_deg', None))}"
     )
 
     line_inliers = (
-        f"  frame4_pnp_8v12_inliers: n8={int(diag.get('inliers_8px', 0))} "
-        f"n12={int(diag.get('inliers_12px', 0))} "
-        f"overlap={int(diag.get('inlier_overlap', 0))} "
-        f"iou={_format_optional_px(diag.get('inlier_iou', None))} "
-        f"unique12={int(diag.get('inliers_unique_to_12px', 0))}"
+        f"  threshold_pair_pnp_inliers: inliers_8px={int(diagnostic.get('inliers_8px', 0))} "
+        f"inliers_12px={int(diagnostic.get('inliers_12px', 0))} "
+        f"overlap={int(diagnostic.get('inlier_overlap', 0))} "
+        f"iou={_format_optional_px(diagnostic.get('inlier_iou', None))} "
+        f"unique_to_12px={int(diagnostic.get('inliers_unique_to_12px', 0))}"
     )
 
     line_stability = (
-        f"  frame4_pnp_8v12_stability: class={diag.get('threshold_stability_classification', 'unavailable')} "
-        f"unstable={bool(diag.get('threshold_stability_unstable', False))} "
-        f"disjoint={bool(diag.get('threshold_stability_supports_disjoint', False))} "
-        f"support_iou_low={bool(diag.get('threshold_stability_support_iou_low', False))} "
-        f"t_dir_disagree={bool(diag.get('threshold_stability_translation_direction_disagrees', False))} "
-        f"C_dir_disagree={bool(diag.get('threshold_stability_camera_centre_direction_disagrees', False))} "
+        f"  threshold_pair_pnp_stability: classification={diagnostic.get('threshold_stability_classification', 'unavailable')} "
+        f"unstable={bool(diagnostic.get('threshold_stability_unstable', False))} "
+        f"disjoint={bool(diagnostic.get('threshold_stability_supports_disjoint', False))} "
+        f"support_iou_low={bool(diagnostic.get('threshold_stability_support_iou_low', False))} "
+        f"translation_direction_disagrees={bool(diagnostic.get('threshold_stability_translation_direction_disagrees', False))} "
+        f"camera_centre_direction_disagrees={bool(diagnostic.get('threshold_stability_camera_centre_direction_disagrees', False))} "
         f"reasons={stability_reason_text}"
     )
 
     line_components = (
-        f"  frame4_pnp_8v12_components: "
-        f"ncomp8={int(comp_8.get('component_count', 0))} "
-        f"largest8={int(comp_8.get('largest_component_size', 0))} "
-        f"frac8={_format_optional_float(comp_8.get('largest_component_fraction', None), digits=2)} "
-        f"area8={_format_optional_float(comp_8.get('largest_component_bbox_area_fraction', None), digits=4)} "
-        f"reject8={bool(diag.get('component_gate_8px_rejected', False))} "
-        f"reason8={diag.get('component_gate_8px_reason', None)} "
-        f"ncomp12={int(comp_12.get('component_count', 0))} "
-        f"largest12={int(comp_12.get('largest_component_size', 0))} "
-        f"frac12={_format_optional_float(comp_12.get('largest_component_fraction', None), digits=2)} "
-        f"area12={_format_optional_float(comp_12.get('largest_component_bbox_area_fraction', None), digits=4)} "
-        f"reject12={bool(diag.get('component_gate_12px_rejected', False))} "
-        f"reason12={diag.get('component_gate_12px_reason', None)}"
+        f"  threshold_pair_pnp_components: "
+        f"component_count_8px={int(component_8.get('component_count', 0))} "
+        f"largest_component_8px={int(component_8.get('largest_component_size', 0))} "
+        f"largest_component_fraction_8px={_format_optional_float(component_8.get('largest_component_fraction', None), digits=2)} "
+        f"largest_component_area_fraction_8px={_format_optional_float(component_8.get('largest_component_bbox_area_fraction', None), digits=4)} "
+        f"component_gate_8px_rejected={bool(diagnostic.get('component_gate_8px_rejected', False))} "
+        f"component_gate_8px_reason={diagnostic.get('component_gate_8px_reason', None)} "
+        f"component_count_12px={int(component_12.get('component_count', 0))} "
+        f"largest_component_12px={int(component_12.get('largest_component_size', 0))} "
+        f"largest_component_fraction_12px={_format_optional_float(component_12.get('largest_component_fraction', None), digits=2)} "
+        f"largest_component_area_fraction_12px={_format_optional_float(component_12.get('largest_component_bbox_area_fraction', None), digits=4)} "
+        f"component_gate_12px_rejected={bool(diagnostic.get('component_gate_12px_rejected', False))} "
+        f"component_gate_12px_reason={diagnostic.get('component_gate_12px_reason', None)}"
     )
 
     line_all = (
-        f"  frame4_pnp_8v12_all: med8={_format_optional_px(all_8['median'])} "
-        f"p75_8={_format_optional_px(all_8['p75'])} "
-        f"p90_8={_format_optional_px(all_8['p90'])} "
-        f"med12={_format_optional_px(all_12['median'])} "
-        f"p75_12={_format_optional_px(all_12['p75'])} "
-        f"p90_12={_format_optional_px(all_12['p90'])}"
+        f"  threshold_pair_pnp_all_reprojection: median_8px={_format_optional_px(all_8['median'])} "
+        f"p75_8px={_format_optional_px(all_8['p75'])} "
+        f"p90_8px={_format_optional_px(all_8['p90'])} "
+        f"median_12px={_format_optional_px(all_12['median'])} "
+        f"p75_12px={_format_optional_px(all_12['p75'])} "
+        f"p90_12px={_format_optional_px(all_12['p90'])}"
     )
 
     line_unique = (
-        f"  frame4_pnp_8v12_unique12: count={int(diag['unique_12px']['count'])} "
+        f"  threshold_pair_pnp_unique_to_12px: count={int(diagnostic['unique_12px']['count'])} "
         f"bootstrap={int(birth['bootstrap'])} "
         f"map_growth={int(birth['map_growth'])} "
-        f"med_under8={_format_optional_px(unique_8['median'])} "
-        f"med_under12={_format_optional_px(unique_12['median'])} "
-        f"p95_under12={_format_optional_px(unique_12['p95'])}"
+        f"median_under_8px={_format_optional_px(unique_8['median'])} "
+        f"median_under_12px={_format_optional_px(unique_12['median'])} "
+        f"p95_under_12px={_format_optional_px(unique_12['p95'])}"
     )
 
     return [line_pose, line_inliers, line_stability, line_components, line_all, line_unique]
@@ -1802,11 +1840,11 @@ def main() -> None:
     # Optional output override
     parser.add_argument("--out_dir", type=str, default=None)
 
-    # Fixed bootstrap frame 0
+    # Bootstrap source frame index
     parser.add_argument("--i0", type=int, default=0)
-    # Fixed bootstrap frame 1
+    # Bootstrap target frame index
     parser.add_argument("--i1", type=int, default=1)
-    # Number of later frames to diagnose
+    # Number of subsequent frames to diagnose
     parser.add_argument("--num_track", type=int, default=5)
     # Threshold sweep in pixels
     parser.add_argument("--thresholds", type=float, nargs="+", default=[3.0, 5.0, 8.0, 12.0])
@@ -1845,7 +1883,6 @@ def main() -> None:
     # Minimum local neighbours required by the local displacement-consistency filter
     parser.add_argument(
         "--pnp_local_consistency_min_neighbours",
-        "--pnp_local_consistency_min_neighbors",
         dest="pnp_local_consistency_min_neighbours",
         type=int,
         default=3,
@@ -1880,71 +1917,7 @@ def main() -> None:
         name="max_append_reproj_error_px_existing",
         eps=0.0,
     )
-    pnp_cfg["enable_pnp_spatial_gate"] = bool(args.enable_pnp_spatial_gate)
-    pnp_cfg["pnp_spatial_grid_cols"] = check_int_gt0(args.pnp_spatial_grid_cols, name="pnp_spatial_grid_cols")
-    pnp_cfg["pnp_spatial_grid_rows"] = check_int_gt0(args.pnp_spatial_grid_rows, name="pnp_spatial_grid_rows")
-    pnp_cfg["min_pnp_inlier_cells"] = check_int_ge0(args.min_pnp_inlier_cells, name="min_pnp_inlier_cells")
-    pnp_cfg["max_pnp_single_cell_fraction"] = check_finite_scalar(args.max_pnp_single_cell_fraction, name="max_pnp_single_cell_fraction")
-    pnp_cfg["min_pnp_bbox_area_fraction"] = check_finite_scalar(args.min_pnp_bbox_area_fraction, name="min_pnp_bbox_area_fraction")
-    check_in_01(pnp_cfg["max_pnp_single_cell_fraction"], name="max_pnp_single_cell_fraction", eps=0.0)
-    check_in_01(pnp_cfg["min_pnp_bbox_area_fraction"], name="min_pnp_bbox_area_fraction", eps=0.0)
-    if float(pnp_cfg["max_pnp_single_cell_fraction"]) <= 0.0:
-        raise ValueError(f"max_pnp_single_cell_fraction must be > 0; got {pnp_cfg['max_pnp_single_cell_fraction']}")
-    pnp_cfg["enable_pnp_component_gate"] = bool(args.enable_pnp_component_gate)
-    pnp_cfg["pnp_component_radius_px"] = check_positive(args.pnp_component_radius_px, name="pnp_component_radius_px", eps=0.0)
-    pnp_cfg["max_pnp_largest_component_fraction"] = check_finite_scalar(
-        args.max_pnp_largest_component_fraction,
-        name="max_pnp_largest_component_fraction",
-    )
-    pnp_cfg["min_pnp_component_count"] = check_int_ge0(args.min_pnp_component_count, name="min_pnp_component_count")
-    pnp_cfg["min_pnp_largest_component_bbox_area_fraction"] = check_finite_scalar(
-        args.min_pnp_largest_component_bbox_area_fraction,
-        name="min_pnp_largest_component_bbox_area_fraction",
-    )
-    check_in_01(pnp_cfg["max_pnp_largest_component_fraction"], name="max_pnp_largest_component_fraction", eps=0.0)
-    check_in_01(
-        pnp_cfg["min_pnp_largest_component_bbox_area_fraction"],
-        name="min_pnp_largest_component_bbox_area_fraction",
-        eps=0.0,
-    )
-    if float(pnp_cfg["max_pnp_largest_component_fraction"]) <= 0.0:
-        raise ValueError(f"max_pnp_largest_component_fraction must be > 0; got {pnp_cfg['max_pnp_largest_component_fraction']}")
-    pnp_cfg["enable_pnp_local_consistency_filter"] = bool(args.enable_pnp_local_consistency_filter)
-    pnp_cfg["apply_pnp_local_consistency_filter_to_pipeline"] = bool(args.apply_pnp_local_consistency_filter_to_pipeline)
-    pnp_cfg["pnp_local_consistency_radius_px"] = check_positive(
-        args.pnp_local_consistency_radius_px,
-        name="pnp_local_consistency_radius_px",
-        eps=0.0,
-    )
-    pnp_cfg["pnp_local_consistency_min_neighbours"] = check_int_ge0(
-        args.pnp_local_consistency_min_neighbours,
-        name="pnp_local_consistency_min_neighbours",
-    )
-    pnp_cfg["pnp_local_consistency_max_median_residual_px"] = check_positive(
-        args.pnp_local_consistency_max_median_residual_px,
-        name="pnp_local_consistency_max_median_residual_px",
-        eps=0.0,
-    )
-    pnp_cfg["pnp_local_consistency_min_keep"] = check_int_ge0(
-        args.pnp_local_consistency_min_keep,
-        name="pnp_local_consistency_min_keep",
-    )
-    pnp_cfg["enable_pnp_spatial_thinning_filter"] = bool(args.enable_pnp_spatial_thinning_filter)
-    pnp_cfg["apply_pnp_spatial_thinning_filter_to_pipeline"] = bool(args.apply_pnp_spatial_thinning_filter_to_pipeline)
-    pnp_cfg["pnp_spatial_thinning_radius_px"] = check_positive(
-        args.pnp_spatial_thinning_radius_px,
-        name="pnp_spatial_thinning_radius_px",
-        eps=0.0,
-    )
-    pnp_cfg["pnp_spatial_thinning_max_points_per_radius"] = check_int_gt0(
-        args.pnp_spatial_thinning_max_points_per_radius,
-        name="pnp_spatial_thinning_max_points_per_radius",
-    )
-    pnp_cfg["pnp_spatial_thinning_min_keep"] = check_int_ge0(
-        args.pnp_spatial_thinning_min_keep,
-        name="pnp_spatial_thinning_min_keep",
-    )
-    pnp_cfg = _apply_pnp_threshold_stability_cli_overrides(pnp_cfg, args)
+    pnp_cfg = _apply_diagnostic_pnp_cli_overrides(pnp_cfg, args)
 
     dataset_cfg = cfg["dataset"]
     run_cfg = cfg["run"]
@@ -2051,8 +2024,8 @@ def main() -> None:
         f"gate={bool(pnp_cfg['enable_pnp_threshold_stability_gate'])} "
         f"compare_px={float(pnp_cfg['pnp_threshold_stability_compare_px'])} "
         f"min_iou={float(pnp_cfg['pnp_threshold_stability_min_support_iou'])} "
-        f"max_t_dir_deg={float(pnp_cfg['pnp_threshold_stability_max_translation_direction_deg'])} "
-        f"max_C_dir_deg={float(pnp_cfg['pnp_threshold_stability_max_camera_centre_direction_deg'])} "
+        f"max_translation_direction_deg={float(pnp_cfg['pnp_threshold_stability_max_translation_direction_deg'])} "
+        f"max_camera_centre_direction_deg={float(pnp_cfg['pnp_threshold_stability_max_camera_centre_direction_deg'])} "
         f"disjoint_iou={float(pnp_cfg['pnp_threshold_stability_disjoint_iou'])}"
     )
 
@@ -2082,6 +2055,7 @@ def main() -> None:
 
     start_track = keyframe_index + 1
     stop_track = min(n_effective, start_track + num_track)
+    threshold_pair_frame_index = 4
 
     for i in range(start_track, stop_track):
         # Keep the current reference keyframe for this diagnostic step
@@ -2142,16 +2116,16 @@ def main() -> None:
         base_pose_stats = base_pose_out.get("stats", {})
         base_pose_unfiltered_stats = base_pose_unfiltered_out.get("stats", {})
 
-        # Run the diagnostic-only non-PnP reprojection analysis on frame 4
-        non_pnp_reprojection_diag = None
-        local_consistency_diag = None
-        spatial_thinning_diag = None
-        pnp_pose_comparison_before_diag = None
-        pnp_pose_comparison_diag = None
-        pnp_spatial_before_diag = None
-        pnp_spatial_diag = None
-        if int(i) == 4:
-            pnp_pose_pair_before = _frame4_pnp_8px_12px_pose_pair(
+        # Run the detailed threshold-pair diagnostics on the configured frame
+        non_pnp_reprojection_diagnostic = None
+        local_consistency_diagnostic = None
+        spatial_thinning_diagnostic = None
+        pnp_pose_comparison_before_diagnostic = None
+        pnp_pose_comparison_diagnostic = None
+        pnp_spatial_before_diagnostic = None
+        pnp_spatial_diagnostic = None
+        if int(i) == int(threshold_pair_frame_index):
+            pnp_pose_pair_before = _threshold_pair_pose_pair(
                 corrs_before_filters,
                 K,
                 pnp_cfg=pnp_cfg,
@@ -2159,19 +2133,19 @@ def main() -> None:
             )
             pnp_pose_pair = pnp_pose_pair_before
             if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
-                pnp_pose_pair = _frame4_pnp_8px_12px_pose_pair(
+                pnp_pose_pair = _threshold_pair_pose_pair(
                     corrs,
                     K,
                     pnp_cfg=pnp_cfg,
                     image_shape=cur_image_shape,
                 )
-            non_pnp_reprojection_diag = _analyse_non_pnp_pose_eligible_reprojection(
+            non_pnp_reprojection_diagnostic = _analyse_non_pnp_pose_eligible_reprojection(
                 seed,
                 base_pose_out,
                 K,
                 eps=float(pnp_cfg["eps"]),
             )
-            local_consistency_diag = _build_frame4_local_consistency_diag(
+            local_consistency_diagnostic = _build_threshold_pair_local_consistency_diagnostic(
                 seq,
                 ref_keyframe_index,
                 i,
@@ -2180,7 +2154,7 @@ def main() -> None:
                 pose_pair=pnp_pose_pair_before,
                 pnp_cfg=pnp_cfg,
             )
-            spatial_thinning_diag = _build_frame4_spatial_thinning_diag(
+            spatial_thinning_diagnostic = _build_threshold_pair_spatial_thinning_diagnostic(
                 seq,
                 ref_keyframe_index,
                 i,
@@ -2189,14 +2163,14 @@ def main() -> None:
                 pose_pair=pnp_pose_pair_before,
                 pnp_cfg=pnp_cfg,
             )
-            pnp_pose_comparison_before_diag = _compare_frame4_pnp_8px_12px(
+            pnp_pose_comparison_before_diagnostic = _compare_threshold_pair_poses(
                 seed,
                 corrs_before_filters,
                 K,
                 pnp_cfg=pnp_cfg,
                 pose_pair=pnp_pose_pair_before,
             )
-            pnp_pose_comparison_diag = _compare_frame4_pnp_8px_12px(
+            pnp_pose_comparison_diagnostic = _compare_threshold_pair_poses(
                 seed,
                 corrs,
                 K,
@@ -2204,7 +2178,7 @@ def main() -> None:
                 pose_pair=pnp_pose_pair,
             )
             if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
-                pnp_spatial_before_diag = _build_frame4_pnp_spatial_diag(
+                pnp_spatial_before_diagnostic = _build_threshold_pair_spatial_diagnostic(
                     seq,
                     ref_keyframe_index,
                     i,
@@ -2215,7 +2189,7 @@ def main() -> None:
                     pose_pair=pnp_pose_pair_before,
                     name_suffix="before_filters",
                 )
-            pnp_spatial_diag = _build_frame4_pnp_spatial_diag(
+            pnp_spatial_diagnostic = _build_threshold_pair_spatial_diagnostic(
                 seq,
                 ref_keyframe_index,
                 i,
@@ -2228,8 +2202,8 @@ def main() -> None:
             )
 
         # Sweep PnP thresholds on the same correspondence bundle
-        diag_rows = [
-            _run_threshold_diag(corrs, K, threshold_px=float(threshold_px), pnp_cfg=pnp_cfg, image_shape=cur_image_shape)
+        threshold_rows = [
+            _run_threshold_diagnostic(corrs, K, threshold_px=float(threshold_px), pnp_cfg=pnp_cfg, image_shape=cur_image_shape)
             for threshold_px in thresholds
         ]
 
@@ -2266,6 +2240,7 @@ def main() -> None:
             "frame_id": str(cur_id),
             "timestamp": float(cur_ts),
             "reference_keyframe_index": int(ref_keyframe_index),
+            "threshold_pair_frame_index": int(threshold_pair_frame_index),
             "seed_landmarks_before": int(seed_landmarks_before),
             "seed_landmarks_after": int(seed_landmarks_after),
             "track_ok": int(track_stats.get("n_inliers", 0)) > 0,
@@ -2419,85 +2394,85 @@ def main() -> None:
             },
         )
 
-        # Write the frame-4 non-PnP reprojection diagnostic
-        if non_pnp_reprojection_diag is not None:
+        # Write the threshold-pair non-PnP reprojection diagnostic
+        if non_pnp_reprojection_diagnostic is not None:
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_non_pnp_reprojection",
+                    "event": "threshold_pair_non_pnp_reprojection",
                     **frame_context,
-                    "non_pnp_reprojection": non_pnp_reprojection_diag,
+                    "non_pnp_reprojection": non_pnp_reprojection_diagnostic,
                 },
             )
 
-        # Write the frame-4 local consistency diagnostic
-        if local_consistency_diag is not None:
+        # Write the threshold-pair local consistency diagnostic
+        if local_consistency_diagnostic is not None:
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_local_consistency",
+                    "event": "threshold_pair_local_consistency",
                     **frame_context,
-                    "local_consistency": local_consistency_diag,
+                    "local_consistency": local_consistency_diagnostic,
                 },
             )
 
-        # Write the frame-4 spatial thinning diagnostic
-        if spatial_thinning_diag is not None:
+        # Write the threshold-pair spatial thinning diagnostic
+        if spatial_thinning_diagnostic is not None:
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_spatial_thinning",
+                    "event": "threshold_pair_spatial_thinning",
                     **frame_context,
-                    "spatial_thinning": spatial_thinning_diag,
+                    "spatial_thinning": spatial_thinning_diagnostic,
                 },
             )
 
-        # Write the frame-4 before-filter 8 px vs 12 px PnP pose comparison
-        if pnp_pose_comparison_before_diag is not None and (bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])):
+        # Write the threshold-pair before-filter pose comparison
+        if pnp_pose_comparison_before_diagnostic is not None and (bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])):
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_pnp_8px_12px_comparison_before_filters",
+                    "event": "threshold_pair_pnp_8px_12px_comparison_before_filters",
                     **frame_context,
-                    "pnp_8px_12px_comparison": pnp_pose_comparison_before_diag,
+                    "pnp_threshold_pair_comparison": pnp_pose_comparison_before_diagnostic,
                 },
             )
 
-        # Write the frame-4 8 px vs 12 px PnP pose comparison
-        if pnp_pose_comparison_diag is not None:
+        # Write the threshold-pair pose comparison
+        if pnp_pose_comparison_diagnostic is not None:
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_pnp_8px_12px_comparison",
+                    "event": "threshold_pair_pnp_8px_12px_comparison",
                     **frame_context,
-                    "pnp_8px_12px_comparison": pnp_pose_comparison_diag,
+                    "pnp_threshold_pair_comparison": pnp_pose_comparison_diagnostic,
                 },
             )
 
-        # Write the frame-4 before-filter spatial diagnostic
-        if pnp_spatial_before_diag is not None:
+        # Write the threshold-pair before-filter spatial diagnostic
+        if pnp_spatial_before_diagnostic is not None:
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_pnp_spatial_summary_before_filters",
+                    "event": "threshold_pair_pnp_spatial_summary_before_filters",
                     **frame_context,
-                    "pnp_spatial": pnp_spatial_before_diag,
+                    "pnp_spatial": pnp_spatial_before_diagnostic,
                 },
             )
 
-        # Write the frame-4 spatial diagnostic
-        if pnp_spatial_diag is not None:
+        # Write the threshold-pair spatial diagnostic
+        if pnp_spatial_diagnostic is not None:
             _append_jsonl(
                 log_path,
                 {
-                    "event": "frame4_pnp_spatial_summary",
+                    "event": "threshold_pair_pnp_spatial_summary",
                     **frame_context,
-                    "pnp_spatial": pnp_spatial_diag,
+                    "pnp_spatial": pnp_spatial_diagnostic,
                 },
             )
 
         # Write one diagnostic row per threshold
-        for row in diag_rows:
+        for row in threshold_rows:
             _append_jsonl(
                 log_path,
                 {
@@ -2510,19 +2485,19 @@ def main() -> None:
         print(
             f"frame {i}: reference_keyframe_index={ref_keyframe_index} "
             f"n_track_inliers={int(track_stats.get('n_inliers', 0))} "
-            f"diag_n_pnp_corr={int(base_pose_stats.get('n_corr', 0))} "
-            f"diag_n_pnp_inliers={int(base_pose_stats.get('n_pnp_inliers', 0))} "
-            f"pnp_local_removed={int(base_pose_stats.get('pnp_local_consistency_filter_removed', 0))} "
-            f"pnp_spatial_thinned={int(base_pose_stats.get('pnp_spatial_thinning_filter_removed', 0))} "
+            f"diagnostic_n_pnp_corr={int(base_pose_stats.get('n_corr', 0))} "
+            f"diagnostic_n_pnp_inliers={int(base_pose_stats.get('n_pnp_inliers', 0))} "
+            f"pnp_local_consistency_removed={int(base_pose_stats.get('pnp_local_consistency_filter_removed', 0))} "
+            f"pnp_spatial_thinning_removed={int(base_pose_stats.get('pnp_spatial_thinning_filter_removed', 0))} "
             f"pnp_cells={int(base_pose_stats.get('pnp_inlier_occupied_cells', 0))} "
-            f"pnp_max_cell_frac={_format_optional_float(base_pose_stats.get('pnp_inlier_max_cell_fraction', None), digits=2)} "
-            f"pnp_bbox_area_frac={_format_optional_float(base_pose_stats.get('pnp_inlier_bbox_area_fraction', None), digits=3)} "
+            f"pnp_max_cell_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_max_cell_fraction', None), digits=2)} "
+            f"pnp_bbox_area_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_bbox_area_fraction', None), digits=3)} "
             f"pnp_spatial_rejected={bool(base_pose_stats.get('pnp_spatial_gate_rejected', False))} "
             f"pnp_spatial_reason={base_pose_stats.get('pnp_spatial_gate_reason', None)} "
             f"pnp_components={int(base_pose_stats.get('pnp_inlier_component_count', 0))} "
-            f"pnp_largest_comp={int(base_pose_stats.get('pnp_inlier_largest_component_size', 0))} "
-            f"pnp_largest_comp_frac={_format_optional_float(base_pose_stats.get('pnp_inlier_largest_component_fraction', None), digits=2)} "
-            f"pnp_largest_comp_area_frac={_format_optional_float(base_pose_stats.get('pnp_inlier_largest_component_bbox_area_fraction', None), digits=4)} "
+            f"pnp_largest_component={int(base_pose_stats.get('pnp_inlier_largest_component_size', 0))} "
+            f"pnp_largest_component_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_largest_component_fraction', None), digits=2)} "
+            f"pnp_largest_component_area_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_largest_component_bbox_area_fraction', None), digits=4)} "
             f"pnp_component_rejected={bool(base_pose_stats.get('pnp_component_gate_rejected', False))} "
             f"pnp_component_reason={base_pose_stats.get('pnp_component_gate_reason', None)} "
             f"pipeline_n_pnp_corr={int(frontend_stats.get('n_pnp_corr', 0))} "
@@ -2532,34 +2507,34 @@ def main() -> None:
             f"promoted={bool(frontend_stats.get('keyframe_promoted', False))} "
             f"landmarks={seed_landmarks_before}->{seed_landmarks_after}"
         )
-        print(f"  {_format_threshold_summary(diag_rows)}")
-        print(_format_pnp_threshold_stability_diag(base_pose_stats.get("pnp_threshold_stability", None)))
-        if non_pnp_reprojection_diag is not None:
-            for line in _format_non_pnp_reprojection_diag(non_pnp_reprojection_diag):
+        print(f"  {_format_threshold_summary(threshold_rows)}")
+        print(_format_pnp_threshold_stability_diagnostic(base_pose_stats.get("pnp_threshold_stability", None)))
+        if non_pnp_reprojection_diagnostic is not None:
+            for line in _format_non_pnp_reprojection_diagnostic(non_pnp_reprojection_diagnostic):
                 print(line)
-        if local_consistency_diag is not None:
-            for line in _format_frame4_local_consistency_diag(local_consistency_diag):
+        if local_consistency_diagnostic is not None:
+            for line in _format_threshold_pair_local_consistency_diagnostic(local_consistency_diagnostic):
                 print(line)
-        if spatial_thinning_diag is not None:
-            for line in _format_frame4_spatial_thinning_diag(spatial_thinning_diag):
+        if spatial_thinning_diagnostic is not None:
+            for line in _format_threshold_pair_spatial_thinning_diagnostic(spatial_thinning_diagnostic):
                 print(line)
-        if pnp_pose_comparison_before_diag is not None and (bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])):
-            print("  frame4_before_filters:")
-            for line in _format_frame4_pnp_pose_comparison(pnp_pose_comparison_before_diag):
+        if pnp_pose_comparison_before_diagnostic is not None and (bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])):
+            print("  threshold_pair_before_filters:")
+            for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_before_diagnostic):
                 print(line)
-        if pnp_pose_comparison_diag is not None:
+        if pnp_pose_comparison_diagnostic is not None:
             if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
-                print("  frame4_after_filters:")
-            for line in _format_frame4_pnp_pose_comparison(pnp_pose_comparison_diag):
+                print("  threshold_pair_after_filters:")
+            for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_diagnostic):
                 print(line)
-        if pnp_spatial_before_diag is not None:
-            print("  frame4_spatial_before_filters:")
-            for line in _format_frame4_spatial_diag(pnp_spatial_before_diag):
+        if pnp_spatial_before_diagnostic is not None:
+            print("  threshold_pair_spatial_before_filters:")
+            for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_before_diagnostic):
                 print(line)
-        if pnp_spatial_diag is not None:
+        if pnp_spatial_diagnostic is not None:
             if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
-                print("  frame4_spatial_after_filters:")
-            for line in _format_frame4_spatial_diag(pnp_spatial_diag):
+                print("  threshold_pair_spatial_after_filters:")
+            for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_diagnostic):
                 print(line)
 
         # Update the live frontend state for the next frame

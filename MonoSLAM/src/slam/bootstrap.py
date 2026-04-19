@@ -7,16 +7,6 @@ from slam.seed import build_two_view_seed
 from slam.two_view_consensus import estimate_fundamental_consensus, estimate_homography_consensus, recover_pose_from_fundamental_consensus, select_two_view_mask
 
 
-# Planar check compatibility wrapper
-def planar_check(mask_F, mask_H, gamma=1.2, min_H_inliers=20):
-    return planar_degeneracy_from_masks(
-        mask_F=mask_F,
-        mask_H=mask_H,
-        gamma=float(gamma),
-        min_H_inliers=int(min_H_inliers),
-    )
-
-
 # Validate two-view bootstrap
 def validate_two_view_bootstrap(K1, K2, x1, x2, cfg):
     # Check input dims
