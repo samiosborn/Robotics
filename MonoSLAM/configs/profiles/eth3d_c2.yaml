@@ -17,7 +17,7 @@ dataset:
   sort: lexicographic
   start: 0
   step: 1
-  max_frames: 3
+  max_frames: 10
 
 run:
   out_dir: out
