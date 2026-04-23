@@ -334,6 +334,7 @@ def process_frame_against_seed(
             track_out,
             map_growth_out=map_growth_out,
             current_kf=current_kf,
+            image_shape=image_shape,
             min_track_inliers=keyframe_min_track_inliers,
             min_pnp_inliers=keyframe_min_pnp_inliers,
             min_landmark_growth=keyframe_min_landmark_growth,

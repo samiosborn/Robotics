@@ -1509,12 +1509,44 @@ def estimate_pose_pnp_ransac(
     # Random number generator
     rng = np.random.default_rng(seed)
 
+    # Small secondary ranking rule for near-tied hypotheses
+    spatial_tie_inlier_gap = 2
+    spatial_tie_grid_cols = 4
+    spatial_tie_grid_rows = 3
+
+    # Reuse the spatial-coverage summary on a correspondence-local envelope
+    x_min = float(np.min(x_cur[0, :]))
+    y_min = float(np.min(x_cur[1, :]))
+    x_span = max(float(np.max(x_cur[0, :]) - x_min), 1.0)
+    y_span = max(float(np.max(x_cur[1, :]) - y_min), 1.0)
+    x_cur_rank = np.asarray(x_cur, dtype=np.float64).copy()
+    x_cur_rank[0, :] -= x_min
+    x_cur_rank[1, :] -= y_min
+    rank_image_shape = (int(np.ceil(y_span)) + 1, int(np.ceil(x_span)) + 1)
+
+    def _support_rank(inlier_mask):
+        coverage = pnp_inlier_spatial_coverage(
+            x_cur_rank,
+            inlier_mask,
+            rank_image_shape,
+            grid_cols=int(spatial_tie_grid_cols),
+            grid_rows=int(spatial_tie_grid_rows),
+        )
+        bbox_area_fraction = coverage.get("bbox_area_fraction", None)
+        max_cell_fraction = coverage.get("max_cell_fraction", None)
+        return (
+            int(coverage.get("occupied_cells", 0)),
+            -np.inf if bbox_area_fraction is None else float(bbox_area_fraction),
+            -np.inf if max_cell_fraction is None else -float(max_cell_fraction),
+        )
+
     # Initialise best model
     best_R = None
     best_t = None
     best_mask = np.zeros((N,), dtype=bool)
     best_count = 0
     best_mean_err = np.inf
+    best_support_rank = (0, -np.inf, -np.inf)
     n_model_success = 0
 
     # RANSAC loop
@@ -1563,14 +1595,28 @@ def estimate_pose_pnp_ransac(
 
         # Mean inlier error for tie-breaks
         mean_err_t = float(np.mean(d_sq_t[mask_t]))
+        support_rank_t = _support_rank(mask_t)
 
         # Keep the best consensus
-        if (count_t > best_count) or (count_t == best_count and mean_err_t < best_mean_err):
+        inlier_gap_t = int(best_count - count_t)
+        better_support_t = support_rank_t > best_support_rank
+        same_support_t = support_rank_t == best_support_rank
+        keep_t = False
+        if count_t > best_count:
+            keep_t = True
+        elif 0 <= inlier_gap_t <= int(spatial_tie_inlier_gap):
+            if better_support_t:
+                keep_t = True
+            elif same_support_t and mean_err_t < best_mean_err:
+                keep_t = True
+
+        if keep_t:
             best_R = np.asarray(R_t, dtype=float)
             best_t = np.asarray(t_t, dtype=float).reshape(3,)
             best_mask = np.asarray(mask_t, dtype=bool)
             best_count = count_t
             best_mean_err = mean_err_t
+            best_support_rank = support_rank_t
 
             # Early exit on perfect agreement
             if best_count == N:
@@ -1659,6 +1705,7 @@ def estimate_pose_pnp_ransac(
                 best_mask = np.asarray(mask_refit, dtype=bool)
                 best_count = n_refit
                 best_mean_err = mean_err_refit
+                best_support_rank = _support_rank(mask_refit)
                 stats["refit"] = True
 
     except Exception as exc:

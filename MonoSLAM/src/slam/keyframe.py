@@ -13,6 +13,12 @@ from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
 
+_PROMOTION_COVERAGE_GRID_COLS = 4
+_PROMOTION_COVERAGE_GRID_ROWS = 3
+_MIN_LINKED_OBS_CELLS_FOR_PROMOTION = 4
+_MIN_LINKED_OBS_BBOX_AREA_FRACTION_FOR_PROMOTION = 0.15
+
+
 # Keyframe decision bundle
 @dataclass(frozen=True)
 class KeyframeDecision:
@@ -136,6 +142,99 @@ def count_linked_landmarks_for_kf(seed: dict, kf_index: int) -> int:
     return int(n_linked)
 
 
+# Summarise spatial coverage of landmark observations in one frame
+def _linked_landmark_observation_coverage(seed: dict, kf_index: int, image_shape) -> dict:
+    # Check seed contains landmarks
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
+
+    # Check keyframe index
+    kf_index = check_int_ge0(kf_index, name="kf_index")
+
+    if image_shape is None:
+        return {
+            "evaluated": False,
+            "reason": "image_shape_unavailable",
+            "n_points": 0,
+            "bbox_area_fraction": None,
+            "occupied_cells": 0,
+            "grid_cols": int(_PROMOTION_COVERAGE_GRID_COLS),
+            "grid_rows": int(_PROMOTION_COVERAGE_GRID_ROWS),
+        }
+
+    shape = tuple(image_shape)
+    if len(shape) < 2:
+        raise ValueError(f"image_shape must have at least two entries; got {image_shape}")
+
+    H = int(shape[0])
+    W = int(shape[1])
+    if H <= 0 or W <= 0:
+        raise ValueError(f"image_shape height and width must be positive; got {image_shape}")
+
+    landmarks = seed["landmarks"]
+    if not isinstance(landmarks, list):
+        raise ValueError("seed['landmarks'] must be a list")
+
+    xy_rows: list[np.ndarray] = []
+    for lm in landmarks:
+        if not isinstance(lm, dict):
+            continue
+
+        obs = lm.get("obs", None)
+        if not isinstance(obs, list):
+            continue
+
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            if int(ob.get("kf", -1)) != int(kf_index):
+                continue
+
+            xy = np.asarray(ob.get("xy", np.zeros((2,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+            if xy.size < 2:
+                continue
+            xy = np.asarray(xy[:2], dtype=np.float64)
+            if not np.isfinite(xy).all():
+                continue
+
+            xy_rows.append(xy.reshape(1, 2))
+            break
+
+    if len(xy_rows) == 0:
+        return {
+            "evaluated": True,
+            "reason": "no_linked_observations",
+            "n_points": 0,
+            "bbox_area_fraction": 0.0,
+            "occupied_cells": 0,
+            "grid_cols": int(_PROMOTION_COVERAGE_GRID_COLS),
+            "grid_rows": int(_PROMOTION_COVERAGE_GRID_ROWS),
+        }
+
+    xy_all = np.vstack(xy_rows)
+    x = xy_all[:, 0]
+    y = xy_all[:, 1]
+
+    bbox_w = float(np.max(x) - np.min(x))
+    bbox_h = float(np.max(y) - np.min(y))
+    bbox_area_fraction = float((bbox_w * bbox_h) / max(float(W * H), 1.0))
+
+    cols = np.floor((x / max(float(W), 1.0)) * int(_PROMOTION_COVERAGE_GRID_COLS)).astype(np.int64)
+    rows = np.floor((y / max(float(H), 1.0)) * int(_PROMOTION_COVERAGE_GRID_ROWS)).astype(np.int64)
+    cols = np.clip(cols, 0, int(_PROMOTION_COVERAGE_GRID_COLS) - 1)
+    rows = np.clip(rows, 0, int(_PROMOTION_COVERAGE_GRID_ROWS) - 1)
+    occupied = {(int(row), int(col)) for row, col in zip(rows, cols)}
+
+    return {
+        "evaluated": True,
+        "reason": None,
+        "n_points": int(xy_all.shape[0]),
+        "bbox_area_fraction": float(bbox_area_fraction),
+        "occupied_cells": int(len(occupied)),
+        "grid_cols": int(_PROMOTION_COVERAGE_GRID_COLS),
+        "grid_rows": int(_PROMOTION_COVERAGE_GRID_ROWS),
+    }
+
+
 # Read map-growth stats from either a dict or a typed result bundle
 def _map_growth_stats(map_growth_out: dict | MapGrowthResult | None) -> dict:
     if map_growth_out is None:
@@ -156,6 +255,7 @@ def should_make_keyframe(
     *,
     map_growth_out: dict | MapGrowthResult | None = None,
     current_kf: int,
+    image_shape: tuple[int, int] | None = None,
     min_track_inliers: int = 80,
     min_pnp_inliers: int = 40,
     min_landmark_growth: int = 20,
@@ -200,6 +300,7 @@ def should_make_keyframe(
     n_added = int(map_stats.get("n_added", 0))
     n_landmarks = int(len(seed.get("landmarks", [])))
     n_linked_landmarks_candidate = count_linked_landmarks_for_kf(seed, current_kf)
+    linked_coverage = _linked_landmark_observation_coverage(seed, current_kf, image_shape)
 
     # Read pose status
     pose_ok = bool(pose_out.get("ok", False))
@@ -213,6 +314,14 @@ def should_make_keyframe(
         "n_landmarks": int(n_landmarks),
         "n_linked_landmarks_candidate": int(n_linked_landmarks_candidate),
         "promotion_vetoed_for_low_links": False,
+        "promotion_vetoed_for_low_coverage": False,
+        "promotion_linked_coverage_evaluated": bool(linked_coverage.get("evaluated", False)),
+        "promotion_linked_coverage_reason": linked_coverage.get("reason", None),
+        "promotion_linked_coverage_n_points": int(linked_coverage.get("n_points", 0)),
+        "promotion_linked_coverage_bbox_area_fraction": linked_coverage.get("bbox_area_fraction", None),
+        "promotion_linked_coverage_occupied_cells": int(linked_coverage.get("occupied_cells", 0)),
+        "promotion_min_linked_bbox_area_fraction": float(_MIN_LINKED_OBS_BBOX_AREA_FRACTION_FOR_PROMOTION),
+        "promotion_min_linked_occupied_cells": int(_MIN_LINKED_OBS_CELLS_FOR_PROMOTION),
         "translation_m": None,
         "rotation_deg": None,
     }
@@ -227,6 +336,19 @@ def should_make_keyframe(
                 reason="linked_landmarks_low",
                 stats=stats_out,
             )
+        if bool(make_keyframe) and bool(linked_coverage.get("evaluated", False)):
+            bbox_area_fraction = linked_coverage.get("bbox_area_fraction", None)
+            bbox_low = bbox_area_fraction is None or (
+                float(bbox_area_fraction) < float(_MIN_LINKED_OBS_BBOX_AREA_FRACTION_FOR_PROMOTION)
+            )
+            cells_low = int(linked_coverage.get("occupied_cells", 0)) < int(_MIN_LINKED_OBS_CELLS_FOR_PROMOTION)
+            if bool(bbox_low) or bool(cells_low):
+                stats_out["promotion_vetoed_for_low_coverage"] = True
+                return KeyframeDecision(
+                    make_keyframe=False,
+                    reason="linked_landmark_coverage_low",
+                    stats=stats_out,
+                )
         return KeyframeDecision(
             make_keyframe=bool(make_keyframe),
             reason=reason,
@@ -355,6 +477,7 @@ def consider_promote_keyframe(
     *,
     map_growth_out: dict | MapGrowthResult | None = None,
     current_kf: int,
+    image_shape: tuple[int, int] | None = None,
     min_track_inliers: int = 80,
     min_pnp_inliers: int = 40,
     min_landmark_growth: int = 20,
@@ -384,6 +507,7 @@ def consider_promote_keyframe(
         track_out,
         map_growth_out=map_growth_out,
         current_kf=current_kf,
+        image_shape=image_shape,
         min_track_inliers=min_track_inliers,
         min_pnp_inliers=min_pnp_inliers,
         min_landmark_growth=min_landmark_growth,
@@ -426,6 +550,14 @@ def consider_promote_keyframe(
         "n_landmarks": int(len(seed_out.get("landmarks", []))),
         "n_linked_landmarks_candidate": int(decision.stats.get("n_linked_landmarks_candidate", 0)),
         "promotion_vetoed_for_low_links": bool(decision.stats.get("promotion_vetoed_for_low_links", False)),
+        "promotion_vetoed_for_low_coverage": bool(decision.stats.get("promotion_vetoed_for_low_coverage", False)),
+        "promotion_linked_coverage_bbox_area_fraction": decision.stats.get(
+            "promotion_linked_coverage_bbox_area_fraction",
+            None,
+        ),
+        "promotion_linked_coverage_occupied_cells": int(
+            decision.stats.get("promotion_linked_coverage_occupied_cells", 0)
+        ),
     }
 
     return KeyframeUpdateResult(
