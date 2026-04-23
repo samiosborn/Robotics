@@ -46,6 +46,8 @@ bootstrap:
     baseline_override: null
 
 pnp:
+  sample_size: 16
+  min_inliers: 16
   threshold_px: 8.0
   enable_pnp_threshold_stability_diagnostic: false
   enable_pnp_threshold_stability_gate: false

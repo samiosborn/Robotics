@@ -11,9 +11,9 @@ from core.checks import check_finite_scalar, check_in_01, check_int_ge0, check_i
 def pnp_frontend_defaults() -> dict[str, Any]:
     return {
         "num_trials": 1000,
-        "sample_size": 6,
+        "sample_size": 16,
         "threshold_px": 3.0,
-        "min_inliers": 12,
+        "min_inliers": 16,
         "ransac_seed": 0,
         "min_points": 6,
         "rank_tol": 1e-10,

@@ -318,12 +318,14 @@ def _sample_minimal_subset(rng, x_cur, sample_size, image_shape, *, policy):
     return np.asarray(selected, dtype=np.int64)
 
 
-def _replay_minimal_sample_ransac(corrs, K, image_shape, pnp_kw, *, policy):
+def _replay_minimal_sample_ransac(corrs, K, image_shape, pnp_kw, *, policy, sample_size=None):
     X_w = np.asarray(corrs.X_w, dtype=np.float64)
     x_cur = np.asarray(corrs.x_cur, dtype=np.float64)
     rng = np.random.default_rng(int(pnp_kw.get("ransac_seed", 0)))
     num_trials = int(pnp_kw.get("num_trials", 1000))
-    sample_size = int(pnp_kw.get("sample_size", 6))
+    if sample_size is None:
+        sample_size = int(pnp_kw.get("sample_size", 6))
+    sample_size = int(sample_size)
     threshold_px = float(pnp_kw.get("threshold_px", 8.0))
     min_points = int(pnp_kw.get("min_points", 6))
     rank_tol = float(pnp_kw.get("rank_tol", 1e-10))
@@ -451,6 +453,150 @@ def _replay_minimal_sample_ransac(corrs, K, image_shape, pnp_kw, *, policy):
         "sample_size": int(sample_size),
         "threshold_px": float(threshold_px),
     }
+
+
+def _raw_hypothesis_count_summary(records):
+    if len(records) == 0:
+        return {
+            "count": 0,
+            "best": 0,
+            "median": None,
+            "p90": None,
+            "p99": None,
+        }
+
+    counts = np.asarray([int(r["count"]) for r in records], dtype=np.int64)
+    return {
+        "count": int(counts.size),
+        "best": int(np.max(counts)),
+        "median": float(np.median(counts)),
+        "p90": float(np.percentile(counts, 90)),
+        "p99": float(np.percentile(counts, 99)),
+    }
+
+
+def _print_raw_hypothesis_sample_size_sweep(label, corrs, K, image_shape, pnp_kw, *, sample_sizes):
+    strict_px = float(pnp_kw.get("threshold_px", 8.0))
+    loose_px = 40.0
+    min_inliers = int(pnp_kw.get("min_inliers", 12))
+    min_points = int(pnp_kw.get("min_points", 6))
+    rank_tol = float(pnp_kw.get("rank_tol", 1e-10))
+    min_cheirality_ratio = float(pnp_kw.get("min_cheirality_ratio", 0.5))
+    eps = float(pnp_kw.get("eps", 1e-12))
+
+    R_loose, t_loose, _, loose_stats = estimate_pose_pnp_ransac(
+        corrs,
+        K,
+        num_trials=int(pnp_kw.get("num_trials", 1000)),
+        sample_size=int(pnp_kw.get("sample_size", 6)),
+        threshold_px=loose_px,
+        min_inliers=min_inliers,
+        seed=int(pnp_kw.get("ransac_seed", 0)),
+        min_points=min_points,
+        rank_tol=rank_tol,
+        min_cheirality_ratio=min_cheirality_ratio,
+        eps=eps,
+        refit=bool(pnp_kw.get("refit", True)),
+        refine_nonlinear=bool(pnp_kw.get("refine_nonlinear", True)),
+        refine_max_iters=int(pnp_kw.get("refine_max_iters", 15)),
+        refine_damping=float(pnp_kw.get("refine_damping", 1e-6)),
+        refine_step_tol=float(pnp_kw.get("refine_step_tol", 1e-9)),
+        refine_improvement_tol=float(pnp_kw.get("refine_improvement_tol", 1e-9)),
+    )
+
+    strict_under_loose = np.zeros((corrs.X_w.shape[1],), dtype=bool)
+    if R_loose is not None and t_loose is not None:
+        strict_under_loose, _ = _pnp_inlier_mask_from_pose(
+            corrs.X_w,
+            corrs.x_cur,
+            K,
+            R_loose,
+            t_loose,
+            threshold_px=strict_px,
+            eps=eps,
+        )
+
+    target_strict = int(np.sum(strict_under_loose))
+    near_global_floor = max(int(target_strict) - 10, 0)
+
+    print(f"\n=== {label} raw hypothesis quality by sample size ===")
+    print(
+        f"  strict_px={strict_px:.0f}  target_strict_inliers_under_40px_pose={target_strict}  "
+        f"near_global_floor={near_global_floor}  loose_ok={R_loose is not None}  "
+        f"loose_inliers={int(loose_stats.get('n_inliers', 0)) if isinstance(loose_stats, dict) else 0}"
+    )
+
+    for sample_size in sample_sizes:
+        result = _replay_minimal_sample_ransac(
+            corrs,
+            K,
+            image_shape,
+            pnp_kw,
+            policy="baseline",
+            sample_size=int(sample_size),
+        )
+        summary = _raw_hypothesis_count_summary(result["records"])
+        best = result["best_record"]
+        best_support = best["support_summary"] if best is not None else {}
+        n_near_global = int(
+            sum(1 for r in result["records"] if int(r["count"]) >= int(near_global_floor))
+        )
+        print(
+            f"  sample_size={int(sample_size):2d}: "
+            f"solves={result['n_model_success']}/{result['num_trials']}  "
+            f"best={summary['best']}  "
+            f"median={_format_optional(summary['median'], 1)}  "
+            f"p90={_format_optional(summary['p90'], 1)}  "
+            f"p99={_format_optional(summary['p99'], 1)}  "
+            f"near_global={n_near_global}/{summary['count']}  "
+            f"best_support_cells={best_support.get('occupied_cells', 0)}  "
+            f"best_support_bbox_area_fraction={_format_optional(best_support.get('bbox_area_fraction', None), 3)}"
+        )
+
+
+def _print_ransac_sample_size_sweep(label, corrs, K, image_shape, pnp_kw, *, sample_sizes):
+    print(f"\n=== {label} final RANSAC result by sample size ===")
+    base_min_inliers = int(pnp_kw.get("min_inliers", 12))
+    for sample_size in sample_sizes:
+        min_inliers = max(int(sample_size), int(base_min_inliers))
+        R, t, mask, stats = estimate_pose_pnp_ransac(
+            corrs,
+            K,
+            num_trials=int(pnp_kw.get("num_trials", 1000)),
+            sample_size=int(sample_size),
+            threshold_px=float(pnp_kw.get("threshold_px", 8.0)),
+            min_inliers=int(min_inliers),
+            seed=int(pnp_kw.get("ransac_seed", 0)),
+            min_points=int(pnp_kw.get("min_points", 6)),
+            rank_tol=float(pnp_kw.get("rank_tol", 1e-10)),
+            min_cheirality_ratio=float(pnp_kw.get("min_cheirality_ratio", 0.5)),
+            eps=float(pnp_kw.get("eps", 1e-12)),
+            refit=bool(pnp_kw.get("refit", True)),
+            refine_nonlinear=bool(pnp_kw.get("refine_nonlinear", True)),
+            refine_max_iters=int(pnp_kw.get("refine_max_iters", 15)),
+            refine_damping=float(pnp_kw.get("refine_damping", 1e-6)),
+            refine_step_tol=float(pnp_kw.get("refine_step_tol", 1e-9)),
+            refine_improvement_tol=float(pnp_kw.get("refine_improvement_tol", 1e-9)),
+        )
+        ok = (R is not None) and (t is not None)
+        n_inliers = int(stats.get("n_inliers", 0)) if isinstance(stats, dict) else 0
+        coverage = pnp_inlier_spatial_coverage(
+            corrs.x_cur,
+            np.asarray(mask, dtype=bool).reshape(-1) if mask is not None else np.zeros((corrs.X_w.shape[1],), dtype=bool),
+            image_shape,
+            grid_cols=4,
+            grid_rows=3,
+        )
+        print(
+            f"  sample_size={int(sample_size):2d}: "
+            f"ok={ok}  "
+            f"min_inliers={int(min_inliers)}  "
+            f"n_inliers={n_inliers}  "
+            f"refit={stats.get('refit', None) if isinstance(stats, dict) else None}  "
+            f"support_cells={coverage.get('occupied_cells', 0)}  "
+            f"bbox_area_fraction={_format_optional(coverage.get('bbox_area_fraction', None), 3)}  "
+            f"reason={stats.get('reason', None) if isinstance(stats, dict) else None}"
+        )
 
 
 def _print_record_summary(prefix, record):
@@ -1144,12 +1290,16 @@ def main():
     # --- Residual structure audit ---
     _residual_structure_audit(corrs4, K, pnp_kw, im4)
     _print_minimal_sample_failure_audit("Frame 4", corrs4, K, pnp_kw, im4.shape)
+    _print_raw_hypothesis_sample_size_sweep("Frame 4", corrs4, K, im4.shape, pnp_kw, sample_sizes=[6, 8, 12, 16])
+    _print_ransac_sample_size_sweep("Frame 4", corrs4, K, im4.shape, pnp_kw, sample_sizes=[6, 8, 12, 16])
 
     # --- Frame-3 control audit ---
     pose3 = out3.get("pose_out", {}) if isinstance(out3, dict) else {}
     corrs3 = pose3.get("corrs", None) if isinstance(pose3, dict) else None
     if isinstance(corrs3, PnPCorrespondences) and int(corrs3.X_w.shape[1]) > 0:
         _print_minimal_sample_failure_audit("Frame 3", corrs3, K, pnp_kw, im3.shape)
+        _print_raw_hypothesis_sample_size_sweep("Frame 3", corrs3, K, im3.shape, pnp_kw, sample_sizes=[6, 8, 12, 16])
+        _print_ransac_sample_size_sweep("Frame 3", corrs3, K, im3.shape, pnp_kw, sample_sizes=[6, 8, 12, 16])
 
 
 if __name__ == "__main__":
