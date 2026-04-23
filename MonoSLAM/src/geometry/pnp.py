@@ -1235,9 +1235,25 @@ def estimate_pose_pnp(
     # Convert pixels to normalised homogeneous image coordinates
     x_hat = pixel_to_normalised(K, x_cur)
 
+    # Normalise 3D world points to improve DLT conditioning
+    mu_w = np.mean(X_w, axis=1)
+    X_w_c = X_w - mu_w[:, None]
+    sigma_w = float(np.sqrt(np.mean(np.sum(X_w_c ** 2, axis=0))))
+    if sigma_w < float(eps):
+        sigma_w = 1.0
+    X_w_n = X_w_c / sigma_w
+    T_w = np.zeros((4, 4), dtype=float)
+    T_w[0, 0] = 1.0 / sigma_w
+    T_w[1, 1] = 1.0 / sigma_w
+    T_w[2, 2] = 1.0 / sigma_w
+    T_w[0, 3] = -float(mu_w[0]) / sigma_w
+    T_w[1, 3] = -float(mu_w[1]) / sigma_w
+    T_w[2, 3] = -float(mu_w[2]) / sigma_w
+    T_w[3, 3] = 1.0
+
     # Build DLT design matrix
     try:
-        A = _build_pnp_dlt_matrix(X_w, x_hat)
+        A = _build_pnp_dlt_matrix(X_w_n, x_hat)
     except Exception as exc:
         stats.update({"reason": "dlt_matrix_failed", "error": str(exc)})
         return None, None, stats
@@ -1264,8 +1280,8 @@ def estimate_pose_pnp(
         stats.update({"reason": "dlt_rank_deficient"})
         return None, None, stats
 
-    # Recover projective camera matrix
-    P_tilde = Vt_A[-1, :].reshape(3, 4)
+    # Recover projective camera matrix and de-normalise
+    P_tilde = Vt_A[-1, :].reshape(3, 4) @ T_w
 
     # Recover metric pose
     try:
