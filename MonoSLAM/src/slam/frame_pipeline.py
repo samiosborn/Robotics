@@ -280,54 +280,61 @@ def process_frame_against_seed(
             "stats": stats,
         }
 
+    localisation_only_rescue_frame = bool(pose_stats.get("pnp_support_rescue_succeeded", False))
+
     # Default map-growth output
-    seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
-        seed,
-        pose_out,
-        current_kf=current_kf,
-        K=K,
-        track_out=track_out,
-        max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
-        eps=eps,
-    )
+    seed_out = seed
+    tracked_obs_stats: dict[str, Any] = {}
     map_growth_out = None
 
-    # Grow the map only after a valid pose has been recovered
-    if bool(grow_map):
-        # Read the frozen keyframe pose from the seed
-        R_kf, t_kf = seed_keyframe_pose(seed_out)
-
-        # Read the current pose
-        R_cur = np.asarray(pose_out["R"], dtype=np.float64)
-        t_cur = np.asarray(pose_out["t"], dtype=np.float64).reshape(3)
-
-        # Run one map-growth step from the tracked frame
-        map_growth_out = grow_map_from_tracking_result(
-            seed_out,
-            track_out,
-            K,
-            K,
-            R_kf,
-            t_kf,
-            R_cur,
-            t_cur,
+    if not localisation_only_rescue_frame:
+        seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
+            seed,
+            pose_out,
             keyframe_kf=keyframe_kf,
             current_kf=current_kf,
-            descriptor_source=track_out.get("cur_feats", None),
-            min_parallax_deg=min_parallax_deg,
-            max_depth_ratio=max_depth_ratio,
-            max_reproj_error_px=max_reproj_error_px,
+            K=K,
+            track_out=track_out,
+            max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
             eps=eps,
         )
 
-        # Read the updated seed
-        seed_out = map_growth_out.seed
+        # Grow the map only after a valid pose has been recovered
+        if bool(grow_map):
+            # Read the frozen keyframe pose from the seed
+            R_kf, t_kf = seed_keyframe_pose(seed_out)
+
+            # Read the current pose
+            R_cur = np.asarray(pose_out["R"], dtype=np.float64)
+            t_cur = np.asarray(pose_out["t"], dtype=np.float64).reshape(3)
+
+            # Run one map-growth step from the tracked frame
+            map_growth_out = grow_map_from_tracking_result(
+                seed_out,
+                track_out,
+                K,
+                K,
+                R_kf,
+                t_kf,
+                R_cur,
+                t_cur,
+                keyframe_kf=keyframe_kf,
+                current_kf=current_kf,
+                descriptor_source=track_out.get("cur_feats", None),
+                min_parallax_deg=min_parallax_deg,
+                max_depth_ratio=max_depth_ratio,
+                max_reproj_error_px=max_reproj_error_px,
+                eps=eps,
+            )
+
+            # Read the updated seed
+            seed_out = map_growth_out.seed
 
     # Default keyframe-consideration output
     keyframe_out = None
 
     # Consider promoting the current frame to a new keyframe
-    if bool(consider_keyframe):
+    if bool(consider_keyframe) and not localisation_only_rescue_frame:
         keyframe_out = consider_promote_keyframe(
             seed_out,
             pose_out,
@@ -376,6 +383,7 @@ def process_frame_against_seed(
         "n_new_triangulated": int(map_stats.get("n_triangulated_valid", 0)),
         "n_new_added": int(map_stats.get("n_added", 0)),
         "seed_landmarks_after": int(len(seed_out.get("landmarks", []))),
+        "localisation_only_rescue_frame": bool(localisation_only_rescue_frame),
         "n_linked_landmarks_candidate": int(keyframe_stats.get("n_linked_landmarks_candidate", 0)),
         "keyframe_make": bool(keyframe_stats.get("make_keyframe", False)),
         "keyframe_promoted": bool(keyframe_stats.get("promoted", False)),

@@ -65,6 +65,7 @@ def append_tracked_observations_to_seed(
     seed: dict,
     pose_out: dict,
     *,
+    keyframe_kf: int = 1,
     current_kf: int,
     K: np.ndarray | None = None,
     track_out: dict | None = None,
@@ -77,6 +78,7 @@ def append_tracked_observations_to_seed(
     pose_out = check_required_keys(pose_out, {"corrs", "pnp_inlier_mask"}, name="pose_out")
 
     # Check frame index
+    keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
     current_kf = check_int_ge0(current_kf, name="current_kf")
 
     # Check append controls
@@ -145,6 +147,15 @@ def append_tracked_observations_to_seed(
     if not isinstance(landmarks_raw, list):
         raise ValueError("seed['landmarks'] must be a list")
     landmarks = list(landmarks_raw)
+    landmark_id_by_feat1_raw = seed.get("landmark_id_by_feat1", None)
+    landmark_id_by_feat1 = None
+    if landmark_id_by_feat1_raw is not None:
+        landmark_id_by_feat1 = check_index_array_1d(
+            landmark_id_by_feat1_raw,
+            name="seed['landmark_id_by_feat1']",
+            dtype=np.int64,
+            allow_negative=True,
+        ).copy()
 
     # Build a landmark-id to list-index lookup
     landmark_pos_by_id: dict[int, int] = {}
@@ -179,6 +190,7 @@ def append_tracked_observations_to_seed(
         "n_append_extra_reproj_added_bootstrap_born": 0,
         "n_append_extra_reproj_added_map_growth_born": 0,
         "n_landmarks_with_obs_current_kf_after_append": 0,
+        "n_stale_map_growth_removed": 0,
     }
 
     # Record landmark birth-source stats for appended observations
@@ -275,6 +287,51 @@ def append_tracked_observations_to_seed(
         _record_birth_source_append(lm, pnp_inlier=bool(pnp_inlier), extra_reproj=bool(extra_reproj))
 
         return True
+
+    # Hard-remove stale two-view map-growth landmarks and clear the active lookup
+    def _prune_stale_map_growth_landmarks() -> None:
+        nonlocal landmarks, landmark_id_by_feat1
+
+        kept_landmarks: list = []
+        n_removed = 0
+
+        for lm in landmarks:
+            if not isinstance(lm, dict):
+                kept_landmarks.append(lm)
+                continue
+
+            birth_source = lm.get("birth_source", None)
+            obs = lm.get("obs", None)
+            n_obs = 0
+            if isinstance(obs, list):
+                n_obs = sum(1 for ob in obs if isinstance(ob, dict))
+
+            should_remove = (
+                birth_source == "map_growth"
+                and n_obs == 2
+                and (int(current_kf) - int(lm.get("birth_kf", -1)) >= 2)
+            )
+            if not should_remove:
+                kept_landmarks.append(lm)
+                continue
+
+            lm_id = int(lm.get("id", -1))
+            if landmark_id_by_feat1 is not None and isinstance(obs, list) and lm_id >= 0:
+                for ob in obs:
+                    if not isinstance(ob, dict):
+                        continue
+                    if int(ob.get("kf", -1)) != int(keyframe_kf):
+                        continue
+                    feat = int(ob.get("feat", -1))
+                    if feat < 0 or feat >= int(landmark_id_by_feat1.size):
+                        continue
+                    if int(landmark_id_by_feat1[feat]) == lm_id:
+                        landmark_id_by_feat1[feat] = -1
+
+            n_removed += 1
+
+        landmarks = kept_landmarks
+        stats["n_stale_map_growth_removed"] = int(n_removed)
 
     # Append one current-frame observation per inlier landmark track
     pnp_inlier_pairs: set[tuple[int, int]] = set()
@@ -406,8 +463,12 @@ def append_tracked_observations_to_seed(
                     extra_reproj=True,
                 )
 
+    _prune_stale_map_growth_landmarks()
+
     # Pack back into the seed
     seed["landmarks"] = landmarks
+    if landmark_id_by_feat1 is not None:
+        seed["landmark_id_by_feat1"] = landmark_id_by_feat1
     stats["n_landmarks_with_obs_current_kf_after_append"] = _count_landmarks_with_current_observation()
     seed["last_tracked_observation_append_stats"] = stats
 

@@ -7,8 +7,242 @@ from typing import Any
 import numpy as np
 
 from core.checks import align_bool_mask_1d, check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_matrix_3x3, check_positive
-from geometry.pnp import build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_threshold_stability_diagnostic
+from geometry.pnp import _pnp_inlier_mask_from_pose, _slice_pnp_correspondences, build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_threshold_stability_diagnostic
 from slam.pnp_stats import landmark_observation_histogram, pnp_support_diagnostic_stats, pnp_support_gate_stats, pnp_threshold_stability_summary_stats
+
+
+_PNP_SUPPORT_RESCUE_STRICT_THRESHOLD_PX = 8.0
+_PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX = 12.0
+
+
+# Try the frame-local loose-pose residual subset rescue on the fixed correspondence set
+def _attempt_pnp_spatial_support_rescue(
+    corrs,
+    K: np.ndarray,
+    *,
+    threshold_px: float,
+    base_inlier_mask,
+    base_spatial_gate_reason,
+    num_trials: int,
+    sample_size: int,
+    min_inliers: int,
+    ransac_seed: int,
+    min_points: int,
+    rank_tol: float,
+    min_cheirality_ratio: float,
+    eps: float,
+    refit: bool,
+    refine_nonlinear: bool,
+    refine_max_iters: int,
+    refine_damping: float,
+    refine_step_tol: float,
+    refine_improvement_tol: float,
+    image_shape: tuple[int, int] | None,
+    enable_pnp_spatial_gate: bool,
+    pnp_spatial_grid_cols: int,
+    pnp_spatial_grid_rows: int,
+    min_pnp_inlier_cells: int,
+    max_pnp_single_cell_fraction: float,
+    min_pnp_bbox_area_fraction: float,
+    enable_pnp_component_gate: bool,
+    pnp_component_radius_px: float,
+    min_pnp_component_count: int,
+    max_pnp_largest_component_fraction: float,
+    min_pnp_largest_component_bbox_area_fraction: float,
+) -> dict[str, Any]:
+    base_inlier_mask = align_bool_mask_1d(base_inlier_mask, int(corrs.X_w.shape[1]), name="base_pnp_inlier_mask")
+    base_n_inliers = int(np.sum(base_inlier_mask))
+    out: dict[str, Any] = {
+        "attempted": False,
+        "succeeded": False,
+        "reason": None,
+        "base_strict_inliers": int(base_n_inliers),
+        "base_spatial_gate_reason": base_spatial_gate_reason,
+        "loose_threshold_px": float(_PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX),
+        "loose_pose_ok": False,
+        "loose_inliers": 0,
+        "loose_reason": None,
+        "subset_count": 0,
+        "subset_strict_inliers": 0,
+        "subset_strict_reason": None,
+        "fullset_strict_inliers": 0,
+        "fullset_strict_inlier_delta": 0,
+        "min_inlier_gain_required": int(sample_size),
+        "final_spatial_gate_rejected": False,
+        "final_spatial_gate_reason": None,
+        "final_component_gate_rejected": False,
+        "final_component_gate_reason": None,
+    }
+
+    if image_shape is None:
+        out["reason"] = "image_shape_unavailable"
+        return out
+
+    if not np.isclose(float(threshold_px), float(_PNP_SUPPORT_RESCUE_STRICT_THRESHOLD_PX)):
+        out["reason"] = "threshold_not_strict_8px"
+        return out
+
+    gate_reason_str = "" if base_spatial_gate_reason is None else str(base_spatial_gate_reason)
+    if "bbox_area_fraction_low" not in gate_reason_str:
+        out["reason"] = "spatial_gate_reason_not_bbox_area_fraction_low"
+        return out
+
+    out["attempted"] = True
+
+    try:
+        R_loose, t_loose, loose_inlier_mask, loose_stats = estimate_pose_pnp_ransac(
+            corrs,
+            K,
+            num_trials=int(num_trials),
+            sample_size=int(sample_size),
+            threshold_px=float(_PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX),
+            min_inliers=int(min_inliers),
+            seed=int(ransac_seed),
+            min_points=int(min_points),
+            rank_tol=float(rank_tol),
+            min_cheirality_ratio=float(min_cheirality_ratio),
+            eps=float(eps),
+            refit=bool(refit),
+            refine_nonlinear=bool(refine_nonlinear),
+            refine_max_iters=int(refine_max_iters),
+            refine_damping=float(refine_damping),
+            refine_step_tol=float(refine_step_tol),
+            refine_improvement_tol=float(refine_improvement_tol),
+        )
+    except Exception as exc:
+        out["reason"] = "loose_pnp_error"
+        out["error"] = str(exc)
+        return out
+
+    loose_stats = loose_stats if isinstance(loose_stats, dict) else {}
+    loose_inlier_mask = align_bool_mask_1d(loose_inlier_mask, int(corrs.X_w.shape[1]), name="loose_pnp_inlier_mask")
+    out["loose_pose_ok"] = bool((R_loose is not None) and (t_loose is not None))
+    out["loose_inliers"] = int(np.sum(loose_inlier_mask))
+    out["loose_reason"] = loose_stats.get("reason", None)
+
+    if not bool(out["loose_pose_ok"]):
+        out["reason"] = "loose_pnp_failed"
+        return out
+
+    loose_subset_mask, _ = _pnp_inlier_mask_from_pose(
+        corrs.X_w,
+        corrs.x_cur,
+        K,
+        R_loose,
+        t_loose,
+        threshold_px=float(_PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX),
+        eps=float(eps),
+    )
+    loose_subset_mask = align_bool_mask_1d(loose_subset_mask, int(corrs.X_w.shape[1]), name="loose_subset_mask")
+    subset_count = int(np.sum(loose_subset_mask))
+    out["subset_count"] = int(subset_count)
+
+    if subset_count < int(sample_size):
+        out["reason"] = "loose_subset_too_small"
+        return out
+
+    corrs_subset = _slice_pnp_correspondences(corrs, loose_subset_mask)
+    try:
+        R_rescue, t_rescue, subset_strict_mask, subset_strict_stats = estimate_pose_pnp_ransac(
+            corrs_subset,
+            K,
+            num_trials=int(num_trials),
+            sample_size=int(sample_size),
+            threshold_px=float(threshold_px),
+            min_inliers=int(min_inliers),
+            seed=int(ransac_seed),
+            min_points=int(min_points),
+            rank_tol=float(rank_tol),
+            min_cheirality_ratio=float(min_cheirality_ratio),
+            eps=float(eps),
+            refit=bool(refit),
+            refine_nonlinear=bool(refine_nonlinear),
+            refine_max_iters=int(refine_max_iters),
+            refine_damping=float(refine_damping),
+            refine_step_tol=float(refine_step_tol),
+            refine_improvement_tol=float(refine_improvement_tol),
+        )
+    except Exception as exc:
+        out["reason"] = "subset_strict_pnp_error"
+        out["error"] = str(exc)
+        return out
+
+    subset_strict_stats = subset_strict_stats if isinstance(subset_strict_stats, dict) else {}
+    subset_strict_mask = align_bool_mask_1d(subset_strict_mask, int(corrs_subset.X_w.shape[1]), name="subset_strict_inlier_mask")
+    out["subset_strict_inliers"] = int(np.sum(subset_strict_mask))
+    out["subset_strict_reason"] = subset_strict_stats.get("reason", None)
+
+    if R_rescue is None or t_rescue is None:
+        out["reason"] = "subset_strict_pnp_failed"
+        return out
+
+    rescued_full_mask, rescued_full_d_sq = _pnp_inlier_mask_from_pose(
+        corrs.X_w,
+        corrs.x_cur,
+        K,
+        R_rescue,
+        t_rescue,
+        threshold_px=float(threshold_px),
+        eps=float(eps),
+    )
+    rescued_full_mask = align_bool_mask_1d(rescued_full_mask, int(corrs.X_w.shape[1]), name="rescued_full_mask")
+    rescued_full_d_sq = np.asarray(rescued_full_d_sq, dtype=np.float64).reshape(-1)
+    rescued_full_inliers = int(np.sum(rescued_full_mask))
+    out["fullset_strict_inliers"] = int(rescued_full_inliers)
+    out["fullset_strict_inlier_delta"] = int(rescued_full_inliers - base_n_inliers)
+
+    if int(out["fullset_strict_inlier_delta"]) < int(sample_size):
+        out["reason"] = "strict_inlier_gain_too_small"
+        return out
+
+    rescue_support_stats = pnp_support_diagnostic_stats(
+        corrs,
+        rescued_full_mask,
+        image_shape,
+        pnp_spatial_grid_cols=int(pnp_spatial_grid_cols),
+        pnp_spatial_grid_rows=int(pnp_spatial_grid_rows),
+        pnp_component_radius_px=float(pnp_component_radius_px),
+    )
+    rescue_gate_stats = pnp_support_gate_stats(
+        True,
+        rescue_support_stats,
+        enable_pnp_spatial_gate=bool(enable_pnp_spatial_gate),
+        min_pnp_inlier_cells=int(min_pnp_inlier_cells),
+        max_pnp_single_cell_fraction=float(max_pnp_single_cell_fraction),
+        min_pnp_bbox_area_fraction=float(min_pnp_bbox_area_fraction),
+        enable_pnp_component_gate=bool(enable_pnp_component_gate),
+        min_pnp_component_count=int(min_pnp_component_count),
+        max_pnp_largest_component_fraction=float(max_pnp_largest_component_fraction),
+        min_pnp_largest_component_bbox_area_fraction=float(min_pnp_largest_component_bbox_area_fraction),
+    )
+
+    out["final_spatial_gate_rejected"] = bool(rescue_gate_stats.get("pnp_spatial_gate_rejected", False))
+    out["final_spatial_gate_reason"] = rescue_gate_stats.get("pnp_spatial_gate_reason", None)
+    out["final_component_gate_rejected"] = bool(rescue_gate_stats.get("pnp_component_gate_rejected", False))
+    out["final_component_gate_reason"] = rescue_gate_stats.get("pnp_component_gate_reason", None)
+
+    if bool(out["final_spatial_gate_rejected"]) or bool(out["final_component_gate_rejected"]):
+        out["reason"] = "rescued_support_still_rejected"
+        return out
+
+    rescue_solver_stats = dict(subset_strict_stats)
+    rescue_solver_stats.update(
+        {
+            "n_inliers": int(rescued_full_inliers),
+            "mean_inlier_err_sq": None if rescued_full_inliers <= 0 else float(np.mean(rescued_full_d_sq[rescued_full_mask])),
+            "threshold_px": float(threshold_px),
+        }
+    )
+
+    out["succeeded"] = True
+    out["reason"] = "rescued"
+    out["R"] = np.asarray(R_rescue, dtype=np.float64)
+    out["t"] = np.asarray(t_rescue, dtype=np.float64).reshape(3)
+    out["pnp_inlier_mask"] = np.asarray(rescued_full_mask, dtype=bool)
+    out["pnp_stats"] = rescue_solver_stats
+    out["support_stats"] = rescue_support_stats
+    out["gate_stats"] = rescue_gate_stats
+    return out
 
 
 # Estimate the current pose from a bootstrap seed and tracked observations
@@ -323,6 +557,25 @@ def estimate_pose_from_seed(
         "pnp_threshold_stability_looser_solution_only": False,
         "pnp_threshold_stability_supports_disjoint": False,
         "pnp_threshold_stability_reasons": [],
+        "pnp_support_rescue_attempted": False,
+        "pnp_support_rescue_succeeded": False,
+        "pnp_support_rescue_reason": None,
+        "pnp_support_rescue_base_strict_inliers": 0,
+        "pnp_support_rescue_base_spatial_gate_reason": None,
+        "pnp_support_rescue_loose_threshold_px": float(_PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX),
+        "pnp_support_rescue_loose_pose_ok": False,
+        "pnp_support_rescue_loose_inliers": 0,
+        "pnp_support_rescue_loose_reason": None,
+        "pnp_support_rescue_subset_count": 0,
+        "pnp_support_rescue_subset_strict_inliers": 0,
+        "pnp_support_rescue_subset_strict_reason": None,
+        "pnp_support_rescue_fullset_strict_inliers": 0,
+        "pnp_support_rescue_fullset_strict_inlier_delta": 0,
+        "pnp_support_rescue_min_inlier_gain": int(sample_size),
+        "pnp_support_rescue_final_spatial_gate_rejected": False,
+        "pnp_support_rescue_final_spatial_gate_reason": None,
+        "pnp_support_rescue_final_component_gate_rejected": False,
+        "pnp_support_rescue_final_component_gate_reason": None,
     }
 
     # Stop early if nothing survived
@@ -400,6 +653,88 @@ def estimate_pose_from_seed(
     if not ok and stats.get("reason") is None:
         stats.update({"reason": "pnp_pose_missing"})
 
+    # Try the frame-local rescue only for the diagnosed strict 8 px spatial support failure
+    if bool(ok):
+        strict_support_gate_stats = pnp_support_gate_stats(
+            bool(ok),
+            stats,
+            enable_pnp_spatial_gate=bool(enable_pnp_spatial_gate),
+            min_pnp_inlier_cells=int(min_pnp_inlier_cells),
+            max_pnp_single_cell_fraction=float(max_pnp_single_cell_fraction),
+            min_pnp_bbox_area_fraction=float(min_pnp_bbox_area_fraction),
+            enable_pnp_component_gate=bool(enable_pnp_component_gate),
+            min_pnp_component_count=int(min_pnp_component_count),
+            max_pnp_largest_component_fraction=float(max_pnp_largest_component_fraction),
+            min_pnp_largest_component_bbox_area_fraction=float(min_pnp_largest_component_bbox_area_fraction),
+        )
+        if bool(strict_support_gate_stats.get("pnp_spatial_gate_rejected", False)) and not bool(
+            strict_support_gate_stats.get("pnp_component_gate_rejected", False)
+        ):
+            rescue_out = _attempt_pnp_spatial_support_rescue(
+                corrs,
+                K,
+                threshold_px=float(threshold_px),
+                base_inlier_mask=pnp_inlier_mask,
+                base_spatial_gate_reason=strict_support_gate_stats.get("pnp_spatial_gate_reason", None),
+                num_trials=int(num_trials),
+                sample_size=int(sample_size),
+                min_inliers=int(min_inliers),
+                ransac_seed=int(ransac_seed),
+                min_points=int(min_points),
+                rank_tol=float(rank_tol),
+                min_cheirality_ratio=float(min_cheirality_ratio),
+                eps=float(eps),
+                refit=bool(refit),
+                refine_nonlinear=bool(refine_nonlinear),
+                refine_max_iters=int(refine_max_iters),
+                refine_damping=float(refine_damping),
+                refine_step_tol=float(refine_step_tol),
+                refine_improvement_tol=float(refine_improvement_tol),
+                image_shape=image_shape,
+                enable_pnp_spatial_gate=bool(enable_pnp_spatial_gate),
+                pnp_spatial_grid_cols=int(pnp_spatial_grid_cols),
+                pnp_spatial_grid_rows=int(pnp_spatial_grid_rows),
+                min_pnp_inlier_cells=int(min_pnp_inlier_cells),
+                max_pnp_single_cell_fraction=float(max_pnp_single_cell_fraction),
+                min_pnp_bbox_area_fraction=float(min_pnp_bbox_area_fraction),
+                enable_pnp_component_gate=bool(enable_pnp_component_gate),
+                pnp_component_radius_px=float(pnp_component_radius_px),
+                min_pnp_component_count=int(min_pnp_component_count),
+                max_pnp_largest_component_fraction=float(max_pnp_largest_component_fraction),
+                min_pnp_largest_component_bbox_area_fraction=float(min_pnp_largest_component_bbox_area_fraction),
+            )
+            stats.update(
+                {
+                    "pnp_support_rescue_attempted": bool(rescue_out.get("attempted", False)),
+                    "pnp_support_rescue_succeeded": bool(rescue_out.get("succeeded", False)),
+                    "pnp_support_rescue_reason": rescue_out.get("reason", None),
+                    "pnp_support_rescue_base_strict_inliers": int(rescue_out.get("base_strict_inliers", int(np.sum(pnp_inlier_mask)))),
+                    "pnp_support_rescue_base_spatial_gate_reason": rescue_out.get("base_spatial_gate_reason", strict_support_gate_stats.get("pnp_spatial_gate_reason", None)),
+                    "pnp_support_rescue_loose_threshold_px": float(rescue_out.get("loose_threshold_px", _PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX)),
+                    "pnp_support_rescue_loose_pose_ok": bool(rescue_out.get("loose_pose_ok", False)),
+                    "pnp_support_rescue_loose_inliers": int(rescue_out.get("loose_inliers", 0)),
+                    "pnp_support_rescue_loose_reason": rescue_out.get("loose_reason", None),
+                    "pnp_support_rescue_subset_count": int(rescue_out.get("subset_count", 0)),
+                    "pnp_support_rescue_subset_strict_inliers": int(rescue_out.get("subset_strict_inliers", 0)),
+                    "pnp_support_rescue_subset_strict_reason": rescue_out.get("subset_strict_reason", None),
+                    "pnp_support_rescue_fullset_strict_inliers": int(rescue_out.get("fullset_strict_inliers", 0)),
+                    "pnp_support_rescue_fullset_strict_inlier_delta": int(rescue_out.get("fullset_strict_inlier_delta", 0)),
+                    "pnp_support_rescue_min_inlier_gain": int(rescue_out.get("min_inlier_gain_required", sample_size)),
+                    "pnp_support_rescue_final_spatial_gate_rejected": bool(rescue_out.get("final_spatial_gate_rejected", False)),
+                    "pnp_support_rescue_final_spatial_gate_reason": rescue_out.get("final_spatial_gate_reason", None),
+                    "pnp_support_rescue_final_component_gate_rejected": bool(rescue_out.get("final_component_gate_rejected", False)),
+                    "pnp_support_rescue_final_component_gate_reason": rescue_out.get("final_component_gate_reason", None),
+                }
+            )
+
+            if bool(rescue_out.get("succeeded", False)):
+                R = np.asarray(rescue_out["R"], dtype=np.float64)
+                t = np.asarray(rescue_out["t"], dtype=np.float64).reshape(3)
+                pnp_inlier_mask = align_bool_mask_1d(rescue_out["pnp_inlier_mask"], n_corr, name="rescued_pnp_inlier_mask")
+                stats.update(rescue_out.get("pnp_stats", {}))
+                stats.update({"n_pnp_inliers": int(np.sum(pnp_inlier_mask))})
+                stats.update(rescue_out.get("support_stats", {}))
+
     # Run the optional threshold-stability diagnostic on the accepted support
     threshold_stability_gate_rejected = False
     if bool(ok) and bool(enable_pnp_threshold_stability_diagnostic) and pnp_threshold_stability_compare_px is not None:
@@ -450,6 +785,10 @@ def estimate_pose_from_seed(
                 }
             )
             threshold_stability_gate_rejected = True
+
+    # Read inlier landmark ids from the final selected support
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    landmark_ids_inlier = landmark_ids[pnp_inlier_mask]
 
     # Evaluate configured post-PnP support gates
     support_gate_stats = pnp_support_gate_stats(
