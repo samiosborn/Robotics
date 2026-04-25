@@ -74,7 +74,7 @@ def _pose_temporal_consistency_stats(
     return out
 
 
-# Try the frame-local loose-pose residual subset rescue on the fixed correspondence set
+# Run staged support rescue on a fixed PnP correspondence set
 def _attempt_pnp_spatial_support_rescue(
     corrs,
     K: np.ndarray,
@@ -251,6 +251,7 @@ def _attempt_pnp_spatial_support_rescue(
             stage_out["reason"] = "loose_subset_too_small"
             return stage_out
 
+        # Only the 20 px stage may accept the loose pose as localisation-only
         allow_loose_localisation_fallback = np.isclose(
             float(loose_threshold_px),
             float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX),
@@ -869,7 +870,7 @@ def estimate_pose_from_seed(
     if not ok and stats.get("reason") is None:
         stats.update({"reason": "pnp_pose_missing"})
 
-    # Try the frame-local rescue only for the diagnosed strict 8 px failure modes
+    # Try rescue only for the diagnosed strict 8 px failure modes
     rescue_out = None
     strict_support_gate_stats = {
         "pnp_spatial_gate_rejected": False,

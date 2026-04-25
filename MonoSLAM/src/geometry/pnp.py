@@ -18,7 +18,7 @@ class PnPCorrespondences:
     X_w: np.ndarray
     # Current image points as (2,N)
     x_cur: np.ndarray
-    # Landmark id per correspondence as (N,)
+    # Landmark ID per correspondence as (N,)
     landmark_ids: np.ndarray
     # Current feature index per correspondence as (N,)
     cur_feat_idx: np.ndarray
@@ -795,8 +795,7 @@ def pnp_current_image_spatial_thinning_mask(
 
 # Build the Gauss-Newton linear system for pose-only reprojection refinement
 def _linearise_pose_only_reprojection(X_w, x_cur, K, R, t, eps=1e-12):
-    # --- Checks ---
-    # Check intrinsics
+    # Validate inputs
     K = check_matrix_3x3(K, name="K", dtype=float, finite=False)
     # Check correspondences
     X_w, x_cur = check_3xN_2xN_cols(X_w, x_cur, nameX="X_w", namex="x_cur", dtype=float, finite=True)

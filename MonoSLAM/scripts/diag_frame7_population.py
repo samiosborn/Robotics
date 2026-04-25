@@ -252,7 +252,7 @@ def _population_summaries(meta: dict) -> None:
     print(f"  birth_source rejected: {_format_counts(meta['birth_source'], rejected)}")
     print(f"  birth_source support_rate: {_format_support_rate(meta['birth_source'], loose_mask)}")
 
-    print(f"  age_years? no, age_in_keyframes loose12: {_format_counts(meta['age_kf'], loose_mask)}")
+    print(f"  age_in_keyframes loose12: {_format_counts(meta['age_kf'], loose_mask)}")
     print(f"  age_in_keyframes rejected: {_format_counts(meta['age_kf'], rejected)}")
     print(f"  age support_rate: {_format_support_rate(meta['age_kf'], loose_mask)}")
 

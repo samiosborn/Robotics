@@ -95,8 +95,7 @@ def process_frame_against_seed(
     keyframe_min_rotation_deg: float = 5.0,
     keyframe_require_pose: bool = True,
 ) -> dict[str, Any]:
-    # --- Checks ---
-    # Check intrinsics
+    # Validate inputs
     check_matrix_3x3(K, name="K", dtype=float, finite=False)
 
     # Check containers
@@ -291,7 +290,7 @@ def process_frame_against_seed(
 
     localisation_only_rescue_frame = bool(pose_stats.get("pnp_support_rescue_succeeded", False))
 
-    # Default map-growth output
+    # Localisation-only rescue frames do not update map observations
     seed_out = seed
     tracked_obs_stats: dict[str, Any] = {}
     map_growth_out = None
@@ -308,7 +307,7 @@ def process_frame_against_seed(
             eps=eps,
         )
 
-        # Grow the map only after a valid pose has been recovered
+        # Grow the map only from non-rescue poses
         if bool(grow_map):
             # Read the frozen keyframe pose from the seed
             R_kf, t_kf = seed_keyframe_pose(seed_out)
