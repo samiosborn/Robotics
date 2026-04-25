@@ -195,6 +195,13 @@ def process_frame_against_seed(
         }
 
     # Estimate current pose from the seed map
+    temporal_reference_pose = seed.get("last_accepted_pose", None)
+    if isinstance(temporal_reference_pose, dict):
+        temporal_reference_R = temporal_reference_pose.get("R", None)
+        temporal_reference_t = temporal_reference_pose.get("t", None)
+    else:
+        temporal_reference_R, temporal_reference_t = seed_keyframe_pose(seed)
+
     pose_out = estimate_pose_from_seed(
         K,
         seed,
@@ -245,6 +252,8 @@ def process_frame_against_seed(
         pnp_threshold_stability_max_camera_centre_direction_deg=pnp_threshold_stability_max_camera_centre_direction_deg,
         pnp_threshold_stability_disjoint_iou=pnp_threshold_stability_disjoint_iou,
         enable_pnp_threshold_stability_gate=enable_pnp_threshold_stability_gate,
+        temporal_reference_R=temporal_reference_R,
+        temporal_reference_t=temporal_reference_t,
     )
 
     # Read pose stats
@@ -359,6 +368,14 @@ def process_frame_against_seed(
 
     # Read keyframe stats
     keyframe_stats = keyframe_out.stats if keyframe_out is not None else {}
+
+    seed_out = dict(seed_out)
+    seed_out["last_accepted_pose"] = {
+        "kf": int(current_kf),
+        "R": np.asarray(pose_out["R"], dtype=np.float64),
+        "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
+        "localisation_only": bool(localisation_only_rescue_frame),
+    }
 
     # Pack a single frontend result
     stats = {
