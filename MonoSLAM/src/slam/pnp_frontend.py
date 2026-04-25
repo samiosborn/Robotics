@@ -17,6 +17,7 @@ from slam.pnp_stats import landmark_observation_histogram, pnp_support_diagnosti
 _PNP_SUPPORT_RESCUE_STRICT_THRESHOLD_PX = 8.0
 _PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX = 12.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX = 20.0
+_PNP_SUPPORT_RESCUE_SECOND_STAGE_NUM_TRIALS = 5000
 
 
 def _pose_temporal_consistency_stats(
@@ -168,7 +169,8 @@ def _attempt_pnp_spatial_support_rescue(
         out["reason"] = "strict_failure_not_supported_for_rescue"
         return out
 
-    def _attempt_one_stage(loose_threshold_px: float) -> dict[str, Any]:
+    def _attempt_one_stage(loose_threshold_px: float, *, stage_num_trials: int | None = None) -> dict[str, Any]:
+        pnp_num_trials = int(num_trials) if stage_num_trials is None else int(stage_num_trials)
         stage_out: dict[str, Any] = {
             "attempted": True,
             "succeeded": False,
@@ -203,7 +205,7 @@ def _attempt_pnp_spatial_support_rescue(
             R_loose, t_loose, loose_inlier_mask, loose_stats = estimate_pose_pnp_ransac(
                 corrs,
                 K,
-                num_trials=int(num_trials),
+                num_trials=int(pnp_num_trials),
                 sample_size=int(sample_size),
                 threshold_px=float(loose_threshold_px),
                 min_inliers=int(min_inliers),
@@ -337,7 +339,7 @@ def _attempt_pnp_spatial_support_rescue(
             R_rescue, t_rescue, subset_strict_mask, subset_strict_stats = estimate_pose_pnp_ransac(
                 corrs_subset,
                 K,
-                num_trials=int(num_trials),
+                num_trials=int(pnp_num_trials),
                 sample_size=int(sample_size),
                 threshold_px=float(threshold_px),
                 min_inliers=int(min_inliers),
@@ -443,7 +445,10 @@ def _attempt_pnp_spatial_support_rescue(
     if bool(first_stage_out.get("succeeded", False)):
         return out
 
-    second_stage_out = _attempt_one_stage(float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX))
+    second_stage_out = _attempt_one_stage(
+        float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX),
+        stage_num_trials=int(_PNP_SUPPORT_RESCUE_SECOND_STAGE_NUM_TRIALS),
+    )
     out.update(second_stage_out)
     out["second_stage_attempted"] = True
     out["second_stage_succeeded"] = bool(second_stage_out.get("succeeded", False))
