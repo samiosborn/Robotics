@@ -1603,6 +1603,8 @@ def estimate_pose_pnp_ransac(
         keep_t = False
         if count_t > best_count:
             keep_t = True
+        elif best_count >= int(min_inliers) and count_t < best_count:
+            keep_t = False
         elif 0 <= inlier_gap_t <= int(spatial_tie_inlier_gap):
             if better_support_t:
                 keep_t = True
