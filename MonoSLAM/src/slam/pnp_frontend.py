@@ -17,6 +17,7 @@ from slam.pnp_stats import landmark_observation_histogram, pnp_support_diagnosti
 _PNP_SUPPORT_RESCUE_STRICT_THRESHOLD_PX = 8.0
 _PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX = 12.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX = 20.0
+_PNP_SUPPORT_RESCUE_SECOND_STAGE_SEED_THRESHOLD_PX = 40.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_NUM_TRIALS = 5000
 
 
@@ -141,6 +142,10 @@ def _attempt_pnp_spatial_support_rescue(
         "final_component_gate_reason": None,
         "second_stage_attempted": False,
         "second_stage_succeeded": False,
+        "second_stage_seeded_20px_fallback_attempted": False,
+        "second_stage_seeded_20px_fallback_triggered": False,
+        "second_stage_seeded_20px_fallback_inliers": 0,
+        "second_stage_seeded_20px_fallback_reason": None,
         "loose_localisation_fallback_succeeded": False,
         "loose_localisation_fallback_reason": None,
         "loose_localisation_fallback_cheirality_ratio": None,
@@ -192,6 +197,10 @@ def _attempt_pnp_spatial_support_rescue(
             "final_spatial_gate_reason": None,
             "final_component_gate_rejected": False,
             "final_component_gate_reason": None,
+            "second_stage_seeded_20px_fallback_attempted": False,
+            "second_stage_seeded_20px_fallback_triggered": False,
+            "second_stage_seeded_20px_fallback_inliers": 0,
+            "second_stage_seeded_20px_fallback_reason": None,
             "loose_localisation_fallback_succeeded": False,
             "loose_localisation_fallback_reason": None,
             "loose_localisation_fallback_cheirality_ratio": None,
@@ -231,6 +240,84 @@ def _attempt_pnp_spatial_support_rescue(
         stage_out["loose_pose_ok"] = bool((R_loose is not None) and (t_loose is not None))
         stage_out["loose_inliers"] = int(np.sum(loose_inlier_mask))
         stage_out["loose_reason"] = loose_stats.get("reason", None)
+
+        if (
+            not bool(stage_out["loose_pose_ok"])
+            and np.isclose(float(loose_threshold_px), float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX))
+        ):
+            stage_out["second_stage_seeded_20px_fallback_attempted"] = True
+            try:
+                R_seed, t_seed, _, seed_stats = estimate_pose_pnp_ransac(
+                    corrs,
+                    K,
+                    num_trials=int(pnp_num_trials),
+                    sample_size=int(sample_size),
+                    threshold_px=float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_SEED_THRESHOLD_PX),
+                    min_inliers=int(min_inliers),
+                    seed=int(ransac_seed),
+                    min_points=int(min_points),
+                    rank_tol=float(rank_tol),
+                    min_cheirality_ratio=float(min_cheirality_ratio),
+                    eps=float(eps),
+                    refit=bool(refit),
+                    refine_nonlinear=bool(refine_nonlinear),
+                    refine_max_iters=int(refine_max_iters),
+                    refine_damping=float(refine_damping),
+                    refine_step_tol=float(refine_step_tol),
+                    refine_improvement_tol=float(refine_improvement_tol),
+                )
+            except Exception as exc:
+                stage_out["second_stage_seeded_20px_fallback_reason"] = "seeded_loose_pnp_error"
+                stage_out["second_stage_seeded_20px_fallback_error"] = str(exc)
+                R_seed = None
+                t_seed = None
+                seed_stats = {}
+
+            if R_seed is not None and t_seed is not None:
+                seeded_20px_mask, seeded_20px_d_sq = _pnp_inlier_mask_from_pose(
+                    corrs.X_w,
+                    corrs.x_cur,
+                    K,
+                    R_seed,
+                    t_seed,
+                    threshold_px=float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX),
+                    eps=float(eps),
+                )
+                seeded_20px_mask = align_bool_mask_1d(
+                    seeded_20px_mask,
+                    int(corrs.X_w.shape[1]),
+                    name="seeded_20px_inlier_mask",
+                )
+                seeded_20px_inliers = int(np.sum(seeded_20px_mask))
+                stage_out["second_stage_seeded_20px_fallback_inliers"] = int(seeded_20px_inliers)
+                if seeded_20px_inliers >= int(min_inliers):
+                    seed_stats = seed_stats if isinstance(seed_stats, dict) else {}
+                    seed_stats = dict(seed_stats)
+                    seed_stats.update(
+                        {
+                            "n_inliers": int(seeded_20px_inliers),
+                            "mean_inlier_err_sq": None
+                            if seeded_20px_inliers <= 0
+                            else float(np.mean(np.asarray(seeded_20px_d_sq, dtype=np.float64)[seeded_20px_mask])),
+                            "threshold_px": float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX),
+                            "seed_threshold_px": float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_SEED_THRESHOLD_PX),
+                            "seeded_20px_fallback": True,
+                            "reason": None,
+                        }
+                    )
+                    R_loose = np.asarray(R_seed, dtype=np.float64)
+                    t_loose = np.asarray(t_seed, dtype=np.float64).reshape(3)
+                    loose_inlier_mask = np.asarray(seeded_20px_mask, dtype=bool)
+                    loose_stats = seed_stats
+                    stage_out["loose_pose_ok"] = True
+                    stage_out["loose_inliers"] = int(seeded_20px_inliers)
+                    stage_out["loose_reason"] = None
+                    stage_out["second_stage_seeded_20px_fallback_triggered"] = True
+                    stage_out["second_stage_seeded_20px_fallback_reason"] = "random_20px_pnp_failed"
+                else:
+                    stage_out["second_stage_seeded_20px_fallback_reason"] = "seeded_20px_support_too_small"
+            elif stage_out.get("second_stage_seeded_20px_fallback_reason", None) is None:
+                stage_out["second_stage_seeded_20px_fallback_reason"] = "seeded_loose_pnp_failed"
 
         if not bool(stage_out["loose_pose_ok"]):
             stage_out["reason"] = "loose_pnp_failed"
@@ -791,6 +878,10 @@ def estimate_pose_from_seed(
         "pnp_support_rescue_final_component_gate_reason": None,
         "pnp_support_rescue_second_stage_attempted": False,
         "pnp_support_rescue_second_stage_succeeded": False,
+        "pnp_support_rescue_second_stage_seeded_20px_fallback_attempted": False,
+        "pnp_support_rescue_second_stage_seeded_20px_fallback_triggered": False,
+        "pnp_support_rescue_second_stage_seeded_20px_fallback_inliers": 0,
+        "pnp_support_rescue_second_stage_seeded_20px_fallback_reason": None,
         "pnp_support_rescue_loose_localisation_fallback_succeeded": False,
         "pnp_support_rescue_loose_localisation_fallback_reason": None,
         "pnp_support_rescue_loose_localisation_fallback_cheirality_ratio": None,
@@ -963,6 +1054,19 @@ def estimate_pose_from_seed(
                 "pnp_support_rescue_final_component_gate_reason": rescue_out.get("final_component_gate_reason", None),
                 "pnp_support_rescue_second_stage_attempted": bool(rescue_out.get("second_stage_attempted", False)),
                 "pnp_support_rescue_second_stage_succeeded": bool(rescue_out.get("second_stage_succeeded", False)),
+                "pnp_support_rescue_second_stage_seeded_20px_fallback_attempted": bool(
+                    rescue_out.get("second_stage_seeded_20px_fallback_attempted", False)
+                ),
+                "pnp_support_rescue_second_stage_seeded_20px_fallback_triggered": bool(
+                    rescue_out.get("second_stage_seeded_20px_fallback_triggered", False)
+                ),
+                "pnp_support_rescue_second_stage_seeded_20px_fallback_inliers": int(
+                    rescue_out.get("second_stage_seeded_20px_fallback_inliers", 0)
+                ),
+                "pnp_support_rescue_second_stage_seeded_20px_fallback_reason": rescue_out.get(
+                    "second_stage_seeded_20px_fallback_reason",
+                    None,
+                ),
                 "pnp_support_rescue_loose_localisation_fallback_succeeded": bool(rescue_out.get("loose_localisation_fallback_succeeded", False)),
                 "pnp_support_rescue_loose_localisation_fallback_reason": rescue_out.get("loose_localisation_fallback_reason", None),
                 "pnp_support_rescue_loose_localisation_fallback_cheirality_ratio": rescue_out.get("loose_localisation_fallback_cheirality_ratio", None),
