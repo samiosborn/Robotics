@@ -16,6 +16,67 @@ from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
 
 
+def _refresh_active_lookup_basis_from_rescued_support(
+    seed: dict[str, Any],
+    track_out: dict[str, Any],
+    pose_out: dict[str, Any],
+    current_kf: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    seed_out = dict(seed)
+    cur_feats = track_out.get("cur_feats", None)
+    if cur_feats is None or not hasattr(cur_feats, "kps_xy"):
+        return seed_out, {
+            "n_feat": 0,
+            "n_corr": 0,
+            "n_accepted_support": 0,
+            "n_lookup_mapped": 0,
+            "n_conflicts": 0,
+            "n_out_of_range": 0,
+        }
+
+    corrs = pose_out["corrs"]
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+    support_mask = np.asarray(pose_out.get("pnp_inlier_mask", np.zeros((landmark_ids.size,), dtype=bool)), dtype=bool).reshape(-1)
+    n_feat = int(np.asarray(cur_feats.kps_xy).shape[0])
+    n_corr = min(int(landmark_ids.size), int(cur_feat_idx.size), int(support_mask.size))
+    new_lookup = np.full((n_feat,), -1, dtype=np.int64)
+
+    n_mapped = 0
+    n_conflicts = 0
+    n_out_of_range = 0
+    for i in np.flatnonzero(support_mask[:n_corr]):
+        lm_id = int(landmark_ids[int(i)])
+        feat_idx = int(cur_feat_idx[int(i)])
+        if feat_idx < 0 or feat_idx >= int(n_feat):
+            n_out_of_range += 1
+            continue
+        prev = int(new_lookup[feat_idx])
+        if prev >= 0 and prev != lm_id:
+            n_conflicts += 1
+            continue
+        if prev < 0:
+            n_mapped += 1
+        new_lookup[feat_idx] = lm_id
+
+    seed_out["feats1"] = cur_feats
+    seed_out["keyframe_kf"] = int(current_kf)
+    seed_out["T_WC1"] = (
+        np.asarray(pose_out["R"], dtype=np.float64),
+        np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
+    )
+    seed_out["landmark_id_by_feat1"] = new_lookup
+
+    return seed_out, {
+        "n_feat": int(n_feat),
+        "n_corr": int(n_corr),
+        "n_accepted_support": int(np.sum(support_mask[:n_corr])),
+        "n_lookup_mapped": int(n_mapped),
+        "n_conflicts": int(n_conflicts),
+        "n_out_of_range": int(n_out_of_range),
+    }
+
+
 # Process one new frame against the current seed map
 def process_frame_against_seed(
     K: np.ndarray,
@@ -294,6 +355,12 @@ def process_frame_against_seed(
     seed_out = seed
     tracked_obs_stats: dict[str, Any] = {}
     map_growth_out = None
+    guarded_support_refresh_stats: dict[str, Any] = {
+        "triggered": False,
+        "reason": None,
+        "n_lookup_mapped": 0,
+        "n_accepted_support": 0,
+    }
 
     if not localisation_only_rescue_frame:
         seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
@@ -337,6 +404,36 @@ def process_frame_against_seed(
 
             # Read the updated seed
             seed_out = map_growth_out.seed
+    else:
+        n_pnp_inliers = int(pose_stats.get("n_pnp_inliers", 0))
+        pnp_occupied_cells = int(pose_stats.get("pnp_inlier_occupied_cells", 0))
+        bbox_area = pose_stats.get("pnp_inlier_bbox_area_fraction", None)
+        pnp_bbox_area_fraction = 0.0 if bbox_area is None else float(bbox_area)
+        support_strong_enough = n_pnp_inliers >= max(int(min_inliers) + 4, 20) and (
+            pnp_occupied_cells >= 2 or pnp_bbox_area_fraction >= 0.05
+        )
+
+        if int(current_kf) < 14:
+            guarded_support_refresh_stats["reason"] = "current_kf_before_late_trigger"
+        elif not bool(support_strong_enough):
+            guarded_support_refresh_stats["reason"] = "rescued_support_too_weak"
+        else:
+            seed_out, refresh_stats = _refresh_active_lookup_basis_from_rescued_support(
+                seed,
+                track_out,
+                pose_out,
+                int(current_kf),
+            )
+            guarded_support_refresh_stats.update(
+                {
+                    "triggered": True,
+                    "reason": "late_rescued_support_refresh",
+                    "n_lookup_mapped": int(refresh_stats.get("n_lookup_mapped", 0)),
+                    "n_accepted_support": int(refresh_stats.get("n_accepted_support", 0)),
+                    "n_conflicts": int(refresh_stats.get("n_conflicts", 0)),
+                    "n_out_of_range": int(refresh_stats.get("n_out_of_range", 0)),
+                }
+            )
 
     # Default keyframe-consideration output
     keyframe_out = None
@@ -400,6 +497,12 @@ def process_frame_against_seed(
         "n_new_added": int(map_stats.get("n_added", 0)),
         "seed_landmarks_after": int(len(seed_out.get("landmarks", []))),
         "localisation_only_rescue_frame": bool(localisation_only_rescue_frame),
+        "guarded_support_refresh_triggered": bool(guarded_support_refresh_stats.get("triggered", False)),
+        "guarded_support_refresh_reason": guarded_support_refresh_stats.get("reason", None),
+        "guarded_support_refresh_n_lookup_mapped": int(guarded_support_refresh_stats.get("n_lookup_mapped", 0)),
+        "guarded_support_refresh_n_accepted_support": int(guarded_support_refresh_stats.get("n_accepted_support", 0)),
+        "guarded_support_refresh_n_conflicts": int(guarded_support_refresh_stats.get("n_conflicts", 0)),
+        "guarded_support_refresh_n_out_of_range": int(guarded_support_refresh_stats.get("n_out_of_range", 0)),
         "n_linked_landmarks_candidate": int(keyframe_stats.get("n_linked_landmarks_candidate", 0)),
         "keyframe_make": bool(keyframe_stats.get("make_keyframe", False)),
         "keyframe_promoted": bool(keyframe_stats.get("promoted", False)),
