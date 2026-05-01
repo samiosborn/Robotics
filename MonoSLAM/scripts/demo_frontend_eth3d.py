@@ -7,28 +7,12 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
+from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, format_frame_scorecard as _format_frame_scorecard, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg, reset_jsonl as _reset_jsonl, seed_landmark_count as _seed_landmark_count, standard_frame_stats as _standard_frame_stats
 from core.checks import check_dir, check_int_ge0, check_int_gt0
 from datasets.eth3d import load_eth3d_sequence
 from features.viz import draw_matches
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-
-
-# Build one compact per-frame summary
-def _summarise_frontend_frame(frame_index: int, out: dict, seed: dict) -> dict:
-    stats = out.get("stats", {}) if isinstance(out, dict) else {}
-    return {
-        "frame_index": int(frame_index),
-        "ok": bool(out.get("ok", False)) if isinstance(out, dict) else False,
-        "n_track_inliers": int(stats.get("n_track_inliers", 0)),
-        "n_pnp_corr": int(stats.get("n_pnp_corr", 0)),
-        "n_pnp_inliers": int(stats.get("n_pnp_inliers", 0)),
-        "n_new_added": int(stats.get("n_new_added", 0)),
-        "keyframe_promoted": bool(stats.get("keyframe_promoted", False)),
-        "current_landmark_count": int(len(seed.get("landmarks", []))) if isinstance(seed, dict) else 0,
-        "reason": stats.get("reason", None),
-    }
 
 
 # Draw one match visualisation
@@ -199,6 +183,7 @@ def main() -> None:
 
     # Prepare the lightweight run log
     log_path = out_dir / "frontend_log.jsonl"
+    _reset_jsonl(log_path)
 
     i0 = check_int_ge0(args.i0, name="i0")
     i1 = check_int_ge0(args.i1, name="i1")
@@ -287,6 +272,7 @@ def main() -> None:
 
         # Process the current frame through the frontend pipeline
         cur_im, cur_ts, cur_id = seq.get(i)
+        seed_landmarks_before = _seed_landmark_count(seed)
         out = process_frame_against_seed(
             K,
             seed,
@@ -301,23 +287,22 @@ def main() -> None:
         seed = out["seed"]
         track_out = out["track_out"]
         keyframe_out = out.get("keyframe_out", None)
-        summary = _summarise_frontend_frame(i, out, seed)
-
-        print(
-            f"frame {summary['frame_index']}: ok={summary['ok']} "
-            f"n_track_inliers={summary['n_track_inliers']} "
-            f"n_pnp_corr={summary['n_pnp_corr']} "
-            f"n_pnp_inliers={summary['n_pnp_inliers']} "
-            f"n_new_added={summary['n_new_added']} "
-            f"keyframe_promoted={summary['keyframe_promoted']} "
-            f"current_landmark_count={summary['current_landmark_count']}"
+        seed_landmarks_after = _seed_landmark_count(seed)
+        summary = _standard_frame_stats(
+            frame_index=i,
+            reference_keyframe_index=viz_keyframe_index,
+            frontend_out=out,
+            seed_landmarks_before=seed_landmarks_before,
+            seed_landmarks_after=seed_landmarks_after,
         )
+
+        print(_format_frame_scorecard(summary))
 
         # Write the per-frame summary
         _append_jsonl(
             log_path,
             {
-                "event": "frame",
+                "event": "frame_summary",
                 "frame_id": str(cur_id),
                 "timestamp": float(cur_ts),
                 **summary,
@@ -339,7 +324,7 @@ def main() -> None:
 
         consecutive_failures += 1
         print(
-            f"frame {i}: frontend failed with reason={summary['reason']} "
+            f"frame {i}: frontend failed with reason={summary['pipeline_reason']} "
             f"consecutive_failures={consecutive_failures}"
         )
         if consecutive_failures >= max_consecutive_failures:

@@ -227,6 +227,7 @@ def pnp_diagnostic_summary_stats(pose_stats: dict[str, Any], *, pnp_component_ra
         "pnp_threshold_stability_looser_solution_only": bool(pose_stats.get("pnp_threshold_stability_looser_solution_only", False)),
         "pnp_threshold_stability_supports_disjoint": bool(pose_stats.get("pnp_threshold_stability_supports_disjoint", False)),
         "pnp_threshold_stability_reasons": pose_stats.get("pnp_threshold_stability_reasons", []),
+        "pnp_support_rescue_attempted": bool(pose_stats.get("pnp_support_rescue_attempted", False)),
         "pnp_support_rescue_succeeded": bool(pose_stats.get("pnp_support_rescue_succeeded", False)),
         "pnp_support_rescue_reason": pose_stats.get("pnp_support_rescue_reason", None),
         "pnp_support_rescue_loose_threshold_px": pose_stats.get("pnp_support_rescue_loose_threshold_px", None),

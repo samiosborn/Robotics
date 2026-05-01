@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
+from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, format_frame_scorecard as _format_frame_scorecard, frame_scorecard_row as _frame_scorecard_row, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg, reset_jsonl as _reset_jsonl, standard_frame_stats as _standard_frame_stats
 
 from core.checks import align_bool_mask_1d, check_dir, check_int_ge0, check_int_gt0, check_positive
 from datasets.eth3d import load_eth3d_sequence
@@ -148,6 +148,7 @@ def _run_threshold_diagnostic(corrs, K: np.ndarray, *, threshold_px: float, pnp_
         "threshold_px": float(threshold_px),
         "n_pnp_corr": int(n_pnp_corr),
         "n_inliers": 0,
+        "n_pnp_inliers": 0,
         "ok": False,
         "reason": None,
         "reprojection_rmse_px": None,
@@ -253,6 +254,7 @@ def _run_threshold_diagnostic(corrs, K: np.ndarray, *, threshold_px: float, pnp_
     row.update(
         {
             "n_inliers": int(n_inliers),
+            "n_pnp_inliers": int(n_inliers),
             "ok": bool(ok),
             "reason": stats.get("reason", None) if isinstance(stats, dict) else None,
             "reprojection_rmse_px": metrics["reprojection_rmse_px"],
@@ -309,8 +311,38 @@ def _format_threshold_summary(rows: list[dict]) -> str:
     parts: list[str] = []
     for row in rows:
         status = "ok" if bool(row["ok"]) else "fail"
-        parts.append(f"{row['threshold_px']:.0f}px:{int(row['n_inliers'])}/{status}")
+        parts.append(f"{row['threshold_px']:.0f}px:{int(row['n_pnp_inliers'])}/{status}")
     return " ".join(parts)
+
+
+# Build compact parseable threshold scorecard rows
+def _threshold_scorecard_rows(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for row in rows:
+        out.append(
+            {
+                "threshold_px": float(row["threshold_px"]),
+                "ok": bool(row["ok"]),
+                "reason": row.get("reason", None),
+                "n_pnp_corr": int(row.get("n_pnp_corr", 0)),
+                "n_pnp_inliers": int(row.get("n_pnp_inliers", row.get("n_inliers", 0))),
+            }
+        )
+
+    return out
+
+
+# Summarise one diagnostic run from scorecard rows
+def _run_summary_from_scorecards(rows: list[dict]) -> dict:
+    return {
+        "frames_processed": int(len(rows)),
+        "pipeline_ok_frames": int(sum(1 for row in rows if bool(row.get("pipeline_ok", False)))),
+        "pipeline_failed_frames": int(sum(1 for row in rows if not bool(row.get("pipeline_ok", False)))),
+        "keyframes_promoted": int(sum(1 for row in rows if bool(row.get("pipeline_keyframe_promoted", False)))),
+        "rescue_attempted_frames": int(sum(1 for row in rows if bool(row.get("rescue_attempted", False)))),
+        "rescue_succeeded_frames": int(sum(1 for row in rows if bool(row.get("rescue_succeeded", False)))),
+        "support_refresh_triggered_frames": int(sum(1 for row in rows if bool(row.get("support_refresh_triggered", False)))),
+    }
 
 
 # Format an optional pixel error for concise terminal output
@@ -1848,6 +1880,10 @@ def main() -> None:
     parser.add_argument("--num_track", type=int, default=5)
     # Threshold sweep in pixels
     parser.add_argument("--thresholds", type=float, nargs="+", default=[3.0, 5.0, 8.0, 12.0])
+    # Console scorecard verbosity
+    parser.add_argument("--scorecard", choices=["short", "long", "off"], default="short")
+    # Frame used for threshold-pair deep diagnostics
+    parser.add_argument("--threshold_pair_frame_index", type=int, default=4)
     # Minimum landmark observation count used before PnP
     parser.add_argument("--min_landmark_observations", type=int, default=2)
     # Tight reprojection gate for appending existing-landmark observations
@@ -1911,6 +1947,8 @@ def main() -> None:
     profile_pnp_cfg = cfg.get("pnp", {})
     pnp_cfg = _pnp_solver_cfg(profile_pnp_cfg if isinstance(profile_pnp_cfg, dict) else None)
     thresholds = _parse_thresholds(list(args.thresholds))
+    scorecard_mode = str(args.scorecard)
+    threshold_pair_frame_index = check_int_ge0(args.threshold_pair_frame_index, name="threshold_pair_frame_index")
     min_landmark_observations = check_int_gt0(args.min_landmark_observations, name="min_landmark_observations")
     max_append_reproj_error_px_existing = check_positive(
         args.max_append_reproj_error_px_existing,
@@ -1938,6 +1976,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     log_path = out_dir / "pnp_diag.jsonl"
+    _reset_jsonl(log_path)
 
     i0 = check_int_ge0(args.i0, name="i0")
     i1 = check_int_ge0(args.i1, name="i1")
@@ -2029,6 +2068,29 @@ def main() -> None:
         f"disjoint_iou={float(pnp_cfg['pnp_threshold_stability_disjoint_iou'])}"
     )
 
+    # Write compact run configuration for reproducibility
+    _append_jsonl(
+        log_path,
+        {
+            "event": "run_config",
+            "profile": str(profile_path),
+            "dataset_root": str(dataset_root),
+            "seq_name": str(seq_name),
+            "i0": int(i0),
+            "i1": int(i1),
+            "num_track": int(num_track),
+            "thresholds": [float(v) for v in thresholds],
+            "scorecard": str(scorecard_mode),
+            "threshold_pair_frame_index": int(threshold_pair_frame_index),
+            "min_landmark_observations": int(min_landmark_observations),
+            "max_append_reproj_error_px_existing": float(max_append_reproj_error_px_existing),
+            "enable_pnp_local_consistency_filter": bool(pnp_cfg["enable_pnp_local_consistency_filter"]),
+            "enable_pnp_spatial_thinning_filter": bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]),
+            "apply_pnp_local_consistency_filter_to_pipeline": bool(pnp_cfg["apply_pnp_local_consistency_filter_to_pipeline"]),
+            "apply_pnp_spatial_thinning_filter_to_pipeline": bool(pnp_cfg["apply_pnp_spatial_thinning_filter_to_pipeline"]),
+        },
+    )
+
     # Write the bootstrap summary
     _append_jsonl(
         log_path,
@@ -2055,7 +2117,7 @@ def main() -> None:
 
     start_track = keyframe_index + 1
     stop_track = min(n_effective, start_track + num_track)
-    threshold_pair_frame_index = 4
+    scorecard_rows: list[dict] = []
 
     for i in range(start_track, stop_track):
         # Keep the current reference keyframe for this diagnostic step
@@ -2234,8 +2296,17 @@ def main() -> None:
             if int(append_stats.get("current_kf", -1)) != int(i):
                 append_stats = {}
 
+        standard_stats = _standard_frame_stats(
+            frame_index=i,
+            reference_keyframe_index=ref_keyframe_index,
+            frontend_out=frontend_out,
+            seed_landmarks_before=seed_landmarks_before,
+            seed_landmarks_after=seed_landmarks_after,
+        )
+
         # Record the frame context in the JSONL log
         frame_context = {
+            **standard_stats,
             "frame_index": int(i),
             "frame_id": str(cur_id),
             "timestamp": float(cur_ts),
@@ -2385,12 +2456,35 @@ def main() -> None:
             "pipeline_keyframe_reason": frontend_stats.get("keyframe_reason", None),
         }
 
+        threshold_scorecard = _threshold_scorecard_rows(threshold_rows)
+        scorecard_row = _frame_scorecard_row(frame_context)
+        scorecard_row.update(
+            {
+                "diagnostic_n_pnp_corr": int(base_pose_stats.get("n_corr", 0)),
+                "diagnostic_n_pnp_inliers": int(base_pose_stats.get("n_pnp_inliers", 0)),
+                "pnp_spatial_gate_rejected": bool(base_pose_stats.get("pnp_spatial_gate_rejected", False)),
+                "pnp_component_gate_rejected": bool(base_pose_stats.get("pnp_component_gate_rejected", False)),
+                "threshold_summary": _format_threshold_summary(threshold_rows),
+                "threshold_scorecard": threshold_scorecard,
+            }
+        )
+        scorecard_rows.append(scorecard_row)
+
         # Write the frame summary
         _append_jsonl(
             log_path,
             {
                 "event": "frame_summary",
                 **frame_context,
+            },
+        )
+
+        # Write a compact parseable scorecard row
+        _append_jsonl(
+            log_path,
+            {
+                "event": "frame_scorecard",
+                **scorecard_row,
             },
         )
 
@@ -2482,66 +2576,76 @@ def main() -> None:
                 },
             )
 
-        print(
-            f"frame {i}: reference_keyframe_index={ref_keyframe_index} "
-            f"n_track_inliers={int(track_stats.get('n_inliers', 0))} "
-            f"diagnostic_n_pnp_corr={int(base_pose_stats.get('n_corr', 0))} "
-            f"diagnostic_n_pnp_inliers={int(base_pose_stats.get('n_pnp_inliers', 0))} "
-            f"pnp_local_consistency_removed={int(base_pose_stats.get('pnp_local_consistency_filter_removed', 0))} "
-            f"pnp_spatial_thinning_removed={int(base_pose_stats.get('pnp_spatial_thinning_filter_removed', 0))} "
-            f"pnp_cells={int(base_pose_stats.get('pnp_inlier_occupied_cells', 0))} "
-            f"pnp_max_cell_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_max_cell_fraction', None), digits=2)} "
-            f"pnp_bbox_area_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_bbox_area_fraction', None), digits=3)} "
-            f"pnp_spatial_rejected={bool(base_pose_stats.get('pnp_spatial_gate_rejected', False))} "
-            f"pnp_spatial_reason={base_pose_stats.get('pnp_spatial_gate_reason', None)} "
-            f"pnp_components={int(base_pose_stats.get('pnp_inlier_component_count', 0))} "
-            f"pnp_largest_component={int(base_pose_stats.get('pnp_inlier_largest_component_size', 0))} "
-            f"pnp_largest_component_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_largest_component_fraction', None), digits=2)} "
-            f"pnp_largest_component_area_fraction={_format_optional_float(base_pose_stats.get('pnp_inlier_largest_component_bbox_area_fraction', None), digits=4)} "
-            f"pnp_component_rejected={bool(base_pose_stats.get('pnp_component_gate_rejected', False))} "
-            f"pnp_component_reason={base_pose_stats.get('pnp_component_gate_reason', None)} "
-            f"pipeline_n_pnp_corr={int(frontend_stats.get('n_pnp_corr', 0))} "
-            f"n_append_total={int(frontend_stats.get('n_append_total', 0))} "
-            f"n_append_extra_reproj_pass={int(frontend_stats.get('n_append_extra_reproj_pass', 0))} "
-            f"n_linked_landmarks_candidate={int(frontend_stats.get('n_linked_landmarks_candidate', 0))} "
-            f"promoted={bool(frontend_stats.get('keyframe_promoted', False))} "
-            f"landmarks={seed_landmarks_before}->{seed_landmarks_after}"
-        )
-        print(f"  {_format_threshold_summary(threshold_rows)}")
-        print(_format_pnp_threshold_stability_diagnostic(base_pose_stats.get("pnp_threshold_stability", None)))
-        if non_pnp_reprojection_diagnostic is not None:
-            for line in _format_non_pnp_reprojection_diagnostic(non_pnp_reprojection_diagnostic):
-                print(line)
-        if local_consistency_diagnostic is not None:
-            for line in _format_threshold_pair_local_consistency_diagnostic(local_consistency_diagnostic):
-                print(line)
-        if spatial_thinning_diagnostic is not None:
-            for line in _format_threshold_pair_spatial_thinning_diagnostic(spatial_thinning_diagnostic):
-                print(line)
-        if pnp_pose_comparison_before_diagnostic is not None and (bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])):
-            print("  threshold_pair_before_filters:")
-            for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_before_diagnostic):
-                print(line)
-        if pnp_pose_comparison_diagnostic is not None:
-            if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
-                print("  threshold_pair_after_filters:")
-            for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_diagnostic):
-                print(line)
-        if pnp_spatial_before_diagnostic is not None:
-            print("  threshold_pair_spatial_before_filters:")
-            for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_before_diagnostic):
-                print(line)
-        if pnp_spatial_diagnostic is not None:
-            if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
-                print("  threshold_pair_spatial_after_filters:")
-            for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_diagnostic):
-                print(line)
+        if scorecard_mode != "off":
+            print(_format_frame_scorecard(scorecard_row, mode=scorecard_mode))
+            if scorecard_mode == "short":
+                print(f"  thresholds {scorecard_row['threshold_summary']}")
+
+        if scorecard_mode == "long":
+            print(_format_pnp_threshold_stability_diagnostic(base_pose_stats.get("pnp_threshold_stability", None)))
+            if non_pnp_reprojection_diagnostic is not None:
+                for line in _format_non_pnp_reprojection_diagnostic(non_pnp_reprojection_diagnostic):
+                    print(line)
+            if local_consistency_diagnostic is not None:
+                for line in _format_threshold_pair_local_consistency_diagnostic(local_consistency_diagnostic):
+                    print(line)
+            if spatial_thinning_diagnostic is not None:
+                for line in _format_threshold_pair_spatial_thinning_diagnostic(spatial_thinning_diagnostic):
+                    print(line)
+            if pnp_pose_comparison_before_diagnostic is not None and (
+                bool(pnp_cfg["enable_pnp_local_consistency_filter"])
+                or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])
+            ):
+                print("  threshold_pair_before_filters:")
+                for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_before_diagnostic):
+                    print(line)
+            if pnp_pose_comparison_diagnostic is not None:
+                if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+                    print("  threshold_pair_after_filters:")
+                for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_diagnostic):
+                    print(line)
+            if pnp_spatial_before_diagnostic is not None:
+                print("  threshold_pair_spatial_before_filters:")
+                for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_before_diagnostic):
+                    print(line)
+            if pnp_spatial_diagnostic is not None:
+                if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+                    print("  threshold_pair_spatial_after_filters:")
+                for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_diagnostic):
+                    print(line)
 
         # Update the live frontend state for the next frame
         seed = frontend_out["seed"]
         if bool(frontend_out.get("stats", {}).get("keyframe_promoted", False)):
             keyframe_feats = frontend_out["track_out"]["cur_feats"]
             keyframe_index = i
+
+    run_summary = _run_summary_from_scorecards(scorecard_rows)
+    run_summary.update(
+        {
+            "profile": str(profile_path),
+            "dataset_root": str(dataset_root),
+            "seq_name": str(seq_name),
+            "thresholds": [float(v) for v in thresholds],
+            "log_path": str(log_path),
+        }
+    )
+    _append_jsonl(
+        log_path,
+        {
+            "event": "run_summary",
+            **run_summary,
+        },
+    )
+    print(
+        f"summary: frames={int(run_summary['frames_processed'])} "
+        f"ok={int(run_summary['pipeline_ok_frames'])} "
+        f"failed={int(run_summary['pipeline_failed_frames'])} "
+        f"promoted={int(run_summary['keyframes_promoted'])} "
+        f"rescue={int(run_summary['rescue_attempted_frames'])}/{int(run_summary['rescue_succeeded_frames'])} "
+        f"refresh={int(run_summary['support_refresh_triggered_frames'])} "
+        f"log={log_path}"
+    )
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from frontend_eth3d_common import ROOT, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_runtime_cfg as _load_runtime_cfg
+from frontend_eth3d_common import ROOT, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_runtime_cfg as _load_runtime_cfg, seed_landmark_count as _seed_landmark_count, standard_frame_stats as _standard_frame_stats
 
 from datasets.eth3d import load_eth3d_sequence
 from geometry.camera import camera_centre, reprojection_errors_sq, world_to_camera_points
@@ -829,6 +829,7 @@ def _analyse_frame(seed: dict, keyframe_feats, keyframe_index: int, seq, K: np.n
         "frame_id": str(cur_id),
         "timestamp": float(cur_ts),
         "active_keyframe_index": int(keyframe_index),
+        "reference_keyframe_index": int(keyframe_index),
         "seed_feats1_size": int(getattr(seed.get("feats1", None), "kps_xy", np.zeros((0, 2))).shape[0]),
         "landmark_id_by_feat1_size": int(landmark_id_by_feat1.size),
         "landmark_id_by_feat1_mapped_count": int(np.sum(landmark_id_by_feat1 >= 0)),
@@ -939,6 +940,7 @@ def main() -> None:
 
         cur_im, _, _ = seq.get(frame_index)
         seed_before = seed
+        seed_landmarks_before = _seed_landmark_count(seed)
         out = process_frame_against_seed(
             K,
             seed,
@@ -950,22 +952,23 @@ def main() -> None:
             current_kf=frame_index,
             **frontend_kwargs["pnp_frontend_kwargs"],
         )
+        pipeline_standard = _standard_frame_stats(
+            frame_index=frame_index,
+            reference_keyframe_index=keyframe_index,
+            frontend_out=out,
+            seed_after=out.get("seed", {}),
+            seed_landmarks_before=seed_landmarks_before,
+        )
         print(
             json.dumps(
                 {
                     "event": "pipeline_step",
                     "experiment": str(experiment),
-                    "frame_index": int(frame_index),
-                    "ok": bool(out.get("ok", False)),
-                    "reason": out.get("stats", {}).get("reason", None),
+                    **pipeline_standard,
+                    "ok": bool(pipeline_standard["pipeline_ok"]),
+                    "reason": pipeline_standard["pipeline_reason"],
                     "active_keyframe_before": int(keyframe_index),
-                    "keyframe_promoted": bool(out.get("stats", {}).get("keyframe_promoted", False)),
-                    "localisation_only_rescue_frame": bool(out.get("stats", {}).get("localisation_only_rescue_frame", False)),
-                    "n_track_inliers": int(out.get("stats", {}).get("n_track_inliers", 0)),
-                    "n_pnp_corr": int(out.get("stats", {}).get("n_pnp_corr", 0)),
-                    "n_pnp_inliers": int(out.get("stats", {}).get("n_pnp_inliers", 0)),
-                    "n_new_added": int(out.get("stats", {}).get("n_new_added", 0)),
-                    "seed_landmarks_after": int(len(out.get("seed", {}).get("landmarks", []))),
+                    "keyframe_promoted": bool(pipeline_standard["pipeline_keyframe_promoted"]),
                 },
                 sort_keys=True,
             )
@@ -975,9 +978,7 @@ def main() -> None:
             bool(args.append_existing_on_rescue)
             and int(frame_index) >= int(append_existing_on_rescue_from)
             and bool(out.get("ok", False))
-            and bool(
-            out.get("stats", {}).get("localisation_only_rescue_frame", False)
-            )
+            and bool(out.get("stats", {}).get("localisation_only_rescue_frame", False))
         ):
             seed, append_stats = _diagnostic_append_existing_observations_no_prune(
                 seed,
