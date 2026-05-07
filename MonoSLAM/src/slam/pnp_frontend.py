@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import align_bool_mask_1d, check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_matrix_3x3, check_positive
 from geometry.camera import camera_centre, world_to_camera_points
 from geometry.pose import angle_between_translations
-from geometry.pnp import _pnp_inlier_mask_from_pose, _slice_pnp_correspondences, build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_threshold_stability_diagnostic
+from geometry.pnp import _pnp_inlier_mask_from_pose, _slice_pnp_correspondences, build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_local_displacement_consistency_mask, pnp_threshold_stability_diagnostic
 from geometry.rotation import angle_between_rotmats
 from slam.pnp_stats import landmark_observation_histogram, pnp_support_diagnostic_stats, pnp_support_gate_stats, pnp_threshold_stability_summary_stats
 
@@ -19,6 +19,96 @@ _PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX = 12.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX = 20.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_SEED_THRESHOLD_PX = 40.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_NUM_TRIALS = 5000
+
+
+def _pre_pnp_support_quality_veto_stats(
+    corrs,
+    seed: dict[str, Any],
+    *,
+    sample_size: int,
+    min_inliers: int,
+    local_consistency_radius_px: float,
+    local_consistency_min_neighbours: int,
+    local_consistency_max_median_residual_px: float,
+) -> dict[str, Any]:
+    n_corr = int(corrs.X_w.shape[1])
+    near_minimum_max_corr = int(min_inliers) + 2
+    near_minimum = int(n_corr) >= int(min_inliers) and int(n_corr) <= int(near_minimum_max_corr)
+    max_retained_for_veto = max(2, int(np.floor(0.20 * max(int(n_corr), 1))))
+    out: dict[str, Any] = {
+        "attempted": bool(n_corr > 0),
+        "evaluated": False,
+        "triggered": False,
+        "reason": None,
+        "candidate_count": int(n_corr),
+        "sample_size": int(sample_size),
+        "min_inliers": int(min_inliers),
+        "near_minimum_max_corr": int(near_minimum_max_corr),
+        "near_minimum": bool(near_minimum),
+        "signal": None,
+        "local_consistency_retained": 0,
+        "local_consistency_retention": None,
+        "local_consistency_max_retained_for_veto": int(max_retained_for_veto),
+        "local_consistency_stats": None,
+    }
+
+    if not bool(out["attempted"]):
+        out["reason"] = "no_pnp_correspondences"
+        return out
+
+    if not bool(near_minimum):
+        out["reason"] = "support_not_near_minimum"
+        return out
+
+    feats1 = seed.get("feats1", None) if isinstance(seed, dict) else None
+    kps_xy = getattr(feats1, "kps_xy", None)
+    if kps_xy is None:
+        out["reason"] = "keyframe_features_unavailable"
+        return out
+
+    kps_xy = np.asarray(kps_xy, dtype=np.float64)
+    kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    if kps_xy.ndim != 2 or kps_xy.shape[1] < 2 or int(kf_feat_idx.size) != int(n_corr):
+        out["reason"] = "keyframe_features_unusable"
+        return out
+
+    valid = (kf_feat_idx >= 0) & (kf_feat_idx < int(kps_xy.shape[0]))
+    if not bool(np.all(valid)):
+        out["reason"] = "invalid_keyframe_feature_indices"
+        return out
+
+    xy_kf = np.asarray(kps_xy[kf_feat_idx, :2], dtype=np.float64)
+    xy_cur = np.asarray(corrs.x_cur, dtype=np.float64).T
+    try:
+        _, local_stats = pnp_local_displacement_consistency_mask(
+            xy_kf,
+            xy_cur,
+            radius_px=float(local_consistency_radius_px),
+            min_neighbours=int(local_consistency_min_neighbours),
+            max_median_residual_px=float(local_consistency_max_median_residual_px),
+            min_keep=0,
+        )
+    except Exception as exc:
+        out["reason"] = "local_displacement_consistency_unavailable"
+        out["error"] = str(exc)
+        return out
+
+    local_stats = local_stats if isinstance(local_stats, dict) else {}
+    retained = int(local_stats.get("n_keep", 0))
+    retention = float(retained / max(int(n_corr), 1))
+    triggered = bool(retained <= int(max_retained_for_veto))
+    out.update(
+        {
+            "evaluated": True,
+            "triggered": bool(triggered),
+            "reason": "local_displacement_retention_low" if bool(triggered) else "support_quality_ok",
+            "signal": "local_displacement_consistency_retention",
+            "local_consistency_retained": int(retained),
+            "local_consistency_retention": float(retention),
+            "local_consistency_stats": local_stats,
+        }
+    )
+    return out
 
 
 def _pose_temporal_consistency_stats(
@@ -856,6 +946,20 @@ def estimate_pose_from_seed(
         "pnp_threshold_stability_looser_solution_only": False,
         "pnp_threshold_stability_supports_disjoint": False,
         "pnp_threshold_stability_reasons": [],
+        "pnp_support_quality_veto_attempted": False,
+        "pnp_support_quality_veto_evaluated": False,
+        "pnp_support_quality_veto_triggered": False,
+        "pnp_support_quality_veto_reason": None,
+        "pnp_support_quality_veto_candidate_count": int(n_corr),
+        "pnp_support_quality_veto_sample_size": int(sample_size),
+        "pnp_support_quality_veto_min_inliers": int(min_inliers),
+        "pnp_support_quality_veto_near_minimum_max_corr": int(min_inliers) + 2,
+        "pnp_support_quality_veto_near_minimum": False,
+        "pnp_support_quality_veto_signal": None,
+        "pnp_support_quality_veto_local_consistency_retained": 0,
+        "pnp_support_quality_veto_local_consistency_retention": None,
+        "pnp_support_quality_veto_local_consistency_max_retained": 0,
+        "pnp_support_quality_veto_local_consistency_stats": None,
         "pnp_support_rescue_attempted": False,
         "pnp_support_rescue_succeeded": False,
         "pnp_support_rescue_reason": None,
@@ -900,6 +1004,48 @@ def estimate_pose_from_seed(
             "t": None,
             "corrs": corrs,
             "pnp_inlier_mask": np.zeros((0,), dtype=bool),
+            "landmark_ids": np.zeros((0,), dtype=np.int64),
+            "stats": stats,
+        }
+
+    # Veto exact-minimum, incoherent support before spending RANSAC on it
+    support_quality_veto = _pre_pnp_support_quality_veto_stats(
+        corrs,
+        seed,
+        sample_size=int(sample_size),
+        min_inliers=int(min_inliers),
+        local_consistency_radius_px=float(pnp_local_consistency_radius_px),
+        local_consistency_min_neighbours=int(pnp_local_consistency_min_neighbours),
+        local_consistency_max_median_residual_px=float(pnp_local_consistency_max_median_residual_px),
+    )
+    stats.update(
+        {
+            "pnp_support_quality_veto_attempted": bool(support_quality_veto.get("attempted", False)),
+            "pnp_support_quality_veto_evaluated": bool(support_quality_veto.get("evaluated", False)),
+            "pnp_support_quality_veto_triggered": bool(support_quality_veto.get("triggered", False)),
+            "pnp_support_quality_veto_reason": support_quality_veto.get("reason", None),
+            "pnp_support_quality_veto_candidate_count": int(support_quality_veto.get("candidate_count", n_corr)),
+            "pnp_support_quality_veto_sample_size": int(support_quality_veto.get("sample_size", sample_size)),
+            "pnp_support_quality_veto_min_inliers": int(support_quality_veto.get("min_inliers", min_inliers)),
+            "pnp_support_quality_veto_near_minimum_max_corr": int(support_quality_veto.get("near_minimum_max_corr", int(min_inliers) + 2)),
+            "pnp_support_quality_veto_near_minimum": bool(support_quality_veto.get("near_minimum", False)),
+            "pnp_support_quality_veto_signal": support_quality_veto.get("signal", None),
+            "pnp_support_quality_veto_local_consistency_retained": int(support_quality_veto.get("local_consistency_retained", 0)),
+            "pnp_support_quality_veto_local_consistency_retention": support_quality_veto.get("local_consistency_retention", None),
+            "pnp_support_quality_veto_local_consistency_max_retained": int(
+                support_quality_veto.get("local_consistency_max_retained_for_veto", 0)
+            ),
+            "pnp_support_quality_veto_local_consistency_stats": support_quality_veto.get("local_consistency_stats", None),
+        }
+    )
+    if bool(support_quality_veto.get("triggered", False)):
+        stats.update({"reason": "pnp_support_incoherent", "n_pnp_inliers": 0})
+        return {
+            "ok": False,
+            "R": None,
+            "t": None,
+            "corrs": corrs,
+            "pnp_inlier_mask": np.zeros((n_corr,), dtype=bool),
             "landmark_ids": np.zeros((0,), dtype=np.int64),
             "stats": stats,
         }

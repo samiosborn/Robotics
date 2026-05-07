@@ -227,6 +227,21 @@ def pnp_diagnostic_summary_stats(pose_stats: dict[str, Any], *, pnp_component_ra
         "pnp_threshold_stability_looser_solution_only": bool(pose_stats.get("pnp_threshold_stability_looser_solution_only", False)),
         "pnp_threshold_stability_supports_disjoint": bool(pose_stats.get("pnp_threshold_stability_supports_disjoint", False)),
         "pnp_threshold_stability_reasons": pose_stats.get("pnp_threshold_stability_reasons", []),
+        "pnp_support_quality_veto_attempted": bool(pose_stats.get("pnp_support_quality_veto_attempted", False)),
+        "pnp_support_quality_veto_evaluated": bool(pose_stats.get("pnp_support_quality_veto_evaluated", False)),
+        "pnp_support_quality_veto_triggered": bool(pose_stats.get("pnp_support_quality_veto_triggered", False)),
+        "pnp_support_quality_veto_reason": pose_stats.get("pnp_support_quality_veto_reason", None),
+        "pnp_support_quality_veto_candidate_count": int(pose_stats.get("pnp_support_quality_veto_candidate_count", pose_stats.get("n_corr", 0))),
+        "pnp_support_quality_veto_min_inliers": int(pose_stats.get("pnp_support_quality_veto_min_inliers", 0)),
+        "pnp_support_quality_veto_near_minimum": bool(pose_stats.get("pnp_support_quality_veto_near_minimum", False)),
+        "pnp_support_quality_veto_signal": pose_stats.get("pnp_support_quality_veto_signal", None),
+        "pnp_support_quality_veto_local_consistency_retained": int(
+            pose_stats.get("pnp_support_quality_veto_local_consistency_retained", 0)
+        ),
+        "pnp_support_quality_veto_local_consistency_retention": pose_stats.get(
+            "pnp_support_quality_veto_local_consistency_retention",
+            None,
+        ),
         "pnp_support_rescue_attempted": bool(pose_stats.get("pnp_support_rescue_attempted", False)),
         "pnp_support_rescue_succeeded": bool(pose_stats.get("pnp_support_rescue_succeeded", False)),
         "pnp_support_rescue_reason": pose_stats.get("pnp_support_rescue_reason", None),
