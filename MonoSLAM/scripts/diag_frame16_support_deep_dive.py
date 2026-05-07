@@ -510,6 +510,36 @@ def _analyse_processed_frame(seed_before: dict, keyframe_index: int, out: dict, 
         },
         "pipeline": {
             **standard,
+            "support_quality_veto_attempted": bool(
+                pose_stats.get("pnp_support_quality_veto_attempted", stats.get("pnp_support_quality_veto_attempted", False))
+            ),
+            "support_quality_veto_evaluated": bool(
+                pose_stats.get("pnp_support_quality_veto_evaluated", stats.get("pnp_support_quality_veto_evaluated", False))
+            ),
+            "support_quality_veto_triggered": bool(
+                pose_stats.get("pnp_support_quality_veto_triggered", stats.get("pnp_support_quality_veto_triggered", False))
+            ),
+            "support_quality_veto_reason": pose_stats.get(
+                "pnp_support_quality_veto_reason",
+                stats.get("pnp_support_quality_veto_reason", None),
+            ),
+            "support_quality_veto_candidate_count": int(
+                pose_stats.get("pnp_support_quality_veto_candidate_count", stats.get("pnp_support_quality_veto_candidate_count", 0))
+            ),
+            "support_quality_veto_local_consistency_retained": int(
+                pose_stats.get(
+                    "pnp_support_quality_veto_local_consistency_retained",
+                    stats.get("pnp_support_quality_veto_local_consistency_retained", 0),
+                )
+            ),
+            "support_quality_veto_local_consistency_retention": pose_stats.get(
+                "pnp_support_quality_veto_local_consistency_retention",
+                stats.get("pnp_support_quality_veto_local_consistency_retention", None),
+            ),
+            "support_quality_veto_signal": pose_stats.get(
+                "pnp_support_quality_veto_signal",
+                stats.get("pnp_support_quality_veto_signal", None),
+            ),
             "rescue_reason": pose_stats.get("pnp_support_rescue_reason", stats.get("pnp_support_rescue_reason", None)),
             "rescue_trigger_reason": pose_stats.get("pnp_support_rescue_trigger_reason", None),
             "rescue_loose_threshold_px": pose_stats.get("pnp_support_rescue_loose_threshold_px", stats.get("pnp_support_rescue_loose_threshold_px", None)),
