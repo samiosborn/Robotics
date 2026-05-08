@@ -16,16 +16,14 @@ from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
 
 
-def _refresh_active_lookup_basis_from_rescued_support(
-    seed: dict[str, Any],
+def _support_basis_from_rescued_pose(
     track_out: dict[str, Any],
     pose_out: dict[str, Any],
     current_kf: int,
-) -> tuple[dict[str, Any], dict[str, int]]:
-    seed_out = dict(seed)
+) -> tuple[dict[str, Any] | None, dict[str, int]]:
     cur_feats = track_out.get("cur_feats", None)
     if cur_feats is None or not hasattr(cur_feats, "kps_xy"):
-        return seed_out, {
+        return None, {
             "n_feat": 0,
             "n_corr": 0,
             "n_accepted_support": 0,
@@ -40,7 +38,7 @@ def _refresh_active_lookup_basis_from_rescued_support(
     support_mask = np.asarray(pose_out.get("pnp_inlier_mask", np.zeros((landmark_ids.size,), dtype=bool)), dtype=bool).reshape(-1)
     n_feat = int(np.asarray(cur_feats.kps_xy).shape[0])
     n_corr = min(int(landmark_ids.size), int(cur_feat_idx.size), int(support_mask.size))
-    new_lookup = np.full((n_feat,), -1, dtype=np.int64)
+    lookup = np.full((n_feat,), -1, dtype=np.int64)
 
     n_mapped = 0
     n_conflicts = 0
@@ -51,23 +49,15 @@ def _refresh_active_lookup_basis_from_rescued_support(
         if feat_idx < 0 or feat_idx >= int(n_feat):
             n_out_of_range += 1
             continue
-        prev = int(new_lookup[feat_idx])
+        prev = int(lookup[feat_idx])
         if prev >= 0 and prev != lm_id:
             n_conflicts += 1
             continue
         if prev < 0:
             n_mapped += 1
-        new_lookup[feat_idx] = lm_id
+        lookup[feat_idx] = lm_id
 
-    seed_out["feats1"] = cur_feats
-    seed_out["keyframe_kf"] = int(current_kf)
-    seed_out["T_WC1"] = (
-        np.asarray(pose_out["R"], dtype=np.float64),
-        np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
-    )
-    seed_out["landmark_id_by_feat1"] = new_lookup
-
-    return seed_out, {
+    stats = {
         "n_feat": int(n_feat),
         "n_corr": int(n_corr),
         "n_accepted_support": int(np.sum(support_mask[:n_corr])),
@@ -75,6 +65,214 @@ def _refresh_active_lookup_basis_from_rescued_support(
         "n_conflicts": int(n_conflicts),
         "n_out_of_range": int(n_out_of_range),
     }
+    if n_mapped <= 0 or n_conflicts > 0 or n_out_of_range > 0:
+        return None, stats
+
+    return {
+        "kf": int(current_kf),
+        "R": np.asarray(pose_out["R"], dtype=np.float64).copy(),
+        "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3).copy(),
+        "feats": cur_feats,
+        "landmark_id_by_feat1": lookup,
+        "n_lookup_mapped": int(n_mapped),
+        "n_accepted_support": int(np.sum(support_mask[:n_corr])),
+    }, stats
+
+
+def _seed_with_support_basis(seed: dict[str, Any], basis: dict[str, Any]) -> dict[str, Any]:
+    seed_out = dict(seed)
+    seed_out["feats1"] = basis["feats"]
+    seed_out["keyframe_kf"] = int(basis["kf"])
+    seed_out["T_WC1"] = (
+        np.asarray(basis["R"], dtype=np.float64).copy(),
+        np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
+    )
+    seed_out["landmark_id_by_feat1"] = np.asarray(basis["landmark_id_by_feat1"], dtype=np.int64).reshape(-1).copy()
+    return seed_out
+
+
+def _refresh_active_lookup_basis_from_rescued_support(
+    seed: dict[str, Any],
+    track_out: dict[str, Any],
+    pose_out: dict[str, Any],
+    current_kf: int,
+) -> tuple[dict[str, Any], dict[str, int]]:
+    seed_out = dict(seed)
+    basis, stats = _support_basis_from_rescued_pose(track_out, pose_out, current_kf)
+    if basis is None:
+        return seed_out, stats
+    return _seed_with_support_basis(seed_out, basis), stats
+
+
+def _attempt_incoherent_support_recovery(
+    K: np.ndarray,
+    seed: dict[str, Any],
+    cur_im: np.ndarray,
+    *,
+    feature_cfg: dict[str, Any],
+    match_mode: str | None,
+    ncc_min_score: float,
+    brief_mode: str,
+    brief_max_dist: int | None,
+    brief_ratio: float,
+    mutual: bool,
+    max_matches: int | None,
+    scale_gate: int,
+    F_cfg: dict[str, Any],
+    base_n_corr: int,
+    num_trials: int,
+    sample_size: int,
+    threshold_px: float,
+    min_inliers: int,
+    ransac_seed: int,
+    min_points: int,
+    rank_tol: float,
+    min_cheirality_ratio: float,
+    min_landmark_observations: int,
+    allow_bootstrap_landmarks_for_pose: bool,
+    min_post_bootstrap_observations_for_pose: int,
+    eps: float,
+    refit: bool,
+    refine_nonlinear: bool,
+    refine_max_iters: int,
+    refine_damping: float,
+    refine_step_tol: float,
+    refine_improvement_tol: float,
+    image_shape: tuple[int, int] | None,
+    enable_pnp_spatial_gate: bool,
+    pnp_spatial_grid_cols: int,
+    pnp_spatial_grid_rows: int,
+    min_pnp_inlier_cells: int,
+    max_pnp_single_cell_fraction: float,
+    min_pnp_bbox_area_fraction: float,
+    enable_pnp_component_gate: bool,
+    pnp_component_radius_px: float,
+    max_pnp_largest_component_fraction: float,
+    min_pnp_component_count: int,
+    min_pnp_largest_component_bbox_area_fraction: float,
+    enable_pnp_local_consistency_filter: bool,
+    pnp_local_consistency_radius_px: float,
+    pnp_local_consistency_min_neighbours: int,
+    pnp_local_consistency_max_median_residual_px: float,
+    pnp_local_consistency_min_keep: int,
+    enable_pnp_spatial_thinning_filter: bool,
+    pnp_spatial_thinning_radius_px: float,
+    pnp_spatial_thinning_max_points_per_radius: int,
+    pnp_spatial_thinning_min_keep: int,
+    enable_pnp_threshold_stability_diagnostic: bool,
+    pnp_threshold_stability_compare_px: float | None,
+    pnp_threshold_stability_min_support_iou: float,
+    pnp_threshold_stability_max_translation_direction_deg: float,
+    pnp_threshold_stability_max_camera_centre_direction_deg: float,
+    pnp_threshold_stability_disjoint_iou: float,
+    enable_pnp_threshold_stability_gate: bool,
+    temporal_reference_R,
+    temporal_reference_t,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    basis = seed.get("_incoherent_recovery_support_basis", None)
+    if not isinstance(basis, dict):
+        return None, None
+    if basis.get("feats", None) is None or basis.get("landmark_id_by_feat1", None) is None:
+        return None, None
+
+    anchor_seed = _seed_with_support_basis(seed, basis)
+    try:
+        recovery_track_out = track_against_keyframe(
+            K,
+            basis["feats"],
+            cur_im,
+            feature_cfg=feature_cfg,
+            match_mode=match_mode,
+            ncc_min_score=ncc_min_score,
+            brief_mode=brief_mode,
+            brief_max_dist=brief_max_dist,
+            brief_ratio=brief_ratio,
+            mutual=mutual,
+            max_matches=max_matches,
+            scale_gate=scale_gate,
+            F_cfg=F_cfg,
+        )
+    except Exception:
+        return None, None
+
+    recovery_pose_out = estimate_pose_from_seed(
+        K,
+        anchor_seed,
+        recovery_track_out,
+        num_trials=num_trials,
+        sample_size=sample_size,
+        threshold_px=threshold_px,
+        min_inliers=min_inliers,
+        ransac_seed=ransac_seed,
+        min_points=min_points,
+        rank_tol=rank_tol,
+        min_cheirality_ratio=min_cheirality_ratio,
+        min_landmark_observations=min_landmark_observations,
+        allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
+        min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
+        eps=eps,
+        refit=refit,
+        refine_nonlinear=refine_nonlinear,
+        refine_max_iters=refine_max_iters,
+        refine_damping=refine_damping,
+        refine_step_tol=refine_step_tol,
+        refine_improvement_tol=refine_improvement_tol,
+        image_shape=image_shape,
+        enable_pnp_spatial_gate=enable_pnp_spatial_gate,
+        pnp_spatial_grid_cols=pnp_spatial_grid_cols,
+        pnp_spatial_grid_rows=pnp_spatial_grid_rows,
+        min_pnp_inlier_cells=min_pnp_inlier_cells,
+        max_pnp_single_cell_fraction=max_pnp_single_cell_fraction,
+        min_pnp_bbox_area_fraction=min_pnp_bbox_area_fraction,
+        enable_pnp_component_gate=enable_pnp_component_gate,
+        pnp_component_radius_px=pnp_component_radius_px,
+        max_pnp_largest_component_fraction=max_pnp_largest_component_fraction,
+        min_pnp_component_count=min_pnp_component_count,
+        min_pnp_largest_component_bbox_area_fraction=min_pnp_largest_component_bbox_area_fraction,
+        enable_pnp_local_consistency_filter=enable_pnp_local_consistency_filter,
+        pnp_local_consistency_radius_px=pnp_local_consistency_radius_px,
+        pnp_local_consistency_min_neighbours=pnp_local_consistency_min_neighbours,
+        pnp_local_consistency_max_median_residual_px=pnp_local_consistency_max_median_residual_px,
+        pnp_local_consistency_min_keep=pnp_local_consistency_min_keep,
+        enable_pnp_spatial_thinning_filter=enable_pnp_spatial_thinning_filter,
+        pnp_spatial_thinning_radius_px=pnp_spatial_thinning_radius_px,
+        pnp_spatial_thinning_max_points_per_radius=pnp_spatial_thinning_max_points_per_radius,
+        pnp_spatial_thinning_min_keep=pnp_spatial_thinning_min_keep,
+        enable_pnp_threshold_stability_diagnostic=enable_pnp_threshold_stability_diagnostic,
+        pnp_threshold_stability_compare_px=pnp_threshold_stability_compare_px,
+        pnp_threshold_stability_min_support_iou=pnp_threshold_stability_min_support_iou,
+        pnp_threshold_stability_max_translation_direction_deg=pnp_threshold_stability_max_translation_direction_deg,
+        pnp_threshold_stability_max_camera_centre_direction_deg=pnp_threshold_stability_max_camera_centre_direction_deg,
+        pnp_threshold_stability_disjoint_iou=pnp_threshold_stability_disjoint_iou,
+        enable_pnp_threshold_stability_gate=enable_pnp_threshold_stability_gate,
+        temporal_reference_R=temporal_reference_R,
+        temporal_reference_t=temporal_reference_t,
+    )
+
+    recovery_stats = recovery_pose_out.get("stats", {}) if isinstance(recovery_pose_out, dict) else {}
+    recovery_stats = recovery_stats if isinstance(recovery_stats, dict) else {}
+    candidate_n_corr = int(recovery_stats.get("n_corr", 0))
+    candidate_n_inliers = int(recovery_stats.get("n_pnp_inliers", recovery_stats.get("n_inliers", 0)))
+    support_better = candidate_n_corr > int(base_n_corr)
+    pose_ok = bool(recovery_pose_out.get("ok", False)) if isinstance(recovery_pose_out, dict) else False
+    if not bool(pose_ok and support_better and candidate_n_inliers >= int(min_inliers)):
+        return None, None
+
+    recovery_stats = dict(recovery_stats)
+    recovery_stats.update(
+        {
+            "pnp_incoherent_recovery_attempted": True,
+            "pnp_incoherent_recovery_succeeded": True,
+            "pnp_incoherent_recovery_reason": "previous_rescued_support_basis",
+            "pnp_incoherent_recovery_source_kf": int(basis.get("kf", -1)),
+            "pnp_incoherent_recovery_base_n_corr": int(base_n_corr),
+            "pnp_incoherent_recovery_candidate_n_corr": int(candidate_n_corr),
+            "pnp_incoherent_recovery_candidate_n_inliers": int(candidate_n_inliers),
+        }
+    )
+    recovery_pose_out = dict(recovery_pose_out)
+    recovery_pose_out["stats"] = recovery_stats
+    return recovery_track_out, recovery_pose_out
 
 
 # Process one new frame against the current seed map
@@ -320,6 +518,79 @@ def process_frame_against_seed(
     pose_stats = pose_out.get("stats", {}) if isinstance(pose_out, dict) else {}
     ok = bool(pose_out.get("ok", False)) if isinstance(pose_out, dict) else False
 
+    # Try one map-safe rebasing attempt for incoherent support
+    if not bool(ok) and str(pose_stats.get("reason", "")) == "pnp_support_incoherent":
+        recovery_track_out, recovery_pose_out = _attempt_incoherent_support_recovery(
+            K,
+            seed,
+            cur_im,
+            feature_cfg=feature_cfg,
+            match_mode=match_mode,
+            ncc_min_score=ncc_min_score,
+            brief_mode=brief_mode,
+            brief_max_dist=brief_max_dist,
+            brief_ratio=brief_ratio,
+            mutual=mutual,
+            max_matches=max_matches,
+            scale_gate=scale_gate,
+            F_cfg=F_cfg,
+            base_n_corr=int(pose_stats.get("n_corr", 0)),
+            num_trials=num_trials,
+            sample_size=sample_size,
+            threshold_px=threshold_px,
+            min_inliers=min_inliers,
+            ransac_seed=ransac_seed,
+            min_points=min_points,
+            rank_tol=rank_tol,
+            min_cheirality_ratio=min_cheirality_ratio,
+            min_landmark_observations=min_landmark_observations,
+            allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
+            min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
+            eps=eps,
+            refit=refit,
+            refine_nonlinear=refine_nonlinear,
+            refine_max_iters=refine_max_iters,
+            refine_damping=refine_damping,
+            refine_step_tol=refine_step_tol,
+            refine_improvement_tol=refine_improvement_tol,
+            image_shape=image_shape,
+            enable_pnp_spatial_gate=enable_pnp_spatial_gate,
+            pnp_spatial_grid_cols=pnp_spatial_grid_cols,
+            pnp_spatial_grid_rows=pnp_spatial_grid_rows,
+            min_pnp_inlier_cells=min_pnp_inlier_cells,
+            max_pnp_single_cell_fraction=max_pnp_single_cell_fraction,
+            min_pnp_bbox_area_fraction=min_pnp_bbox_area_fraction,
+            enable_pnp_component_gate=enable_pnp_component_gate,
+            pnp_component_radius_px=pnp_component_radius_px,
+            max_pnp_largest_component_fraction=max_pnp_largest_component_fraction,
+            min_pnp_component_count=min_pnp_component_count,
+            min_pnp_largest_component_bbox_area_fraction=min_pnp_largest_component_bbox_area_fraction,
+            enable_pnp_local_consistency_filter=enable_pnp_local_consistency_filter,
+            pnp_local_consistency_radius_px=pnp_local_consistency_radius_px,
+            pnp_local_consistency_min_neighbours=pnp_local_consistency_min_neighbours,
+            pnp_local_consistency_max_median_residual_px=pnp_local_consistency_max_median_residual_px,
+            pnp_local_consistency_min_keep=pnp_local_consistency_min_keep,
+            enable_pnp_spatial_thinning_filter=enable_pnp_spatial_thinning_filter,
+            pnp_spatial_thinning_radius_px=pnp_spatial_thinning_radius_px,
+            pnp_spatial_thinning_max_points_per_radius=pnp_spatial_thinning_max_points_per_radius,
+            pnp_spatial_thinning_min_keep=pnp_spatial_thinning_min_keep,
+            enable_pnp_threshold_stability_diagnostic=enable_pnp_threshold_stability_diagnostic,
+            pnp_threshold_stability_compare_px=pnp_threshold_stability_compare_px,
+            pnp_threshold_stability_min_support_iou=pnp_threshold_stability_min_support_iou,
+            pnp_threshold_stability_max_translation_direction_deg=pnp_threshold_stability_max_translation_direction_deg,
+            pnp_threshold_stability_max_camera_centre_direction_deg=pnp_threshold_stability_max_camera_centre_direction_deg,
+            pnp_threshold_stability_disjoint_iou=pnp_threshold_stability_disjoint_iou,
+            enable_pnp_threshold_stability_gate=enable_pnp_threshold_stability_gate,
+            temporal_reference_R=temporal_reference_R,
+            temporal_reference_t=temporal_reference_t,
+        )
+        if recovery_pose_out is not None and recovery_track_out is not None:
+            track_out = recovery_track_out
+            track_stats = track_out.get("stats", {}) if isinstance(track_out, dict) else {}
+            pose_out = recovery_pose_out
+            pose_stats = pose_out.get("stats", {}) if isinstance(pose_out, dict) else {}
+            ok = bool(pose_out.get("ok", False)) if isinstance(pose_out, dict) else False
+
     # Stop if pose estimation failed
     if not ok:
         stats = {
@@ -349,7 +620,8 @@ def process_frame_against_seed(
             "stats": stats,
         }
 
-    localisation_only_rescue_frame = bool(pose_stats.get("pnp_support_rescue_succeeded", False))
+    incoherent_recovery_frame = bool(pose_stats.get("pnp_incoherent_recovery_succeeded", False))
+    localisation_only_rescue_frame = bool(pose_stats.get("pnp_support_rescue_succeeded", False) or incoherent_recovery_frame)
 
     # Localisation-only rescue frames do not update map observations
     seed_out = seed
@@ -413,7 +685,9 @@ def process_frame_against_seed(
             pnp_occupied_cells >= 2 or pnp_bbox_area_fraction >= 0.05
         )
 
-        if int(current_kf) < 14:
+        if bool(incoherent_recovery_frame):
+            guarded_support_refresh_stats["reason"] = "incoherent_recovery_localisation_only"
+        elif int(current_kf) < 14:
             guarded_support_refresh_stats["reason"] = "current_kf_before_late_trigger"
         elif not bool(support_strong_enough):
             guarded_support_refresh_stats["reason"] = "rescued_support_too_weak"
@@ -434,6 +708,20 @@ def process_frame_against_seed(
                     "n_out_of_range": int(refresh_stats.get("n_out_of_range", 0)),
                 }
             )
+
+    # Keep one previous rescued basis for explicit incoherent recovery
+    if bool(pose_stats.get("pnp_support_rescue_succeeded", False)):
+        last_rescued_basis = seed.get("_last_rescued_support_basis", None)
+        rescued_basis, _ = _support_basis_from_rescued_pose(
+            track_out,
+            pose_out,
+            int(current_kf),
+        )
+        if rescued_basis is not None:
+            seed_out = dict(seed_out)
+            if isinstance(last_rescued_basis, dict):
+                seed_out["_incoherent_recovery_support_basis"] = last_rescued_basis
+            seed_out["_last_rescued_support_basis"] = rescued_basis
 
     # Default keyframe-consideration output
     keyframe_out = None
