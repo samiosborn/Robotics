@@ -70,6 +70,7 @@ def append_tracked_observations_to_seed(
     K: np.ndarray | None = None,
     track_out: dict | None = None,
     max_append_reproj_error_px_existing: float = 2.0,
+    prune_stale_map_growth: bool = True,
     eps: float = 1e-12,
 ) -> tuple[dict, dict]:
     # --- Checks ---
@@ -463,7 +464,8 @@ def append_tracked_observations_to_seed(
                     extra_reproj=True,
                 )
 
-    _prune_stale_map_growth_landmarks()
+    if bool(prune_stale_map_growth):
+        _prune_stale_map_growth_landmarks()
 
     # Pack back into the seed
     seed["landmarks"] = landmarks

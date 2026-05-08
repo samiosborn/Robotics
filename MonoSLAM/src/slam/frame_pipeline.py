@@ -643,6 +643,7 @@ def process_frame_against_seed(
             K=K,
             track_out=track_out,
             max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
+            prune_stale_map_growth=True,
             eps=eps,
         )
 
@@ -685,6 +686,7 @@ def process_frame_against_seed(
             K=K,
             track_out=track_out,
             max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
+            prune_stale_map_growth=False,
             eps=eps,
         )
 
