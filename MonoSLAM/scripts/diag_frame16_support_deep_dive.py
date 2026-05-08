@@ -858,6 +858,500 @@ def _landmark_set_summary(seed: dict, ids: set[int]) -> dict:
     }
 
 
+# Build metadata records aligned to one correspondence bundle
+def _correspondence_metadata_records(seed: dict, corrs, *, frame_index: int) -> list[dict]:
+    lm_by_id = _landmarks_by_id(seed)
+    records = []
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+
+    for i, lm_id_raw in enumerate(landmark_ids.tolist()):
+        lm_id = int(lm_id_raw)
+        lm = lm_by_id.get(lm_id, None)
+        if not isinstance(lm, dict):
+            records.append(
+                {
+                    "corr_index": int(i),
+                    "id": int(lm_id),
+                    "birth_source": "missing",
+                    "birth_kf": -1,
+                    "age": None,
+                    "obs_count": 0,
+                    "obs_frames": [],
+                    "kf_feat_idx": int(kf_feat_idx[i]) if i < int(kf_feat_idx.size) else -1,
+                    "cur_feat_idx": int(cur_feat_idx[i]) if i < int(cur_feat_idx.size) else -1,
+                }
+            )
+            continue
+
+        birth_kf = int(lm.get("birth_kf", -1))
+        age = None if birth_kf < 0 else int(frame_index) - int(birth_kf)
+        records.append(
+            {
+                "corr_index": int(i),
+                "id": int(lm_id),
+                "birth_source": str(lm.get("birth_source", "missing")),
+                "birth_kf": int(birth_kf),
+                "age": age,
+                "obs_count": _obs_count(lm),
+                "obs_frames": _obs_frames(lm),
+                "kf_feat_idx": int(kf_feat_idx[i]) if i < int(kf_feat_idx.size) else -1,
+                "cur_feat_idx": int(cur_feat_idx[i]) if i < int(cur_feat_idx.size) else -1,
+            }
+        )
+
+    return records
+
+
+# Convert metadata records into a boolean correspondence mask
+def _metadata_mask(records: list[dict], predicate) -> np.ndarray:
+    return np.asarray([bool(predicate(record)) for record in records], dtype=bool)
+
+
+# Score local displacement consistency for a correspondence subgroup
+def _subgroup_local_displacement_summary(seed: dict, corrs, pnp_cfg: dict, mask: np.ndarray) -> dict:
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    N = int(corrs.X_w.shape[1])
+    if int(mask.size) != N:
+        return {
+            "available": False,
+            "reason": "mask_size_mismatch",
+            "count": int(np.sum(mask)),
+        }
+
+    feats = seed.get("feats1", None)
+    if feats is None or not hasattr(feats, "kps_xy"):
+        return {
+            "available": False,
+            "reason": "missing_keyframe_features",
+            "count": int(np.sum(mask)),
+        }
+
+    kps_xy = np.asarray(feats.kps_xy, dtype=np.float64)
+    kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    if int(kf_feat_idx.size) != N or kps_xy.ndim != 2 or int(kps_xy.shape[1]) < 2:
+        return {
+            "available": False,
+            "reason": "keyframe_features_unusable",
+            "count": int(np.sum(mask)),
+        }
+
+    valid = mask & (kf_feat_idx >= 0) & (kf_feat_idx < int(kps_xy.shape[0]))
+    count = int(np.sum(mask))
+    valid_count = int(np.sum(valid))
+    if valid_count != count:
+        return {
+            "available": False,
+            "reason": "invalid_keyframe_feature_indices",
+            "count": int(count),
+            "valid_count": int(valid_count),
+        }
+
+    if count == 0:
+        return {
+            "available": True,
+            "count": 0,
+            "stats": None,
+            "retention": None,
+        }
+
+    xy_kf = np.asarray(kps_xy[kf_feat_idx[mask], :2], dtype=np.float64)
+    xy_cur = np.asarray(corrs.x_cur, dtype=np.float64).T[mask]
+    local_mask, local_stats = pnp_local_displacement_consistency_mask(
+        xy_kf,
+        xy_cur,
+        radius_px=float(pnp_cfg["pnp_local_consistency_radius_px"]),
+        min_neighbours=int(pnp_cfg["pnp_local_consistency_min_neighbours"]),
+        max_median_residual_px=float(pnp_cfg["pnp_local_consistency_max_median_residual_px"]),
+        min_keep=0,
+    )
+    local_stats = dict(local_stats)
+    retention = float(np.sum(local_mask) / max(count, 1))
+    local_stats["retention"] = float(retention)
+
+    return {
+        "available": True,
+        "count": int(count),
+        "keep_count": int(np.sum(local_mask)),
+        "reject_count": int(count - int(np.sum(local_mask))),
+        "retention": float(retention),
+        "stats": local_stats,
+    }
+
+
+# Collect compact pathology flags for one subgroup
+def _subgroup_pathologies(count: int, recent_residual: dict, local_summary: dict) -> list[str]:
+    pathologies: list[str] = []
+    if int(count) == 0:
+        return pathologies
+
+    n_non_positive_depth = int(recent_residual.get("n_non_positive_depth", 0))
+    within = recent_residual.get("within", {})
+    within_20 = int(within.get("20", 0)) if isinstance(within, dict) else 0
+    within_40 = int(within.get("40", 0)) if isinstance(within, dict) else 0
+    median_px = recent_residual.get("median_px", None)
+    p90_px = recent_residual.get("p90_px", None)
+
+    if n_non_positive_depth > 0:
+        pathologies.append("non_positive_depth_under_recent_pose")
+    if median_px is not None and float(median_px) > 40.0:
+        pathologies.append("high_recent_pose_median_residual")
+    if p90_px is not None and float(p90_px) > 80.0:
+        pathologies.append("very_high_recent_pose_p90_residual")
+    if within_20 == 0 and int(count) >= 4:
+        pathologies.append("no_recent_pose_support_within_20px")
+    if within_40 < min(int(count), 4):
+        pathologies.append("weak_recent_pose_support_within_40px")
+
+    if bool(local_summary.get("available", False)) and local_summary.get("retention", None) is not None:
+        retention = float(local_summary.get("retention", 0.0))
+        if retention <= 0.20 and int(count) >= 4:
+            pathologies.append("low_local_displacement_retention")
+        stats = local_summary.get("stats", {})
+        if isinstance(stats, dict) and int(stats.get("n_too_few_neighbours", 0)) == int(count) and int(count) >= 4:
+            pathologies.append("locally_sparse_support")
+
+    return pathologies
+
+
+# Summarise one fixed correspondence subgroup
+def _frame16_subgroup_summary(
+    *,
+    seed: dict,
+    corrs,
+    K: np.ndarray,
+    pnp_cfg: dict,
+    image_shape: tuple[int, int],
+    reference_poses: list[dict],
+    records: list[dict],
+    label: str,
+    group_type: str,
+    mask: np.ndarray,
+    residuals_px: np.ndarray | None = None,
+) -> dict:
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    sub_corrs = _slice_pnp_correspondences(corrs, mask)
+    count = int(sub_corrs.X_w.shape[1])
+    ref_rows = []
+    for ref in reference_poses:
+        residuals = _residual_summary(
+            sub_corrs,
+            K,
+            ref.get("R", None),
+            ref.get("t", None),
+            eps=float(pnp_cfg["eps"]),
+        )
+        ref_rows.append(
+            {
+                "label": str(ref.get("label", "")),
+                "kf": None if ref.get("kf", None) is None else int(ref.get("kf")),
+                "localisation_only": bool(ref.get("localisation_only", False)),
+                **residuals,
+            }
+        )
+
+    recent_residual = ref_rows[0] if len(ref_rows) > 0 else _residual_summary(sub_corrs, K, None, None, eps=float(pnp_cfg["eps"]))
+    local_summary = _subgroup_local_displacement_summary(seed, corrs, pnp_cfg, mask)
+    ids = [int(v) for v in np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)[mask].tolist()]
+    group_records = [record for record, keep in zip(records, mask.tolist()) if bool(keep)]
+    residual_summary = None
+    if residuals_px is not None:
+        residuals_px = np.asarray(residuals_px, dtype=np.float64).reshape(-1)
+        residual_summary = _numeric_summary(residuals_px[mask])
+
+    return {
+        "label": str(label),
+        "group_type": str(group_type),
+        "count": int(count),
+        "landmark_ids": ids,
+        "source_split": _value_counts([record["birth_source"] for record in group_records]),
+        "birth_kf_distribution": _value_counts([record["birth_kf"] for record in group_records]),
+        "obs_count_distribution": _value_counts([record["obs_count"] for record in group_records]),
+        "current_spread": _spatial_summary(np.asarray(sub_corrs.x_cur, dtype=np.float64).T, image_shape),
+        "recent_pose_residual": recent_residual,
+        "residual_px_under_recent_pose": residual_summary,
+        "local_displacement_consistency": local_summary,
+        "pathologies": _subgroup_pathologies(count, recent_residual, local_summary),
+    }
+
+
+# Build frame-16 subgroup composition diagnostics
+def _frame16_subgroup_composition(seed_before: dict, corrs, K: np.ndarray, pnp_cfg: dict, image_shape: tuple[int, int], reference_poses: list[dict], *, frame_index: int) -> dict:
+    records = _correspondence_metadata_records(seed_before, corrs, frame_index=int(frame_index))
+    N = int(corrs.X_w.shape[1])
+    last_pose = _copy_pose(seed_before.get("last_accepted_pose", None))
+    residuals_px = None
+    if last_pose is not None:
+        residuals_px = _residual_errors(
+            corrs,
+            K,
+            last_pose["R"],
+            last_pose["t"],
+            eps=float(pnp_cfg["eps"]),
+        )
+
+    groups = []
+
+    def _add_group(label: str, group_type: str, mask: np.ndarray) -> None:
+        if int(np.sum(mask)) == 0:
+            return
+        groups.append(
+            _frame16_subgroup_summary(
+                seed=seed_before,
+                corrs=corrs,
+                K=K,
+                pnp_cfg=pnp_cfg,
+                image_shape=image_shape,
+                reference_poses=reference_poses,
+                records=records,
+                label=label,
+                group_type=group_type,
+                mask=mask,
+                residuals_px=residuals_px,
+            )
+        )
+
+    for source in sorted(set(str(record["birth_source"]) for record in records)):
+        _add_group(
+            f"source:{source}",
+            "birth_source",
+            _metadata_mask(records, lambda record, source=source: str(record["birth_source"]) == str(source)),
+        )
+
+    for birth_kf in sorted(set(int(record["birth_kf"]) for record in records)):
+        _add_group(
+            f"birth_kf:{int(birth_kf)}",
+            "birth_kf",
+            _metadata_mask(records, lambda record, birth_kf=birth_kf: int(record["birth_kf"]) == int(birth_kf)),
+        )
+
+    for obs_count in sorted(set(int(record["obs_count"]) for record in records)):
+        _add_group(
+            f"obs_count:{int(obs_count)}",
+            "obs_count",
+            _metadata_mask(records, lambda record, obs_count=obs_count: int(record["obs_count"]) == int(obs_count)),
+        )
+
+    residual_bin_counts = {}
+    if residuals_px is not None and int(residuals_px.size) == N:
+        bins = [
+            ("recent_pose_residual:le20px", np.isfinite(residuals_px) & (residuals_px <= 20.0)),
+            ("recent_pose_residual:20_40px", np.isfinite(residuals_px) & (residuals_px > 20.0) & (residuals_px <= 40.0)),
+            ("recent_pose_residual:gt40px", np.isfinite(residuals_px) & (residuals_px > 40.0)),
+            ("recent_pose_residual:invalid", ~np.isfinite(residuals_px)),
+        ]
+        for label, mask in bins:
+            residual_bin_counts[label] = int(np.sum(mask))
+            _add_group(label, "recent_pose_residual_bin", mask)
+
+    return {
+        "eligible_count": int(N),
+        "source_split": _value_counts([record["birth_source"] for record in records]),
+        "birth_kf_distribution": _value_counts([record["birth_kf"] for record in records]),
+        "obs_count_distribution": _value_counts([record["obs_count"] for record in records]),
+        "residual_bin_counts": residual_bin_counts,
+        "records": records,
+        "groups": groups,
+    }
+
+
+# Label the outcome of one diagnostic exclusion
+def _diagnostic_exclusion_assessment(experiment: dict, pnp_cfg: dict) -> str:
+    retained = int(experiment.get("retained_count", 0))
+    if retained < int(pnp_cfg["sample_size"]):
+        return "too_few_after_exclusion"
+    if bool(experiment.get("loose_pose_summary", {}).get("coherent_loose_pose_exists", False)):
+        return "coherent_loose_pose_appears"
+    return "no_coherent_loose_pose"
+
+
+# Add a diagnostic exclusion experiment
+def _append_exclusion_experiment(
+    experiments: list[dict],
+    corrs,
+    K: np.ndarray,
+    pnp_cfg: dict,
+    image_shape: tuple[int, int],
+    *,
+    name: str,
+    drop_mask: np.ndarray,
+    residuals_px: np.ndarray | None,
+    extra: dict | None = None,
+) -> None:
+    N = int(corrs.X_w.shape[1])
+    drop_mask = np.asarray(drop_mask, dtype=bool).reshape(-1)
+    if int(drop_mask.size) != N or int(np.sum(drop_mask)) == 0:
+        return
+    keep_mask = ~drop_mask
+    row = _support_filter_experiment(
+        corrs,
+        K,
+        pnp_cfg,
+        image_shape,
+        name=str(name),
+        mask=keep_mask,
+        residuals_px=residuals_px,
+        extra={} if extra is None else extra,
+    )
+    row["dropped_landmark_ids"] = [int(v) for v in np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)[drop_mask].tolist()]
+    row["assessment"] = _diagnostic_exclusion_assessment(row, pnp_cfg)
+    experiments.append(row)
+
+
+# Build narrow frame-16 subgroup exclusion tests
+def _frame16_subgroup_exclusion_experiments(seed_before: dict, corrs, K: np.ndarray, pnp_cfg: dict, image_shape: tuple[int, int], *, frame_index: int) -> dict:
+    records = _correspondence_metadata_records(seed_before, corrs, frame_index=int(frame_index))
+    N = int(corrs.X_w.shape[1])
+    ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    last_pose = _copy_pose(seed_before.get("last_accepted_pose", None))
+    residuals_px = None
+    if last_pose is not None:
+        residuals_px = _residual_errors(
+            corrs,
+            K,
+            last_pose["R"],
+            last_pose["t"],
+            eps=float(pnp_cfg["eps"]),
+        )
+
+    experiments: list[dict] = []
+    source_map_growth = _metadata_mask(records, lambda record: str(record["birth_source"]) == "map_growth")
+    _append_exclusion_experiment(
+        experiments,
+        corrs,
+        K,
+        pnp_cfg,
+        image_shape,
+        name="exclude_all_map_growth",
+        drop_mask=source_map_growth,
+        residuals_px=residuals_px,
+        extra={"drop_rule": "birth_source == map_growth"},
+    )
+
+    bootstrap_birth_kfs = sorted(
+        set(
+            int(record["birth_kf"])
+            for record in records
+            if str(record["birth_source"]) == "bootstrap" and int(record["birth_kf"]) >= 0
+        )
+    )
+    if len(bootstrap_birth_kfs) > 0:
+        oldest_bootstrap_birth_kf = int(bootstrap_birth_kfs[0])
+        _append_exclusion_experiment(
+            experiments,
+            corrs,
+            K,
+            pnp_cfg,
+            image_shape,
+            name=f"exclude_bootstrap_birth_kf_{oldest_bootstrap_birth_kf}",
+            drop_mask=_metadata_mask(
+                records,
+                lambda record, oldest_bootstrap_birth_kf=oldest_bootstrap_birth_kf: str(record["birth_source"]) == "bootstrap"
+                and int(record["birth_kf"]) == int(oldest_bootstrap_birth_kf),
+            ),
+            residuals_px=residuals_px,
+            extra={"drop_rule": "oldest bootstrap birth_kf", "birth_kf": int(oldest_bootstrap_birth_kf)},
+        )
+
+    map_growth_birth_kfs = sorted(
+        set(
+            int(record["birth_kf"])
+            for record in records
+            if str(record["birth_source"]) == "map_growth" and int(record["birth_kf"]) >= 0
+        )
+    )
+    if len(map_growth_birth_kfs) > 0:
+        counts = {
+            int(birth_kf): int(
+                sum(
+                    1
+                    for record in records
+                    if str(record["birth_source"]) == "map_growth" and int(record["birth_kf"]) == int(birth_kf)
+                )
+            )
+            for birth_kf in map_growth_birth_kfs
+        }
+        largest_birth_kf = sorted(counts, key=lambda birth_kf: (-int(counts[int(birth_kf)]), int(birth_kf)))[0]
+        _append_exclusion_experiment(
+            experiments,
+            corrs,
+            K,
+            pnp_cfg,
+            image_shape,
+            name=f"exclude_map_growth_birth_kf_{int(largest_birth_kf)}",
+            drop_mask=_metadata_mask(
+                records,
+                lambda record, largest_birth_kf=largest_birth_kf: str(record["birth_source"]) == "map_growth"
+                and int(record["birth_kf"]) == int(largest_birth_kf),
+            ),
+            residuals_px=residuals_px,
+            extra={
+                "drop_rule": "largest map_growth birth_kf subgroup",
+                "birth_kf": int(largest_birth_kf),
+                "subgroup_count": int(counts[int(largest_birth_kf)]),
+            },
+        )
+
+    if residuals_px is not None and int(residuals_px.size) == N:
+        invalid = ~np.isfinite(residuals_px)
+        gt40 = np.isfinite(residuals_px) & (residuals_px > 40.0)
+        gt20 = np.isfinite(residuals_px) & (residuals_px > 20.0)
+        if np.any(invalid):
+            worst_mask = invalid
+            worst_label = "exclude_recent_pose_residual_invalid"
+        elif np.any(gt40):
+            worst_mask = gt40
+            worst_label = "exclude_recent_pose_residual_gt40px"
+        else:
+            worst_mask = gt20
+            worst_label = "exclude_recent_pose_residual_gt20px"
+        _append_exclusion_experiment(
+            experiments,
+            corrs,
+            K,
+            pnp_cfg,
+            image_shape,
+            name=worst_label,
+            drop_mask=worst_mask,
+            residuals_px=residuals_px,
+            extra={"drop_rule": "worst recent-pose residual subgroup"},
+        )
+
+        tail_count = min(4, max(1, int(np.ceil(0.20 * max(N, 1)))))
+        sort_key = np.where(np.isfinite(residuals_px), residuals_px, np.inf)
+        worst_order = np.argsort(-sort_key, kind="stable")
+        tail_idx = worst_order[:tail_count]
+        tail_mask = np.zeros((N,), dtype=bool)
+        tail_mask[tail_idx] = True
+        _append_exclusion_experiment(
+            experiments,
+            corrs,
+            K,
+            pnp_cfg,
+            image_shape,
+            name=f"exclude_highest_recent_pose_residual_tail_{tail_count}",
+            drop_mask=tail_mask,
+            residuals_px=residuals_px,
+            extra={
+                "drop_rule": "highest recent-pose residual tail",
+                "tail_count": int(tail_count),
+                "dropped_residual_px": [None if not np.isfinite(float(residuals_px[i])) else float(residuals_px[i]) for i in tail_idx.tolist()],
+                "dropped_landmark_ids_ordered": [int(v) for v in ids[tail_idx].tolist()],
+            },
+        )
+
+    return {
+        "eligible_count": int(N),
+        "reference_pose": None if last_pose is None else {
+            "label": f"last_accepted_kf_{last_pose['kf']}",
+            "kf": int(last_pose["kf"]),
+            "localisation_only": bool(last_pose["localisation_only"]),
+        },
+        "experiments": experiments,
+    }
+
+
 # Summarise stored landmark quality fields
 def _landmark_quality_summary(records: list[dict]) -> dict:
     keys = sorted({str(key) for record in records for key in record.get("quality", {}).keys()})
@@ -2594,6 +3088,23 @@ def main() -> None:
         pnp_cfg,
         image_shape16,
     )
+    subgroup_composition = _frame16_subgroup_composition(
+        frame16_seed_before,
+        corrs16,
+        K,
+        pnp_cfg,
+        image_shape16,
+        reference_poses16,
+        frame_index=16,
+    )
+    subgroup_exclusion_experiments = _frame16_subgroup_exclusion_experiments(
+        frame16_seed_before,
+        corrs16,
+        K,
+        pnp_cfg,
+        image_shape16,
+        frame_index=16,
+    )
     separation_test = _frame16_2d_3d_separation_test(
         frame16_seed_before,
         corrs16,
@@ -2651,6 +3162,8 @@ def main() -> None:
         "frame8_cohort_observation_accrual": cohort_accrual,
         "frame15_frame16_landmark_continuity": continuity,
         "frame16_support_filter_experiments": support_filter_experiments,
+        "frame16_subgroup_composition": subgroup_composition,
+        "frame16_subgroup_exclusion_experiments": subgroup_exclusion_experiments,
         "frame16_2d_3d_separation_test": separation_test,
         "frame16_candidate_recovery_anchors": candidate_recovery_anchors,
         "recent_pose_geometry_consistency_comparison": {
