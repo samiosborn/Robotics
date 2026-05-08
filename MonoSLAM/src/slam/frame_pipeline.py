@@ -623,7 +623,7 @@ def process_frame_against_seed(
     incoherent_recovery_frame = bool(pose_stats.get("pnp_incoherent_recovery_succeeded", False))
     localisation_only_rescue_frame = bool(pose_stats.get("pnp_support_rescue_succeeded", False) or incoherent_recovery_frame)
 
-    # Localisation-only rescue frames do not update map observations
+    # Localisation-only rescue frames may append existing-landmark observations only
     seed_out = seed
     tracked_obs_stats: dict[str, Any] = {}
     map_growth_out = None
@@ -677,6 +677,17 @@ def process_frame_against_seed(
             # Read the updated seed
             seed_out = map_growth_out.seed
     else:
+        seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
+            seed,
+            pose_out,
+            keyframe_kf=keyframe_kf,
+            current_kf=current_kf,
+            K=K,
+            track_out=track_out,
+            max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
+            eps=eps,
+        )
+
         n_pnp_inliers = int(pose_stats.get("n_pnp_inliers", 0))
         pnp_occupied_cells = int(pose_stats.get("pnp_inlier_occupied_cells", 0))
         bbox_area = pose_stats.get("pnp_inlier_bbox_area_fraction", None)
@@ -693,7 +704,7 @@ def process_frame_against_seed(
             guarded_support_refresh_stats["reason"] = "rescued_support_too_weak"
         else:
             seed_out, refresh_stats = _refresh_active_lookup_basis_from_rescued_support(
-                seed,
+                seed_out,
                 track_out,
                 pose_out,
                 int(current_kf),
