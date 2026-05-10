@@ -1,0 +1,81 @@
+% notebooks/notes/07_bundle_adjustment.tex
+\documentclass[11pt]{article}
+
+\input{preamble.tex}
+
+\title{Bundle Adjustment}
+\date{May 2026}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+% ====
+\section{Bundle Adjustment as Nonlinear Least Squares}
+% ====
+
+Definition: Observation graph
+Definition: Reprojection residual
+Proposition: Gaussian pixel noise gives weighted reprojection least squares
+
+% ====
+\section{Residual Jacobians}
+% ====
+
+Lemma: Projection Jacobian reminder
+Proposition: Landmark Jacobian for reprojection residual
+Proposition: Pose Jacobian under left SE(3) perturbation
+
+% ====
+\section{Linearised Bundle Adjustment}
+% ====
+
+Proposition: Local BA gives a linear least-squares problem
+Proposition: Normal equations for the Gauss--Newton step
+
+% ====
+\section{Sparse Structure}
+% ====
+
+Proposition: Each residual touches one pose and one landmark
+Theorem: BA normal matrix has block camera-point structure
+Proposition: Landmark block C is block diagonal
+
+% ====
+\section{Schur Complement}
+% ====
+
+Theorem: Landmark elimination by Schur complement
+Proposition: Eliminating landmarks is cheap because C is block diagonal
+Proposition: A landmark connects all cameras that observe it in the reduced system
+
+% ====
+\section{Gauge Freedom}
+% ====
+
+Theorem: Monocular BA is invariant under global Sim(3)
+Corollary: The monocular BA Hessian has a 7-dimensional gauge nullspace
+Proposition: Gauge fixing by anchoring poses, landmarks, or scale
+
+% ====
+\section{Damping and Robustification}
+% ====
+
+Proposition: LM damping makes the linear system positive definite
+Proposition: LM interpolates between Gauss--Newton and gradient descent
+Proposition: Robust losses induce iteratively reweighted least squares
+
+% ====
+\section{Practical BA Diagnostics}
+% ====
+
+Remark: Reprojection error distribution
+Remark: Negative/near-zero depth
+Remark: Poorly observed landmarks
+Remark: Gauge drift
+Remark: Outliers that survive RANSAC
+Remark: Why local BA/windowed BA is used in SLAM
+
+
+\end{document}
