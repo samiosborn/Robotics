@@ -15,24 +15,375 @@
 \section{Bundle Adjustment as Nonlinear Least Squares}
 % ====
 
-Definition: Observation graph
-Definition: Reprojection residual
-Proposition: Gaussian pixel noise gives weighted reprojection least squares
+Bundle adjustment jointly refines camera poses and landmark positions by minimising image-plane reprojection error.
+
+\begin{definition}[Observation graph]
+Let \( C, P \) index the camera poses and landmarks, respectively. 
+\[
+\mathcal C=\{1,\dots,M\},\qquad \mathcal P=\{1,\dots,N\}
+\]
+The observation graph \( G \) is the bipartite graph
+\[
+\mathcal G=(\mathcal C,\mathcal P,\mathcal O),
+\qquad
+\mathcal O\subseteq \mathcal C\times \mathcal P
+\]
+Where \((i,j)\in\mathcal O\) means that the camera in pose \(i\) observes landmark \(j\).
+
+For each \((i,j)\in\mathcal O\), let \(z_{ij}\in\R^2\) denote the measured pixel coordinate.
+\end{definition}
+
+\begin{definition}[Reprojection residual]
+Let \(T_i=(R_i,t_i)\in SE(3)\) be the world-to-camera pose of camera \(i\), and let \(X_j\in\R^3\) be landmark \(j\) in world coordinates. Define
+\[
+Y_{ij}\coloneqq R_iX_j+t_i\in\R^3
+\]
+For the pinhole projection map \(\pi:\R^3\supset\{Z>0\}\to\R^2\), the predicted pixel coordinate is
+\[
+\hat z_{ij}=\pi(Y_{ij})
+\]
+The reprojection residual is therefore
+\[
+r_{ij}(T_i,X_j)
+\coloneqq
+z_{ij}-\pi(R_iX_j+t_i)
+\in\R^2
+\]
+\end{definition}
+
+\begin{definition}[Bundle adjustment objective]
+The bundle adjustment problem is
+\[
+\min_{\{T_i\},\{X_j\}}
+\frac12
+\sum_{(i,j)\in\mathcal O}
+\|r_{ij}(T_i,X_j)\|_2^2
+\]
+Equivalently,
+\[
+\min_{\{T_i\},\{X_j\}}
+\frac12
+\sum_{(i,j)\in\mathcal O}
+\left\|
+z_{ij}-\pi(R_iX_j+t_i)
+\right\|_2^2
+\]
+\end{definition}
+
+\begin{proposition}[Gaussian pixel noise gives weighted reprojection least squares]
+Assume independently over \((i,j)\in\mathcal O\), with \(\Sigma_{ij}\succ0\)
+\[
+z_{ij}=\pi(R_iX_j+t_i)+\varepsilon_{ij},
+\qquad
+\varepsilon_{ij}\sim\mathcal N(0,\Sigma_{ij})
+\]
+Then, the maximum likelihood estimate of the bundle adjustment problem minimises
+\[
+\frac12
+\sum_{(i,j)\in\mathcal O}
+r_{ij}^{\top}\Sigma_{ij}^{-1}r_{ij}
+\]
+In particular, if \(\Sigma_{ij}=\sigma^2I_2\), this is equivalent to ordinary reprojection least squares.
+\end{proposition}
+
+\begin{proof}
+For one observation, we have
+\[
+p(z_{ij}\mid T_i,X_j)
+=
+\frac{1}{2\pi|\Sigma_{ij}|^{1/2}}
+\exp\!\left(
+-\frac12 r_{ij}^{\top}\Sigma_{ij}^{-1}r_{ij}
+\right)
+\]
+Independence gives a product likelihood over \(\mathcal O\). Taking the negative logarithm and discarding constants independent of the unknowns gives
+\[
+\frac12
+\sum_{(i,j)\in\mathcal O}
+r_{ij}^{\top}\Sigma_{ij}^{-1}r_{ij}
+\]
+If \(\Sigma_{ij}=\sigma^2I_2\), then
+\[
+r_{ij}^{\top}\Sigma_{ij}^{-1}r_{ij}
+=
+\sigma^{-2}\|r_{ij}\|_2^2
+\]
+The the scalar factor \(\sigma^{-2}\) does not affect the minimiser.
+\end{proof}
+
+\begin{remark}[Information form]
+Writing
+\[
+\Omega_{ij}\coloneqq \Sigma_{ij}^{-1}
+\]
+The weighted objective becomes
+\[
+\frac12
+\sum_{(i,j)\in\mathcal O}
+r_{ij}^{\top}\Omega_{ij}r_{ij}
+\]
+Thus, higher information corresponds to a more trusted image measurement.
+\end{remark}
+
 
 % ====
 \section{Residual Jacobians}
 % ====
 
-Lemma: Projection Jacobian reminder
-Proposition: Landmark Jacobian for reprojection residual
-Proposition: Pose Jacobian under left SE(3) perturbation
+We now compute the local sensitivities of a reprojection residual with respect to a landmark and a camera pose.
+
+\begin{lemma}[Projection Jacobian]
+Let
+\[
+Y=
+\begin{bmatrix}
+X_c\\Y_c\\Z_c
+\end{bmatrix},
+\qquad Z_c>0
+\]
+and
+\[
+\pi(Y)=
+\begin{bmatrix}
+f_xX_c/Z_c+c_x\\
+f_yY_c/Z_c+c_y
+\end{bmatrix}
+\]
+Then
+\[
+D\pi(Y)
+=
+\frac{\partial \pi}{\partial Y}
+=
+\begin{bmatrix}
+f_x/Z_c & 0 & -f_xX_c/Z_c^2\\
+0 & f_y/Z_c & -f_yY_c/Z_c^2
+\end{bmatrix}
+\]
+\end{lemma}
+
+\begin{proof}
+Differentiate the two coordinate functions with respect to \(X_c,Y_c,Z_c\).
+\[
+u=f_xX_c/Z_c+c_x,
+\qquad
+v=f_yY_c/Z_c+c_y
+\]
+
+\end{proof}
+
+\begin{proposition}[Landmark Jacobian for the reprojection residual]
+For the reprojection residual
+\[
+r_{ij}=z_{ij}-\pi(R_iX_j+t_i)
+\]
+The Jacobian with respect to the landmark \(X_j\) is
+\[
+\frac{\partial r_{ij}}{\partial X_j}
+=
+-
+D\pi(Y_{ij})R_i,
+\qquad
+Y_{ij}=R_iX_j+t_i
+\]
+\end{proposition}
+
+\begin{proof}
+A perturbation \(X_j\mapsto X_j+\delta X_j\) gives
+\[
+Y_{ij}\mapsto Y_{ij}+R_i\delta X_j
+\]
+Hence
+\[
+\delta r_{ij}
+=
+-\,D\pi(Y_{ij})R_i\delta X_j
+\]
+\end{proof}
+
+\begin{proposition}[Pose Jacobian under left \(SE(3)\) perturbation]
+Let the camera pose be perturbed on the left by
+\[
+T_i\leftarrow \exp(\xi_i^\wedge)T_i
+\qquad
+\xi_i=
+\begin{bmatrix}
+\rho_i\\ \phi_i
+\end{bmatrix}
+\in\R^6.
+\]
+Then, to first order,
+\[
+\delta Y_{ij}
+=
+\rho_i-[Y_{ij}]_\times\phi_i
+\]
+Consequently,
+\[
+\frac{\partial r_{ij}}{\partial \xi_i}
+=
+-
+D\pi(Y_{ij})
+\begin{bmatrix}
+I_3 & -[Y_{ij}]_\times
+\end{bmatrix}
+\]
+\end{proposition}
+
+\begin{proof}
+
+Using
+\[
+\exp(\xi_i^\wedge)
+\approx
+\begin{bmatrix}
+I+\phi_i^\wedge & \rho_i\\
+0 & 1
+\end{bmatrix}
+\]
+The perturbed camera-frame point is
+\[
+Y_{ij}'=(I+\phi_i^\wedge)Y_{ij}+\rho_i
+=
+Y_{ij}+\rho_i+\phi_i\times Y_{ij}
+\]
+
+Since
+\[
+\phi_i\times Y_{ij}=-[Y_{ij}]_\times\phi_i,
+\]
+We obtain
+\[
+\delta Y_{ij}
+=
+Y_{ij}'-Y_{ij}
+=
+\rho_i-[Y_{ij}]_\times\phi_i
+\]
+We know
+\[
+\delta r_{ij}
+=
+-\,D\pi(Y_{ij})\delta Y_{ij}
+\]
+So
+\[
+\delta r_{ij}
+=
+-
+D \pi (Y_{ij})
+\begin{bmatrix}
+I_3 & -[Y_{ij}]_\times
+\end{bmatrix}
+\begin{bmatrix}
+\rho_i\\ \phi_i
+\end{bmatrix}
+\]
+\end{proof}
+
 
 % ====
 \section{Linearised Bundle Adjustment}
 % ====
 
-Proposition: Local BA gives a linear least-squares problem
-Proposition: Normal equations for the Gauss--Newton step
+Bundle adjustment is nonlinear because both the camera projection and the pose parametrisation are nonlinear. We therefore solve a sequence of local linear least-squares problems.
+
+\begin{definition}[Stacked residual and increment]
+Let \( r \) denote the vector formed by stacking all residuals \( r_{ij} \)
+\[
+r(\theta)
+\in\R^{2|\mathcal O|}
+\]
+Where \(\theta\) denotes all poses and landmarks. 
+
+Let \(\delta\) denote the corresponding stacked local increment, consisting of pose increments in \(\R^6\) and landmark increments in \(\R^3\).
+\end{definition}
+
+\begin{proposition}[Local BA gives a linear least-squares problem]
+At a current estimate \(\theta\), the residual admits the first-order approximation
+\[
+r(\theta+\delta)
+=
+r(\theta)+J\delta+O(\|\delta\|^2)
+\]
+Where \( J \) is the bundle adjustment Jacobian
+\[
+J=\frac{\partial r}{\partial \delta}
+\]
+Hence the local Gauss--Newton approximation to bundle adjustment is
+\[
+\min_\delta
+\frac12
+\|r+J\delta\|_2^2
+\]
+\end{proposition}
+
+\begin{proof}
+This is the first-order Taylor expansion of the stacked residual map \(r\) about the current estimate. Dropping terms of order \(O(\|\delta\|^2)\) gives the stated linear least-squares problem.
+\end{proof}
+
+\begin{proposition}[Normal equations for the Gauss--Newton step]
+A stationary point of
+\[
+\min_\delta
+\frac12
+\|r+J\delta\|_2^2
+\]
+Satisfies
+\[
+J^\top J\delta=-J^\top r
+\]
+More generally, for a positive definite weight matrix \(W\), the weighted problem
+\[
+\min_\delta
+\frac12
+(r+J\delta)^\top W(r+J\delta)
+\]
+Has normal equations
+\[
+J^\top WJ\delta=-J^\top Wr
+\]
+\end{proposition}
+
+\begin{proof}
+Define
+\[
+F(\delta)=\frac12\|r+J\delta\|_2^2
+\]
+Then
+\[
+\nabla_\delta F
+=
+J^\top(r+J\delta)
+\]
+At a stationary point,
+\[
+J^\top(r+J\delta)=0
+\]
+Which gives
+\[
+J^\top J\delta=-J^\top r
+\]
+
+For the weighted case,
+\[
+F_W(\delta)=\frac12(r+J\delta)^\top W(r+J\delta)
+\]
+So
+\[
+\nabla_\delta F_W
+=
+J^\top W(r+J\delta)
+\]
+Setting the gradient to zero gives
+\[
+J^\top WJ\delta=-J^\top Wr
+\]
+\end{proof}
+
+\begin{remark}
+The matrix \(J^\top J\) is the Gauss--Newton approximation to the Hessian of the nonlinear least-squares objective, while \(J^\top r\) is the gradient. The central computational problem in bundle adjustment is therefore solving this linear system efficiently while exploiting its sparsity.
+\end{remark}
 
 % ====
 \section{Sparse Structure}
