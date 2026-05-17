@@ -286,7 +286,7 @@ I_3 & -[Y_{ij}]_\times
 \section{Linearised Bundle Adjustment}
 % ====
 
-Bundle adjustment is nonlinear because both the camera projection and the pose parametrisation are nonlinear. We therefore solve a sequence of local linear least-squares problems.
+Bundle adjustment is nonlinear because both the camera projection and the pose parametrisation are nonlinear. We therefore try to solve a sequence of local linear least-squares problems.
 
 \begin{definition}[Stacked residual and increment]
 Let \( r \) denote the vector formed by stacking all residuals \( r_{ij} \)
@@ -389,9 +389,193 @@ The matrix \(J^\top J\) is the Gauss--Newton approximation to the Hessian of the
 \section{Sparse Structure}
 % ====
 
-Proposition: Each residual touches one pose and one landmark
-Theorem: BA normal matrix has block camera-point structure
-Proposition: Landmark block C is block diagonal
+The efficiency of bundle adjustment comes from the fact that each image measurement involves only one camera pose and one landmark. This gives the Jacobian, and hence the normal matrix, a highly sparse block structure.
+
+\begin{definition}[Local Jacobian blocks]
+For an observation \((i,j)\in\mathcal O\), write
+\[
+r_{ij}=r_{ij}(T_i,X_j)\in\R^2
+\]
+Let
+\[
+A_{ij}\coloneqq \frac{\partial r_{ij}}{\partial \xi_i}\in\R^{2\times 6},
+\qquad
+L_{ij}\coloneqq \frac{\partial r_{ij}}{\partial X_j}\in\R^{2\times 3}
+\]
+Where \(\xi_i\in\R^6\) is the local pose increment for camera \(i\), and \(X_j\in\R^3\) is landmark \(j\).
+\end{definition}
+
+\begin{proposition}[Each residual touches one pose and one landmark]
+For
+\[
+r_{ij}=z_{ij}-\pi(R_iX_j+t_i),
+\]
+We have
+\[
+\frac{\partial r_{ij}}{\partial \xi_k}=0
+\quad\text{for } k\neq i,
+\qquad
+\frac{\partial r_{ij}}{\partial X_\ell}=0
+\quad\text{for } \ell\neq j.
+\]
+Thus each residual contributes non-zero Jacobian blocks only in the columns corresponding to camera \(i\) and landmark \(j\).
+\end{proposition}
+
+\begin{proof}
+The residual \(r_{ij}\) is a function only of \(T_i\) and \(X_j\):
+\[
+r_{ij}=r_{ij}(T_i,X_j).
+\]
+It has no dependence on any other camera pose \(T_k\), \(k\neq i\), nor on any other landmark \(X_\ell\), \(\ell\neq j\). Therefore, the corresponding partial derivatives are zero.
+\end{proof}
+
+\begin{remark}
+If all variables are ordered as
+\[
+\delta=
+\begin{bmatrix}
+\delta c\\
+\delta p
+\end{bmatrix}
+\]
+Where \(\delta c\in\R^{6M}\) stacks all camera increments and \(\delta p\in\R^{3N}\) stacks all landmark increments, then the Jacobian row block for \(r_{ij}\) has the form
+\[
+J_{ij}
+=
+\begin{bmatrix}
+0 & \cdots & A_{ij} & \cdots & 0
+&
+0 & \cdots & L_{ij} & \cdots & 0
+\end{bmatrix}
+\]
+\end{remark}
+
+\begin{theorem}[BA normal matrix has camera--point block structure]
+Consider the weighted linearised bundle adjustment problem
+\[
+\min_\delta
+\frac12
+\sum_{(i,j)\in\mathcal O}
+(r_{ij}+A_{ij}\delta \xi_i+L_{ij}\delta X_j)^\top
+\Omega_{ij}
+(r_{ij}+A_{ij}\delta \xi_i+L_{ij}\delta X_j)
+\]
+Where \(\Omega_{ij}\in\R^{2\times 2}\) is positive definite. Then the normal equations have the block form
+\[
+\begin{bmatrix}
+B & E\\
+E^\top & C
+\end{bmatrix}
+\begin{bmatrix}
+\delta c\\
+\delta p
+\end{bmatrix}
+=
+-
+\begin{bmatrix}
+g_c\\
+g_p
+\end{bmatrix}
+\]
+The non-zero blocks are
+\[
+B_{ii}
+=
+\sum_{j:(i,j)\in\mathcal O}
+A_{ij}^\top \Omega_{ij}A_{ij}
+\]
+\[
+C_{jj}
+=
+\sum_{i:(i,j)\in\mathcal O}
+L_{ij}^\top \Omega_{ij}L_{ij}
+\]
+With
+\[
+E_{ij}
+=
+A_{ij}^\top \Omega_{ij}L_{ij}
+\qquad \text{when } (i,j)\in\mathcal O
+\]
+The corresponding gradient blocks are
+\[
+(g_c)_i
+=
+\sum_{j:(i,j)\in\mathcal O}
+A_{ij}^\top \Omega_{ij}r_{ij},
+\qquad
+(g_p)_j
+=
+\sum_{i:(i,j)\in\mathcal O}
+L_{ij}^\top \Omega_{ij}r_{ij}
+\]
+\end{theorem}
+
+\begin{proof}
+The normal matrix is obtained by summing the per-observation contributions
+\[
+J_{ij}^\top \Omega_{ij} J_{ij}
+\]
+Since \(J_{ij}\) has non-zero blocks only in the columns for camera \(i\) and landmark \(j\), each observation contributes only the following four block terms:
+\[
+A_{ij}^\top\Omega_{ij}A_{ij},
+\qquad
+A_{ij}^\top\Omega_{ij}L_{ij},
+\]
+\[
+L_{ij}^\top\Omega_{ij}A_{ij},
+\qquad
+L_{ij}^\top\Omega_{ij}L_{ij}
+\]
+Summing these terms over all observations gives the stated block matrix
+\[
+H=
+J^\top\Omega J
+=
+\begin{bmatrix}
+B & E\\
+E^\top & C
+\end{bmatrix}
+\]
+Similarly, the right-hand side is obtained from
+\[
+J^\top\Omega r
+\]
+Which gives the stated camera and landmark gradient blocks.
+\end{proof}
+
+\begin{proposition}[The landmark block \(C\) is block diagonal]
+For pure reprojection bundle adjustment, the landmark--landmark block \(C\) satisfies
+\[
+C=\operatorname{blkdiag}(C_{11},\dots,C_{NN})
+\]
+Where
+\[
+C_{jj}
+=
+\sum_{i:(i,j)\in\mathcal O}
+L_{ij}^\top \Omega_{ij}L_{ij}
+\in\R^{3\times 3}
+\]
+In particular,
+\[
+C_{j\ell}=0
+\qquad
+\text{whenever } j\neq \ell
+\]
+\end{proposition}
+
+\begin{proof}
+A single residual \(r_{ij}\) depends on landmark \(X_j\) but on no other landmark. Therefore it cannot create a second-derivative or Gauss--Newton coupling between two distinct landmarks \(X_j\) and \(X_\ell\), \(j\neq \ell\). Equivalently, each per-observation contribution \(J_{ij}^\top\Omega_{ij}J_{ij}\) contains only the landmark--landmark block for landmark \(j\). 
+\[
+L_{ij}^\top\Omega_{ij}L_{ij}
+\]
+Summing over all observations preserves this block diagonal structure.
+\end{proof}
+
+\begin{remark}
+The block diagonal form of \(C\) is the key algebraic fact behind Schur complement bundle adjustment. Since each block \(C_{jj}\) is only \(3\times3\), eliminating landmarks requires many small inversions rather than one large dense inversion.
+\end{remark}
 
 % ====
 \section{Schur Complement}
