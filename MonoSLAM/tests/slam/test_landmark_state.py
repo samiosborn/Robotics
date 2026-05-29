@@ -9,10 +9,12 @@ from slam.landmark_state import (
     add_landmark_observation,
     build_landmark_id_index,
     build_observation_indexes,
+    count_valid_landmark_observations,
     get_landmark_by_id,
     iter_landmark_observations,
     next_landmark_id,
 )
+from slam.seed import build_two_view_seed
 
 
 # Build a small landmark record
@@ -126,6 +128,42 @@ def test_added_observation_xy_is_copied():
     assert added is True
     assert not np.shares_memory(landmark["obs"][0]["xy"], xy)
     np.testing.assert_allclose(landmark["obs"][0]["xy"], np.asarray([5.0, 6.0], dtype=np.float64))
+
+
+# Copy bootstrap landmark arrays from caller-owned inputs
+def test_bootstrap_seed_landmark_arrays_are_copied():
+    x1 = np.asarray([[1.0, 3.0], [2.0, 4.0]], dtype=np.float64)
+    x2 = np.asarray([[5.0, 7.0], [6.0, 8.0]], dtype=np.float64)
+    X_valid = np.asarray([[0.0], [1.0], [5.0]], dtype=np.float64)
+
+    seed = build_two_view_seed(
+        x1,
+        x2,
+        idx_init=np.asarray([0], dtype=np.int64),
+        X_valid=X_valid,
+        R1=np.eye(3, dtype=np.float64),
+        t1=np.zeros((3,), dtype=np.float64),
+    )
+    landmark = seed["landmarks"][0]
+    x1[:, 0] = 99.0
+    x2[:, 0] = 88.0
+    X_valid[:, 0] = 77.0
+
+    assert not np.shares_memory(landmark["X_w"], X_valid)
+    assert not np.shares_memory(landmark["obs"][0]["xy"], x1)
+    assert not np.shares_memory(landmark["obs"][1]["xy"], x2)
+    np.testing.assert_allclose(landmark["X_w"], np.asarray([0.0, 1.0, 5.0], dtype=np.float64))
+    np.testing.assert_allclose(landmark["obs"][0]["xy"], np.asarray([1.0, 2.0], dtype=np.float64))
+    np.testing.assert_allclose(landmark["obs"][1]["xy"], np.asarray([5.0, 6.0], dtype=np.float64))
+
+
+# Count only checked observation records as valid
+def test_count_valid_landmark_observations_rejects_malformed_records():
+    landmark = _landmark(3, kf=1, feat=4)
+    landmark["obs"].append({"kf": 2, "feat": 5})
+
+    with pytest.raises(ValueError, match="missing required key 'xy'"):
+        count_valid_landmark_observations(landmark)
 
 
 # Keep malformed observation records covered by invariants

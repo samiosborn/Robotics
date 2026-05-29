@@ -36,12 +36,12 @@ def build_two_view_seed(x1, x2, *, idx_init, X_valid, R1, t1) -> dict:
         landmarks.append(
             {
                 "id": int(lm_id),
-                "X_w": np.asarray(X_w, dtype=np.float64),
+                "X_w": np.asarray(X_w, dtype=np.float64).reshape(3).copy(),
                 "birth_source": "bootstrap",
                 "birth_kf": 1,
                 "obs": [
-                    {"kf": 0, "feat": j, "xy": np.asarray(x1[:, j], dtype=np.float64)},
-                    {"kf": 1, "feat": j, "xy": np.asarray(x2[:, j], dtype=np.float64)},
+                    {"kf": 0, "feat": j, "xy": np.asarray(x1[:, j], dtype=np.float64).reshape(2).copy()},
+                    {"kf": 1, "feat": j, "xy": np.asarray(x2[:, j], dtype=np.float64).reshape(2).copy()},
                 ],
                 "descriptor": None,
                 "quality": {"reproj0_px": None, "reproj1_px": None},
@@ -127,8 +127,8 @@ def attach_feature_bookkeeping_to_seed(seed, feats0, feats1, matches):
 
         obs[0]["feat"] = feat0
         obs[1]["feat"] = feat1
-        obs[0]["xy"] = np.asarray(kps0[feat0, :2], dtype=np.float64)
-        obs[1]["xy"] = np.asarray(kps1[feat1, :2], dtype=np.float64)
+        obs[0]["xy"] = np.asarray(kps0[feat0, :2], dtype=np.float64).reshape(2).copy()
+        obs[1]["xy"] = np.asarray(kps1[feat1, :2], dtype=np.float64).reshape(2).copy()
         lm["obs"] = obs
 
         if desc1.ndim >= 1 and feat1 < int(desc1.shape[0]):

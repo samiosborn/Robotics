@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from geometry.pnp import pnp_component_support_gate_reasons, pnp_inlier_component_support, pnp_inlier_spatial_coverage, pnp_spatial_coverage_gate_reasons
+from slam.landmark_state import count_valid_landmark_observations
 
 
 # Build a histogram of observation counts for kept landmarks
@@ -33,11 +34,7 @@ def landmark_observation_histogram(seed: dict[str, Any], landmark_ids: np.ndarra
         if lm is None:
             continue
 
-        obs = lm.get("obs", None)
-        if not isinstance(obs, list):
-            n_obs = 0
-        else:
-            n_obs = int(sum(1 for ob in obs if isinstance(ob, dict)))
+        n_obs = count_valid_landmark_observations(lm, context=f"seed['landmarks'][id={int(lm_id)}]")
 
         key = str(int(n_obs))
         hist[key] = int(hist.get(key, 0) + 1)

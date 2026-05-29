@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from core.checks import align_bool_mask_1d, check_matrix_3x3
+from core.checks import check_mask_bool_N, check_matrix_3x3
 from features.pipeline import FrameFeatures, detect_and_describe_image
 from slam.matching import MatchBundle, match_frames, matched_keypoints_xy
 from slam.two_view_consensus import estimate_fundamental_consensus
@@ -80,8 +80,10 @@ def track_against_keyframe(
         }
     )
 
-    # Build an aligned inlier mask
-    inlier_mask = align_bool_mask_1d(F_mask, M)
+    # Require the consensus mask to match the tentative match count
+    inlier_mask = check_mask_bool_N(F_mask, M, name="F_mask")
+    if inlier_mask is None:
+        inlier_mask = np.zeros((M,), dtype=bool)
     stats.update({"n_inliers": int(inlier_mask.sum())})
 
     # Record failure reason when consensus fails

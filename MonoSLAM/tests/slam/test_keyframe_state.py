@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from slam.invariants import audit_seed_invariants
+from slam.frame_pipeline import _copy_pose_blocks, process_frame_against_seed
 from slam.keyframe import promote_frame_to_keyframe
 from slam.keyframe_state import (
     get_active_keyframe_features,
@@ -151,7 +152,58 @@ def test_set_active_keyframe_record_updates_legacy_and_canonical_state():
     assert seed["landmark_id_by_feat1"] is lookup
     assert seed["poses"][4] is pose
     assert record["pose"] is pose
+    seed["landmarks"][1]["obs"].append({"kf": 4, "feat": 1, "xy": np.asarray([7.0, 6.0], dtype=np.float64)})
     assert validate_active_keyframe_state(seed)["errors"] == []
+
+
+# Reject stale active-keyframe frame-pipeline indices
+def test_process_frame_rejects_stale_active_keyframe_index_argument():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+
+    with pytest.raises(ValueError, match="keyframe_kf argument must match active keyframe state"):
+        process_frame_against_seed(
+            np.eye(3, dtype=np.float64),
+            seed,
+            seed["feats1"],
+            np.zeros((8, 8), dtype=np.float64),
+            feature_cfg={},
+            F_cfg={},
+            keyframe_kf=2,
+            current_kf=2,
+        )
+
+
+# Reject stale active-keyframe frame-pipeline feature bundles
+def test_process_frame_rejects_stale_active_keyframe_features_argument():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    stale_feats = _features([[99.0, 20.0], [30.0, 40.0], [70.0, 80.0]])
+
+    with pytest.raises(ValueError, match="keyframe_feats argument must match active keyframe features"):
+        process_frame_against_seed(
+            np.eye(3, dtype=np.float64),
+            seed,
+            stale_feats,
+            np.zeros((8, 8), dtype=np.float64),
+            feature_cfg={},
+            F_cfg={},
+            keyframe_kf=1,
+            current_kf=2,
+        )
+
+
+# Copy accepted pose blocks before storing frame-pipeline state
+def test_copy_pose_blocks_returns_owned_arrays():
+    R = np.eye(3, dtype=np.float64)
+    t = np.asarray([1.0, 2.0, 3.0], dtype=np.float64)
+
+    R_copy, t_copy = _copy_pose_blocks(R, t)
+    R[0, 0] = 9.0
+    t[0] = 9.0
+
+    assert not np.shares_memory(R_copy, R)
+    assert not np.shares_memory(t_copy, t)
+    np.testing.assert_allclose(R_copy, np.eye(3, dtype=np.float64))
+    np.testing.assert_allclose(t_copy, np.asarray([1.0, 2.0, 3.0], dtype=np.float64))
 
 
 # Promote a current frame and sync canonical active state

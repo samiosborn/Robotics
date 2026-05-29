@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from core.checks import check_int_ge0_no_bool
+from slam.landmark_state import build_observation_indexes
 
 
 # Check a mutable seed container
@@ -34,30 +35,13 @@ def _build_landmark_id_by_feat_for_kf(seed: dict, n_feat: int, kf: int) -> np.nd
     kf = check_int_ge0_no_bool(kf, name="kf")
     lookup = np.full((int(n_feat),), -1, dtype=np.int64)
 
-    landmarks = seed.get("landmarks", [])
-    if not isinstance(landmarks, list):
-        return lookup
-
-    for landmark in landmarks:
-        if not isinstance(landmark, dict) or "id" not in landmark:
+    indexes = build_observation_indexes(seed, context="seed['landmarks']")
+    for (obs_kf, feat), landmark_id in indexes["landmark_id_by_feature"].items():
+        if int(obs_kf) != int(kf):
             continue
-
-        landmark_id = int(landmark["id"])
-        obs = landmark.get("obs", None)
-        if not isinstance(obs, list):
+        if int(feat) < 0 or int(feat) >= int(n_feat):
             continue
-
-        for observation in obs:
-            if not isinstance(observation, dict):
-                continue
-            if int(observation.get("kf", -1)) != int(kf):
-                continue
-
-            feat = int(observation.get("feat", -1))
-            if feat < 0 or feat >= int(n_feat):
-                continue
-
-            lookup[feat] = int(landmark_id)
+        lookup[int(feat)] = int(landmark_id)
 
     return lookup
 

@@ -281,6 +281,17 @@ def test_active_keyframe_lookup_mirror_mismatch_fails():
         audit_seed_invariants(seed)
 
 
+# Reject active lookup entries with no active-keyframe observation
+def test_active_lookup_without_active_observation_fails():
+    seed = _valid_canonical_seed()
+    seed["landmarks"][0]["obs"] = [
+        ob for ob in seed["landmarks"][0]["obs"] if not (int(ob["kf"]) == 1 and int(ob["feat"]) == 1)
+    ]
+
+    with pytest.raises(ValueError, match="no observation exists for active keyframe-feature pair"):
+        audit_seed_invariants(seed)
+
+
 # Reject malformed canonical pose stores
 def test_malformed_pose_store_fails_validation():
     seed = _valid_canonical_seed()

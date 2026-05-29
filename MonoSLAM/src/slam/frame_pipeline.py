@@ -6,16 +6,64 @@ from typing import Any
 
 import numpy as np
 
-from core.checks import check_int_ge0, check_matrix_3x3, check_positive
+from core.checks import check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
-from slam.keyframe_state import set_active_keyframe_record, store_current_pose
+from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, set_active_keyframe_record, store_current_pose
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
 from slam.map_mutation import merge_map_mutation_reports
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_diagnostic_summary_stats
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
+
+
+# Read feature keypoints for active-state validation
+def _feature_keypoints_for_validation(feats, name: str) -> np.ndarray:
+    if not hasattr(feats, "kps_xy"):
+        raise ValueError(f"{name} must have attribute 'kps_xy'")
+
+    kps_xy = np.asarray(getattr(feats, "kps_xy"), dtype=np.float64)
+    if kps_xy.ndim != 2 or int(kps_xy.shape[1]) < 2:
+        raise ValueError(f"{name}.kps_xy must have shape (N,2+); got {kps_xy.shape}")
+    if not np.isfinite(kps_xy[:, :2]).all():
+        raise ValueError(f"{name}.kps_xy first two columns must be finite")
+
+    return np.asarray(kps_xy[:, :2], dtype=np.float64)
+
+
+# Resolve and validate active keyframe arguments against the seed
+def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyframe_kf: int) -> tuple[int, Any]:
+    active_kf = None
+    if "active_keyframe_kf" in seed or "keyframe_kf" in seed:
+        active_kf = get_active_keyframe_kf(seed)
+        if int(active_kf) != int(keyframe_kf):
+            raise ValueError(
+                f"keyframe_kf argument must match active keyframe state; got {int(keyframe_kf)} and seed active {int(active_kf)}"
+            )
+
+    active_feats = None
+    if "feats1" in seed or "keyframes" in seed or "active_keyframe_kf" in seed:
+        active_feats = get_active_keyframe_features(seed)
+        arg_kps = _feature_keypoints_for_validation(keyframe_feats, "keyframe_feats")
+        active_kps = _feature_keypoints_for_validation(active_feats, "active keyframe feats")
+        if arg_kps.shape != active_kps.shape or not np.allclose(arg_kps, active_kps):
+            raise ValueError("keyframe_feats argument must match active keyframe features in seed")
+
+    if active_kf is None:
+        active_kf = int(keyframe_kf)
+    if active_feats is None:
+        active_feats = keyframe_feats
+
+    return int(active_kf), active_feats
+
+
+# Copy a pose block for accepted-pose storage
+def _copy_pose_blocks(R, t) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        np.asarray(R, dtype=np.float64).copy(),
+        np.asarray(t, dtype=np.float64).reshape(3).copy(),
+    )
 
 
 def _support_basis_from_rescued_pose(
@@ -37,9 +85,19 @@ def _support_basis_from_rescued_pose(
     corrs = pose_out["corrs"]
     landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
     cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
-    support_mask = np.asarray(pose_out.get("pnp_inlier_mask", np.zeros((landmark_ids.size,), dtype=bool)), dtype=bool).reshape(-1)
+    if int(cur_feat_idx.size) != int(landmark_ids.size):
+        raise ValueError(
+            f"pose_out['corrs'].cur_feat_idx must have {landmark_ids.size} entries to match landmark_ids; got {cur_feat_idx.size}"
+        )
+    support_mask = check_mask_bool_N(
+        pose_out.get("pnp_inlier_mask", np.zeros((landmark_ids.size,), dtype=bool)),
+        int(landmark_ids.size),
+        name="pose_out['pnp_inlier_mask']",
+    )
+    if support_mask is None:
+        support_mask = np.zeros((int(landmark_ids.size),), dtype=bool)
     n_feat = int(np.asarray(cur_feats.kps_xy).shape[0])
-    n_corr = min(int(landmark_ids.size), int(cur_feat_idx.size), int(support_mask.size))
+    n_corr = int(landmark_ids.size)
     lookup = np.full((n_feat,), -1, dtype=np.int64)
 
     n_mapped = 0
@@ -378,6 +436,7 @@ def process_frame_against_seed(
     current_kf = int(current_kf)
     if current_kf < -1:
         raise ValueError(f"current_kf must be >= -1; got {current_kf}")
+    keyframe_kf, keyframe_feats = _resolve_active_keyframe_inputs(seed, keyframe_feats, keyframe_kf)
 
     # Check map-growth controls
     min_parallax_deg = check_positive(min_parallax_deg, name="min_parallax_deg", eps=0.0)
@@ -776,10 +835,11 @@ def process_frame_against_seed(
     keyframe_stats = keyframe_out.stats if keyframe_out is not None else {}
 
     seed_out = dict(seed_out)
+    accepted_R, accepted_t = _copy_pose_blocks(pose_out["R"], pose_out["t"])
     seed_out["last_accepted_pose"] = {
         "kf": int(current_kf),
-        "R": np.asarray(pose_out["R"], dtype=np.float64),
-        "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
+        "R": accepted_R,
+        "t": accepted_t,
         "localisation_only": bool(localisation_only_rescue_frame),
     }
     if int(current_kf) >= 0:
@@ -830,7 +890,7 @@ def process_frame_against_seed(
         "tracked_observation_report": tracked_obs_report,
         "map_mutation_report": map_mutation_report,
         "keyframe_out": keyframe_out,
-        "R": np.asarray(pose_out["R"], dtype=np.float64),
-        "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
+        "R": accepted_R.copy(),
+        "t": accepted_t.copy(),
         "stats": stats,
     }

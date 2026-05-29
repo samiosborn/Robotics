@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from core.checks import align_bool_mask_1d, check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_matrix_3x3, check_positive
+from core.checks import check_finite_scalar, check_in_01, check_int_ge0, check_int_gt0, check_mask_bool_N, check_matrix_3x3, check_positive
 from geometry.camera import camera_centre, world_to_camera_points
 from geometry.pose import angle_between_translations
 from geometry.pnp import _pnp_inlier_mask_from_pose, _slice_pnp_correspondences, build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_local_displacement_consistency_mask, pnp_threshold_stability_diagnostic
@@ -20,6 +20,14 @@ _PNP_SUPPORT_RESCUE_LOOSE_THRESHOLD_PX = 12.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX = 20.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_SEED_THRESHOLD_PX = 40.0
 _PNP_SUPPORT_RESCUE_SECOND_STAGE_NUM_TRIALS = 5000
+
+
+# Check a PnP support mask exactly, using empty support for absent masks
+def _check_pnp_mask_or_empty(mask, N, *, name: str) -> np.ndarray:
+    checked = check_mask_bool_N(mask, N, name=name)
+    if checked is None:
+        return np.zeros((int(N),), dtype=bool)
+    return checked
 
 
 def _pre_pnp_support_quality_veto_stats(
@@ -211,7 +219,7 @@ def _attempt_pnp_spatial_support_rescue(
     temporal_max_translation_direction_deg: float = 120.0,
     temporal_max_camera_centre_direction_deg: float = 120.0,
 ) -> dict[str, Any]:
-    base_inlier_mask = align_bool_mask_1d(base_inlier_mask, int(corrs.X_w.shape[1]), name="base_pnp_inlier_mask")
+    base_inlier_mask = _check_pnp_mask_or_empty(base_inlier_mask, int(corrs.X_w.shape[1]), name="base_pnp_inlier_mask")
     base_n_inliers = int(np.sum(base_inlier_mask))
     out: dict[str, Any] = {
         "attempted": False,
@@ -330,7 +338,7 @@ def _attempt_pnp_spatial_support_rescue(
             return stage_out
 
         loose_stats = loose_stats if isinstance(loose_stats, dict) else {}
-        loose_inlier_mask = align_bool_mask_1d(loose_inlier_mask, int(corrs.X_w.shape[1]), name="loose_pnp_inlier_mask")
+        loose_inlier_mask = _check_pnp_mask_or_empty(loose_inlier_mask, int(corrs.X_w.shape[1]), name="loose_pnp_inlier_mask")
         stage_out["loose_pose_ok"] = bool((R_loose is not None) and (t_loose is not None))
         stage_out["loose_inliers"] = int(np.sum(loose_inlier_mask))
         stage_out["loose_reason"] = loose_stats.get("reason", None)
@@ -377,7 +385,7 @@ def _attempt_pnp_spatial_support_rescue(
                     threshold_px=float(_PNP_SUPPORT_RESCUE_SECOND_STAGE_LOOSE_THRESHOLD_PX),
                     eps=float(eps),
                 )
-                seeded_20px_mask = align_bool_mask_1d(
+                seeded_20px_mask = _check_pnp_mask_or_empty(
                     seeded_20px_mask,
                     int(corrs.X_w.shape[1]),
                     name="seeded_20px_inlier_mask",
@@ -426,7 +434,7 @@ def _attempt_pnp_spatial_support_rescue(
             threshold_px=float(loose_threshold_px),
             eps=float(eps),
         )
-        loose_subset_mask = align_bool_mask_1d(loose_subset_mask, int(corrs.X_w.shape[1]), name="loose_subset_mask")
+        loose_subset_mask = _check_pnp_mask_or_empty(loose_subset_mask, int(corrs.X_w.shape[1]), name="loose_subset_mask")
         subset_count = int(np.sum(loose_subset_mask))
         stage_out["subset_count"] = int(subset_count)
 
@@ -542,7 +550,7 @@ def _attempt_pnp_spatial_support_rescue(
             return stage_out
 
         subset_strict_stats = subset_strict_stats if isinstance(subset_strict_stats, dict) else {}
-        subset_strict_mask = align_bool_mask_1d(subset_strict_mask, int(corrs_subset.X_w.shape[1]), name="subset_strict_inlier_mask")
+        subset_strict_mask = _check_pnp_mask_or_empty(subset_strict_mask, int(corrs_subset.X_w.shape[1]), name="subset_strict_inlier_mask")
         stage_out["subset_strict_inliers"] = int(np.sum(subset_strict_mask))
         stage_out["subset_strict_reason"] = subset_strict_stats.get("reason", None)
 
@@ -562,7 +570,7 @@ def _attempt_pnp_spatial_support_rescue(
             threshold_px=float(threshold_px),
             eps=float(eps),
         )
-        rescued_full_mask = align_bool_mask_1d(rescued_full_mask, int(corrs.X_w.shape[1]), name="rescued_full_mask")
+        rescued_full_mask = _check_pnp_mask_or_empty(rescued_full_mask, int(corrs.X_w.shape[1]), name="rescued_full_mask")
         rescued_full_d_sq = np.asarray(rescued_full_d_sq, dtype=np.float64).reshape(-1)
         rescued_full_inliers = int(np.sum(rescued_full_mask))
         stage_out["fullset_strict_inliers"] = int(rescued_full_inliers)
@@ -1091,8 +1099,8 @@ def estimate_pose_from_seed(
     if isinstance(pnp_stats, dict):
         stats.update(pnp_stats)
 
-    # Build an aligned PnP inlier mask
-    pnp_inlier_mask = align_bool_mask_1d(pnp_inlier_mask, n_corr)
+    # Require the solver inlier mask to match the correspondence count
+    pnp_inlier_mask = _check_pnp_mask_or_empty(pnp_inlier_mask, n_corr, name="pnp_inlier_mask")
     stats.update({"n_pnp_inliers": int(pnp_inlier_mask.sum())})
 
     # Score spatial and component support when the current image size is available
@@ -1230,7 +1238,7 @@ def estimate_pose_from_seed(
         if bool(rescue_out.get("succeeded", False)):
             R = np.asarray(rescue_out["R"], dtype=np.float64)
             t = np.asarray(rescue_out["t"], dtype=np.float64).reshape(3)
-            pnp_inlier_mask = align_bool_mask_1d(rescue_out["pnp_inlier_mask"], n_corr, name="rescued_pnp_inlier_mask")
+            pnp_inlier_mask = _check_pnp_mask_or_empty(rescue_out["pnp_inlier_mask"], n_corr, name="rescued_pnp_inlier_mask")
             stats.update(rescue_out.get("pnp_stats", {}))
             stats.update({"n_pnp_inliers": int(np.sum(pnp_inlier_mask))})
             stats.update(rescue_out.get("support_stats", {}))

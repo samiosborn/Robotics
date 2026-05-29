@@ -4,8 +4,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from geometry.pnp import PnPCorrespondences
+from geometry.pnp import PnPCorrespondences, build_pnp_correspondences_with_stats, pnp_inlier_spatial_coverage
 from slam.invariants import audit_seed_invariants
 from slam.keyframe_state import initialise_canonical_keyframe_state
 from slam.map_mutation import (
@@ -158,6 +159,43 @@ def test_tracked_observation_append_reports_added_observation():
     assert report["removed_landmarks"] == 0
     assert report["updated_active_lookup_entries"] == 0
     assert seed["last_tracked_observation_append_report"] is report
+
+
+# Reject silently padded or truncated PnP masks during observation append
+def test_tracked_observation_append_rejects_misaligned_pnp_mask():
+    seed = _seed()
+    pose_out = _pose_out(
+        landmark_ids=[0, 0],
+        cur_feat_idx=[4, 5],
+        x_cur=np.asarray([[11.0, 12.0], [21.0, 22.0]], dtype=np.float64),
+        inlier_mask=[True],
+    )
+
+    with pytest.raises(ValueError, match="pose_out\\['pnp_inlier_mask'\\] must have shape"):
+        append_tracked_observations_to_seed(seed, pose_out, current_kf=2, return_report=True)
+
+
+# Reject silently padded or truncated support masks in PnP diagnostics
+def test_pnp_spatial_coverage_rejects_misaligned_mask():
+    x_cur = np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=np.float64)
+
+    with pytest.raises(ValueError, match="pnp_inlier_mask must have shape"):
+        pnp_inlier_spatial_coverage(x_cur, np.asarray([True], dtype=bool), (100, 100))
+
+
+# Reject malformed observations as PnP pose support
+def test_pnp_correspondence_build_rejects_malformed_observation_support():
+    seed = _seed()
+    seed["landmarks"][0]["obs"].append({"kf": 2, "feat": 4})
+    track_out = {
+        "kf_feat_idx": np.asarray([0], dtype=np.int64),
+        "cur_feat_idx": np.asarray([4], dtype=np.int64),
+        "xy_kf": np.asarray([[10.0, 20.0]], dtype=np.float64),
+        "xy_cur": np.asarray([[11.0, 21.0]], dtype=np.float64),
+    }
+
+    with pytest.raises(ValueError, match="missing required key 'xy'"):
+        build_pnp_correspondences_with_stats(seed, track_out, min_landmark_observations=2)
 
 
 # Report one duplicate tracked observation skip

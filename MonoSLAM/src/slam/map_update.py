@@ -6,11 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import align_bool_mask_1d, as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
+from core.checks import as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre, projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
 from slam.keyframe_state import get_active_landmark_lookup, sync_active_keyframe_mirrors_if_present
-from slam.landmark_state import add_landmark_observation, build_landmark_id_index, build_observation_indexes, create_landmark_record, get_landmarks, next_landmark_id
+from slam.landmark_state import add_landmark_observation, build_landmark_id_index, build_observation_indexes, count_valid_landmark_observations, create_landmark_record, get_landmarks, next_landmark_id
 from slam.map_mutation import new_map_mutation_report
 
 
@@ -142,12 +142,14 @@ def append_tracked_observations_to_seed(
             f"pose_out['corrs'].x_cur must have {N} columns to match pose_out['corrs'].landmark_ids; got {x_cur.shape[1]}"
         )
 
-    # Align the PnP inlier mask to the correspondence count
-    pnp_inlier_mask = align_bool_mask_1d(
+    # Require the PnP inlier mask to match the correspondence count
+    pnp_inlier_mask = check_mask_bool_N(
         pose_out["pnp_inlier_mask"],
         N,
         name="pose_out['pnp_inlier_mask']",
     )
+    if pnp_inlier_mask is None:
+        pnp_inlier_mask = np.zeros((N,), dtype=bool)
 
     # Read seed landmarks and disposable graph indexes
     landmarks = list(get_landmarks(seed))
@@ -295,10 +297,8 @@ def append_tracked_observations_to_seed(
                 continue
 
             birth_source = lm.get("birth_source", None)
+            n_obs = count_valid_landmark_observations(lm, context="stale map-growth landmark")
             obs = lm.get("obs", None)
-            n_obs = 0
-            if isinstance(obs, list):
-                n_obs = sum(1 for ob in obs if isinstance(ob, dict))
 
             should_remove = (
                 birth_source == "map_growth"

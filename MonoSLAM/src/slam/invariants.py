@@ -559,7 +559,12 @@ def _audit_active_keyframe(seed: dict[str, Any], report: dict[str, Any], context
             continue
 
         observed_landmark_id = assignment_by_kf_feat.get((int(keyframe_kf), int(feat)), None)
-        if observed_landmark_id is not None and int(observed_landmark_id) != int(landmark_id):
+        if observed_landmark_id is None:
+            _add_error(
+                report,
+                f"{context}['landmark_id_by_feat1'][{feat}] maps to landmark id {landmark_id}, but no observation exists for active keyframe-feature pair (kf={keyframe_kf}, feat={feat})",
+            )
+        elif int(observed_landmark_id) != int(landmark_id):
             _add_error(
                 report,
                 f"{context}['landmark_id_by_feat1'][{feat}] maps to landmark id {landmark_id}, but observation (kf={keyframe_kf}, feat={feat}) maps to landmark id {observed_landmark_id}",

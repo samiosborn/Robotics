@@ -5,13 +5,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import align_bool_mask_1d, check_3xN_2xN_cols, check_3xN_pair, check_int_ge0, check_int_gt0, check_matrix_3x3, check_points_2xN, check_points_3xN, check_positive
+from core.checks import check_3xN_2xN_cols, check_3xN_pair, check_int_ge0, check_int_gt0, check_mask_bool_N, check_matrix_3x3, check_points_2xN, check_points_3xN, check_positive
 from geometry.camera import camera_centre, pixel_to_normalised, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
 from geometry.lie import hat
 from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations, apply_left_pose_increment_wc
 from slam.keyframe_state import get_active_landmark_lookup
-from slam.landmark_state import build_landmark_id_index, count_landmark_observations
+from slam.landmark_state import build_landmark_id_index, count_valid_landmark_observations
 
 
 # Bundle of 2D–3D correspondences for PnP
@@ -27,6 +27,14 @@ class PnPCorrespondences:
     cur_feat_idx: np.ndarray
     # Keyframe feature index per correspondence as (N,)
     kf_feat_idx: np.ndarray
+
+
+# Check a geometry mask exactly, using empty support for absent masks
+def _check_mask_bool_N_or_empty(mask, N, *, name: str) -> np.ndarray:
+    checked = check_mask_bool_N(mask, N, name=name)
+    if checked is None:
+        return np.zeros((int(N),), dtype=bool)
+    return checked
 
 
 # Read the explicit birth source for a landmark
@@ -231,7 +239,7 @@ def pnp_inlier_spatial_coverage(x_cur, inlier_mask, image_shape, *, grid_cols: i
     # Check current image points and inlier mask
     x_cur = check_points_2xN(x_cur, name="x_cur", dtype=float, finite=True)
     N = int(x_cur.shape[1])
-    inlier_mask = align_bool_mask_1d(inlier_mask, N, name="pnp_inlier_mask")
+    inlier_mask = _check_mask_bool_N_or_empty(inlier_mask, N, name="pnp_inlier_mask")
 
     # Start with an empty occupancy grid
     grid = [[0 for _ in range(int(grid_cols))] for _ in range(int(grid_rows))]
@@ -307,7 +315,7 @@ def pnp_inlier_component_support(x_cur, inlier_mask, image_shape, *, radius_px: 
     # Check current image points and inlier mask
     x_cur = check_points_2xN(x_cur, name="x_cur", dtype=float, finite=True)
     N = int(x_cur.shape[1])
-    inlier_mask = align_bool_mask_1d(inlier_mask, N, name="pnp_inlier_mask")
+    inlier_mask = _check_mask_bool_N_or_empty(inlier_mask, N, name="pnp_inlier_mask")
 
     # Collect finite inlier pixels
     xy = np.asarray(x_cur[:, inlier_mask].T, dtype=np.float64)
@@ -1045,7 +1053,7 @@ def build_pnp_correspondences_with_stats(
             continue
 
         # Classify the landmark origin and update raw counts
-        n_obs = count_landmark_observations(lm)
+        n_obs = count_valid_landmark_observations(lm, context=f"seed['landmarks'][id={lm_id}]")
         bootstrap_born = _landmark_is_bootstrap_born(lm)
 
         stats["n_corr_raw"] += 1
@@ -1126,7 +1134,7 @@ def build_pnp_correspondences_with_stats(
             max_median_residual_px=float(local_consistency_max_median_residual_px),
             min_keep=int(local_consistency_min_keep),
         )
-        keep_mask = align_bool_mask_1d(keep_mask, int(X_w.shape[1]), name="pnp_local_consistency_keep_mask")
+        keep_mask = _check_mask_bool_N_or_empty(keep_mask, int(X_w.shape[1]), name="pnp_local_consistency_keep_mask")
         stats["pnp_local_consistency_filter_evaluated"] = True
         stats["pnp_local_consistency_filter_applied"] = True
         stats["pnp_local_consistency_filter_removed"] = int(np.sum(~keep_mask))
@@ -1149,7 +1157,7 @@ def build_pnp_correspondences_with_stats(
             max_points_per_radius=int(spatial_thinning_max_points_per_radius),
             min_keep=int(spatial_thinning_min_keep),
         )
-        keep_mask = align_bool_mask_1d(keep_mask, int(corrs.X_w.shape[1]), name="pnp_spatial_thinning_keep_mask")
+        keep_mask = _check_mask_bool_N_or_empty(keep_mask, int(corrs.X_w.shape[1]), name="pnp_spatial_thinning_keep_mask")
         stats["pnp_spatial_thinning_filter_evaluated"] = True
         stats["pnp_spatial_thinning_filter_applied"] = True
         stats["pnp_spatial_thinning_filter_removed"] = int(np.sum(~keep_mask))
@@ -1753,7 +1761,7 @@ def pnp_threshold_stability_diagnostic(
 
     # Read accepted pose and support
     ref_ok = (R_ref is not None) and (t_ref is not None)
-    ref_mask = align_bool_mask_1d(ref_inlier_mask, N, name="ref_inlier_mask")
+    ref_mask = _check_mask_bool_N_or_empty(ref_inlier_mask, N, name="ref_inlier_mask")
     ref_inliers = int(np.sum(ref_mask))
 
     # Start with an unavailable comparison
@@ -1830,7 +1838,7 @@ def pnp_threshold_stability_diagnostic(
     # Read comparison pose and support
     cmp_stats = cmp_stats if isinstance(cmp_stats, dict) else {}
     compare_ok = (R_cmp is not None) and (t_cmp is not None)
-    cmp_mask = align_bool_mask_1d(cmp_mask, N, name="compare_inlier_mask")
+    cmp_mask = _check_mask_bool_N_or_empty(cmp_mask, N, name="compare_inlier_mask")
     compare_inliers = int(np.sum(cmp_mask))
     overlap = ref_mask & cmp_mask
     union = ref_mask | cmp_mask

@@ -252,13 +252,30 @@ def add_landmark_observation(
     return True
 
 
-# Count valid dict observations on one landmark
+# Count dict observation entries on one landmark
 def count_landmark_observations(landmark) -> int:
     landmark = check_dict(landmark, name="landmark")
     obs = landmark.get("obs", None)
     if not isinstance(obs, list):
         return 0
     return int(sum(1 for observation in obs if isinstance(observation, dict)))
+
+
+# Count checked observations on one landmark
+def count_valid_landmark_observations(landmark, *, context: str = "landmark") -> int:
+    landmark = check_dict(landmark, name=context)
+    obs = landmark.get("obs", None)
+    if obs is None:
+        return 0
+    if not isinstance(obs, list):
+        raise ValueError(f"{context}['obs'] must be a list when present")
+
+    n_obs = 0
+    for j, observation in enumerate(obs):
+        _check_observation_record(observation, name=f"{context}['obs'][{j}]")
+        n_obs += 1
+
+    return int(n_obs)
 
 
 # Build a mutable landmark record

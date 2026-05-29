@@ -10,6 +10,7 @@ from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus,
 from geometry.camera import camera_centre
 from geometry.rotation import angle_between_rotmats
 from slam.keyframe_state import set_active_keyframe_record
+from slam.landmark_state import build_observation_indexes, iter_landmark_observations
 from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
@@ -53,54 +54,17 @@ def _build_landmark_id_by_feat_for_kf(seed: dict, n_feat: int, kf_index: int) ->
     n_feat = check_int_ge0(n_feat, name="n_feat")
     kf_index = check_int_ge0(kf_index, name="kf_index")
 
-    # Read landmarks
-    landmarks = seed["landmarks"]
-    if not isinstance(landmarks, list):
-        raise ValueError("seed['landmarks'] must be a list")
-
     # Initialise lookup as unmapped
     landmark_id_by_feat = np.full((n_feat,), -1, dtype=np.int64)
 
-    # Scan all landmarks for observations in this keyframe
-    for lm in landmarks:
-        # Skip malformed landmarks
-        if not isinstance(lm, dict):
+    # Scan checked observation assignments for this keyframe
+    indexes = build_observation_indexes(seed, context="seed['landmarks']")
+    for (obs_kf, feat), landmark_id in indexes["landmark_id_by_feature"].items():
+        if int(obs_kf) != int(kf_index):
             continue
-        if "id" not in lm:
+        if int(feat) < 0 or int(feat) >= int(n_feat):
             continue
-
-        # Read landmark id
-        lm_id = int(lm["id"])
-
-        # Read observation list
-        obs = lm.get("obs", None)
-        if not isinstance(obs, list):
-            continue
-
-        # Scan observations for this keyframe
-        for ob in obs:
-            # Skip malformed observations
-            if not isinstance(ob, dict):
-                continue
-
-            # Keep only observations from the requested keyframe
-            if int(ob.get("kf", -1)) != kf_index:
-                continue
-
-            # Read feature index
-            feat = int(ob.get("feat", -1))
-            if feat < 0 or feat >= n_feat:
-                continue
-
-            # Reject conflicting assignments
-            prev = int(landmark_id_by_feat[feat])
-            if prev >= 0 and prev != lm_id:
-                raise ValueError(
-                    f"Feature {feat} in keyframe {kf_index} is assigned to multiple landmarks: {prev} and {lm_id}"
-                )
-
-            # Store the landmark id for this feature
-            landmark_id_by_feat[feat] = lm_id
+        landmark_id_by_feat[int(feat)] = int(landmark_id)
 
     return landmark_id_by_feat
 
@@ -113,34 +77,14 @@ def count_linked_landmarks_for_kf(seed: dict, kf_index: int) -> int:
     # Check keyframe index
     kf_index = check_int_ge0(kf_index, name="kf_index")
 
-    # Read landmarks
-    landmarks = seed["landmarks"]
-    if not isinstance(landmarks, list):
-        raise ValueError("seed['landmarks'] must be a list")
+    # Count linked landmarks from checked observations
+    linked_ids = {
+        int(landmark_id)
+        for landmark_id, obs_kf, _, _ in iter_landmark_observations(seed, context="seed['landmarks']")
+        if int(obs_kf) == int(kf_index)
+    }
 
-    # Count linked landmarks
-    n_linked = 0
-    for lm in landmarks:
-        if not isinstance(lm, dict):
-            continue
-
-        obs = lm.get("obs", None)
-        if not isinstance(obs, list):
-            continue
-
-        linked = False
-        for ob in obs:
-            if not isinstance(ob, dict):
-                continue
-            if int(ob.get("kf", -1)) != int(kf_index):
-                continue
-            linked = True
-            break
-
-        if linked:
-            n_linked += 1
-
-    return int(n_linked)
+    return int(len(linked_ids))
 
 
 # Summarise spatial coverage of landmark observations in one frame
@@ -171,34 +115,15 @@ def _linked_landmark_observation_coverage(seed: dict, kf_index: int, image_shape
     if H <= 0 or W <= 0:
         raise ValueError(f"image_shape height and width must be positive; got {image_shape}")
 
-    landmarks = seed["landmarks"]
-    if not isinstance(landmarks, list):
-        raise ValueError("seed['landmarks'] must be a list")
-
     xy_rows: list[np.ndarray] = []
-    for lm in landmarks:
-        if not isinstance(lm, dict):
+    seen_landmark_ids: set[int] = set()
+    for landmark_id, obs_kf, _, xy in iter_landmark_observations(seed, context="seed['landmarks']"):
+        if int(obs_kf) != int(kf_index):
             continue
-
-        obs = lm.get("obs", None)
-        if not isinstance(obs, list):
+        if int(landmark_id) in seen_landmark_ids:
             continue
-
-        for ob in obs:
-            if not isinstance(ob, dict):
-                continue
-            if int(ob.get("kf", -1)) != int(kf_index):
-                continue
-
-            xy = np.asarray(ob.get("xy", np.zeros((2,), dtype=np.float64)), dtype=np.float64).reshape(-1)
-            if xy.size < 2:
-                continue
-            xy = np.asarray(xy[:2], dtype=np.float64)
-            if not np.isfinite(xy).all():
-                continue
-
-            xy_rows.append(xy.reshape(1, 2))
-            break
+        seen_landmark_ids.add(int(landmark_id))
+        xy_rows.append(np.asarray(xy, dtype=np.float64).reshape(1, 2))
 
     if len(xy_rows) == 0:
         return {
