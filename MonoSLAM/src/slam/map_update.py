@@ -9,6 +9,7 @@ import numpy as np
 from core.checks import align_bool_mask_1d, as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre, projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
+from slam.keyframe_state import sync_active_keyframe_mirrors_if_present
 
 
 # Bundle of tracked correspondences that are eligible to become new landmarks
@@ -471,6 +472,7 @@ def append_tracked_observations_to_seed(
     seed["landmarks"] = landmarks
     if landmark_id_by_feat1 is not None:
         seed["landmark_id_by_feat1"] = landmark_id_by_feat1
+        sync_active_keyframe_mirrors_if_present(seed)
     stats["n_landmarks_with_obs_current_kf_after_append"] = _count_landmarks_with_current_observation()
     seed["last_tracked_observation_append_stats"] = stats
 
@@ -956,6 +958,7 @@ def append_new_landmarks_to_seed(
     # Pack back into the seed
     seed["landmarks"] = landmarks
     seed["landmark_id_by_feat1"] = landmark_id_by_feat1
+    sync_active_keyframe_mirrors_if_present(seed)
 
     # Store append diagnostics
     seed["last_append_stats"] = {

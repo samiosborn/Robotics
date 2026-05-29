@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from core.checks import check_2xN_pair, check_matrix_3x3, check_required_keys, check_vector_3
+from slam.keyframe_state import initialise_canonical_keyframe_state
 
 
 # Build a two-view seed map from validated bootstrap outputs
@@ -52,13 +53,16 @@ def build_two_view_seed(x1, x2, *, idx_init, X_valid, R1, t1) -> dict:
     if idx_init.size > 0:
         mask_init[idx_init] = True
 
-    return {
+    seed = {
         "T_WC0": (R0, t0),
         "T_WC1": (R1, t1),
+        "keyframe_kf": 1,
         "landmarks": landmarks,
         "mask_init": mask_init,
         "idx_init": idx_init,
     }
+
+    return initialise_canonical_keyframe_state(seed)
 
 
 # Read the frozen keyframe pose stored inside the seed
@@ -149,4 +153,4 @@ def attach_feature_bookkeeping_to_seed(seed, feats0, feats1, matches):
     seed["feats1"] = feats1
     seed["matches01"] = matches
 
-    return seed
+    return initialise_canonical_keyframe_state(seed)

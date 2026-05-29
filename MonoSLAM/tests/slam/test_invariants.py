@@ -60,6 +60,29 @@ def _valid_seed_with_landmarks():
     }
 
 
+# Build a valid seed with canonical keyframe stores
+def _valid_canonical_seed(*, active_lookup=None):
+    seed = _valid_seed_with_landmarks()
+    if active_lookup is not None:
+        seed["landmark_id_by_feat1"] = active_lookup
+
+    seed["feats0"] = _features([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]])
+    seed["poses"] = {
+        0: seed["T_WC0"],
+        1: seed["T_WC1"],
+    }
+    seed["keyframes"] = {
+        1: {
+            "kf": 1,
+            "pose": seed["T_WC1"],
+            "feats": seed["feats1"],
+            "landmark_id_by_feat": seed["landmark_id_by_feat1"],
+        }
+    }
+    seed["active_keyframe_kf"] = 1
+    return seed
+
+
 # Accept a partial seed with no optional structures
 def test_valid_minimal_seed():
     report = audit_seed_invariants({}, context="minimal")
@@ -199,3 +222,71 @@ def test_strict_false_returns_errors_instead_of_raising():
 
     assert len(report["errors"]) == 1
     assert "X_w" in report["errors"][0]
+
+
+# Accept canonical stores with NumPy -1 sentinel lookup
+def test_canonical_numpy_lookup_with_sentinel_is_accepted():
+    report = audit_seed_invariants(_valid_canonical_seed())
+
+    assert report["num_poses"] == 2
+    assert report["num_keyframes"] == 1
+    assert report["errors"] == []
+
+
+# Accept canonical stores with dict lookup entries
+def test_canonical_dict_lookup_is_accepted():
+    seed = _valid_canonical_seed(active_lookup={1: 10, 2: 11})
+    seed["keyframes"][1]["landmark_id_by_feat"] = seed["landmark_id_by_feat1"]
+
+    report = audit_seed_invariants(seed)
+
+    assert report["num_active_lookup_entries"] == 2
+    assert report["errors"] == []
+
+
+# Reject active keyframe ids that are absent from the store
+def test_active_keyframe_missing_from_keyframe_store_fails():
+    seed = _valid_canonical_seed()
+    seed["active_keyframe_kf"] = 3
+    seed["keyframe_kf"] = 3
+
+    with pytest.raises(ValueError, match="existing keyframe"):
+        audit_seed_invariants(seed)
+
+
+# Reject keyframe records whose kf field mismatches the dict key
+def test_keyframe_record_kf_mismatch_fails():
+    seed = _valid_canonical_seed()
+    seed["keyframes"][1]["kf"] = 2
+
+    with pytest.raises(ValueError, match="must match dict key 1"):
+        audit_seed_invariants(seed)
+
+
+# Reject active canonical pose mirrors that diverge from legacy T_WC1
+def test_active_keyframe_pose_mirror_mismatch_fails():
+    seed = _valid_canonical_seed()
+    seed["keyframes"][1]["pose"] = _pose_rt(9.0)
+
+    with pytest.raises(ValueError, match="active keyframe record pose"):
+        audit_seed_invariants(seed)
+
+
+# Reject malformed canonical pose stores
+def test_malformed_pose_store_fails_validation():
+    seed = _valid_canonical_seed()
+    seed["poses"][1] = np.eye(3, dtype=np.float64)
+
+    with pytest.raises(ValueError, match="poses.*shape"):
+        audit_seed_invariants(seed)
+
+
+# Return canonical-store errors when strict mode is disabled
+def test_strict_false_reports_canonical_store_errors():
+    seed = _valid_canonical_seed()
+    seed["keyframes"][1]["kf"] = 2
+
+    report = audit_seed_invariants(seed, strict=False)
+
+    assert len(report["errors"]) >= 1
+    assert any("must match dict key 1" in error for error in report["errors"])

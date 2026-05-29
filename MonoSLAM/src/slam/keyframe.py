@@ -9,6 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre
 from geometry.rotation import angle_between_rotmats
+from slam.keyframe_state import sync_active_keyframe_mirrors
 from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
@@ -458,6 +459,9 @@ def promote_frame_to_keyframe(
 
     # Store the current keyframe id for bookkeeping
     seed["keyframe_kf"] = int(current_kf)
+
+    # Keep canonical active state aligned with legacy mirrors
+    sync_active_keyframe_mirrors(seed)
 
     # Store promotion diagnostics
     seed["last_keyframe_promotion"] = {
