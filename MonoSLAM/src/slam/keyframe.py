@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre
 from geometry.rotation import angle_between_rotmats
-from slam.keyframe_state import sync_active_keyframe_mirrors
+from slam.keyframe_state import set_active_keyframe_record
 from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
@@ -445,23 +445,14 @@ def promote_frame_to_keyframe(
     # Build a fresh feature-to-landmark lookup for this new keyframe
     landmark_id_by_feat1 = _build_landmark_id_by_feat_for_kf(seed, n_feat, current_kf)
 
-    # Store the new keyframe pose
-    seed["T_WC1"] = (
+    # Build the new keyframe pose
+    T_WC1 = (
         np.asarray(R_cur, dtype=np.float64),
         np.asarray(t_cur, dtype=np.float64).reshape(3,),
     )
 
-    # Store the new reference feature bundle
-    seed["feats1"] = cur_feats
-
-    # Store the new keyframe feature-to-landmark lookup
-    seed["landmark_id_by_feat1"] = landmark_id_by_feat1
-
-    # Store the current keyframe id for bookkeeping
-    seed["keyframe_kf"] = int(current_kf)
-
-    # Keep canonical active state aligned with legacy mirrors
-    sync_active_keyframe_mirrors(seed)
+    # Store legacy mirrors and sync canonical active state
+    set_active_keyframe_record(seed, int(current_kf), T_WC1, cur_feats, landmark_id_by_feat1)
 
     # Store promotion diagnostics
     seed["last_keyframe_promotion"] = {

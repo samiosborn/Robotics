@@ -11,6 +11,7 @@ from geometry.camera import camera_centre, world_to_camera_points
 from geometry.pose import angle_between_translations
 from geometry.pnp import _pnp_inlier_mask_from_pose, _slice_pnp_correspondences, build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_local_displacement_consistency_mask, pnp_threshold_stability_diagnostic
 from geometry.rotation import angle_between_rotmats
+from slam.keyframe_state import get_active_keyframe_features
 from slam.pnp_stats import landmark_observation_histogram, pnp_support_diagnostic_stats, pnp_support_gate_stats, pnp_threshold_stability_summary_stats
 
 
@@ -60,7 +61,10 @@ def _pre_pnp_support_quality_veto_stats(
         out["reason"] = "support_not_near_minimum"
         return out
 
-    feats1 = seed.get("feats1", None) if isinstance(seed, dict) else None
+    try:
+        feats1 = get_active_keyframe_features(seed)
+    except ValueError:
+        feats1 = None
     kps_xy = getattr(feats1, "kps_xy", None)
     if kps_xy is None:
         out["reason"] = "keyframe_features_unavailable"

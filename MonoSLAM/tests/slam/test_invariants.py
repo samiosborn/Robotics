@@ -272,6 +272,15 @@ def test_active_keyframe_pose_mirror_mismatch_fails():
         audit_seed_invariants(seed)
 
 
+# Reject active canonical lookup mirrors that diverge from legacy lookup
+def test_active_keyframe_lookup_mirror_mismatch_fails():
+    seed = _valid_canonical_seed()
+    seed["keyframes"][1]["landmark_id_by_feat"] = np.asarray([-1, 11, 10], dtype=np.int64)
+
+    with pytest.raises(ValueError, match="active keyframe record lookup"):
+        audit_seed_invariants(seed)
+
+
 # Reject malformed canonical pose stores
 def test_malformed_pose_store_fails_validation():
     seed = _valid_canonical_seed()

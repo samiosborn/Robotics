@@ -160,6 +160,52 @@ def get_active_keyframe_record(seed) -> dict:
     return record
 
 
+# Read one field from the active keyframe record
+def _get_active_record_field(seed, field: str, legacy_key: str):
+    seed = _check_seed_dict(seed)
+    has_canonical_active = "active_keyframe_kf" in seed or "keyframes" in seed
+    if not bool(has_canonical_active):
+        if legacy_key not in seed:
+            raise ValueError(f"seed is missing '{legacy_key}' for active keyframe access")
+        return seed[legacy_key]
+
+    active_kf = get_active_keyframe_kf(seed)
+    record = get_active_keyframe_record(seed)
+    if field not in record:
+        raise ValueError(f"seed['keyframes'][{active_kf}] is missing '{field}'")
+
+    return record[field]
+
+
+# Read the active keyframe pose
+def get_active_keyframe_pose(seed):
+    return _get_active_record_field(seed, "pose", "T_WC1")
+
+
+# Read the active keyframe feature bundle
+def get_active_keyframe_features(seed):
+    return _get_active_record_field(seed, "feats", "feats1")
+
+
+# Read the active keyframe landmark lookup
+def get_active_landmark_lookup(seed):
+    return _get_active_record_field(seed, "landmark_id_by_feat", "landmark_id_by_feat1")
+
+
+# Store a new active keyframe through legacy mirrors
+def set_active_keyframe_record(seed, kf, pose, feats, landmark_id_by_feat) -> dict:
+    seed = _check_seed_dict(seed)
+    kf = check_int_ge0_no_bool(kf, name="kf")
+
+    seed["T_WC1"] = pose
+    seed["feats1"] = feats
+    seed["landmark_id_by_feat1"] = landmark_id_by_feat
+    seed["keyframe_kf"] = int(kf)
+    sync_active_keyframe_mirrors(seed)
+
+    return get_active_keyframe_record(seed)
+
+
 # Sync canonical active state from legacy mirrors
 def sync_active_keyframe_mirrors(seed) -> dict:
     seed = _check_seed_dict(seed)
@@ -200,9 +246,12 @@ def store_current_pose(seed, current_kf: int, R_cur, t_cur) -> dict:
     current_kf = check_int_ge0_no_bool(current_kf, name="current_kf")
 
     poses = ensure_pose_store(seed)
-    active_kf = seed.get("active_keyframe_kf", seed.get("keyframe_kf", None))
+    try:
+        active_kf = get_active_keyframe_kf(seed)
+    except ValueError:
+        active_kf = None
     if active_kf is not None and int(active_kf) == int(current_kf) and "T_WC1" in seed:
-        poses[int(current_kf)] = seed["T_WC1"]
+        poses[int(current_kf)] = get_active_keyframe_pose(seed)
         return seed
 
     poses[int(current_kf)] = (
@@ -218,3 +267,10 @@ def validate_keyframe_store(seed, *, context="keyframe_store") -> dict:
     from slam.invariants import audit_seed_invariants
 
     return audit_seed_invariants(seed, context=str(context))
+
+
+# Validate the active keyframe mirrors through invariants
+def validate_active_keyframe_state(seed, *, context="active_keyframe") -> dict:
+    from slam.invariants import audit_active_keyframe_lookup
+
+    return audit_active_keyframe_lookup(seed, context=str(context))

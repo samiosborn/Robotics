@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 
 from core.checks import check_2xN_pair, check_matrix_3x3, check_required_keys, check_vector_3
-from slam.keyframe_state import initialise_canonical_keyframe_state
+from slam.keyframe_state import get_active_keyframe_pose, initialise_canonical_keyframe_state
 
 
 # Build a two-view seed map from validated bootstrap outputs
@@ -71,7 +71,7 @@ def seed_keyframe_pose(seed: dict) -> tuple[np.ndarray, np.ndarray]:
     seed = check_required_keys(seed, {"T_WC1"}, name="seed")
 
     # Read stored pose tuple
-    T_WC1 = seed["T_WC1"]
+    T_WC1 = get_active_keyframe_pose(seed)
     if not isinstance(T_WC1, (tuple, list)) or len(T_WC1) != 2:
         raise ValueError("seed['T_WC1'] must be a length-2 tuple/list (R, t)")
 

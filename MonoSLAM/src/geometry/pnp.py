@@ -10,6 +10,7 @@ from geometry.camera import camera_centre, pixel_to_normalised, reprojection_err
 from geometry.lie import hat
 from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations, apply_left_pose_increment_wc
+from slam.keyframe_state import get_active_landmark_lookup
 
 # Bundle of 2D–3D correspondences for PnP
 @dataclass(frozen=True)
@@ -939,10 +940,10 @@ def build_pnp_correspondences_with_stats(
     )
 
     # Read landmark id map from keyframe features to landmarks
-    landmark_id_by_feat1 = np.asarray(
-        seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)),
-        dtype=np.int64,
-    ).reshape(-1)
+    landmark_lookup_raw = np.zeros((0,), dtype=np.int64)
+    if "landmark_id_by_feat1" in seed or "active_keyframe_kf" in seed or "keyframes" in seed:
+        landmark_lookup_raw = get_active_landmark_lookup(seed)
+    landmark_id_by_feat1 = np.asarray(landmark_lookup_raw, dtype=np.int64).reshape(-1)
 
     # Read tracked feature indices
     kf_feat_idx = np.asarray(

@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import align_bool_mask_1d, as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre, projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
-from slam.keyframe_state import sync_active_keyframe_mirrors_if_present
+from slam.keyframe_state import get_active_landmark_lookup, sync_active_keyframe_mirrors_if_present
 
 
 # Bundle of tracked correspondences that are eligible to become new landmarks
@@ -149,7 +149,9 @@ def append_tracked_observations_to_seed(
     if not isinstance(landmarks_raw, list):
         raise ValueError("seed['landmarks'] must be a list")
     landmarks = list(landmarks_raw)
-    landmark_id_by_feat1_raw = seed.get("landmark_id_by_feat1", None)
+    landmark_id_by_feat1_raw = None
+    if "landmark_id_by_feat1" in seed or "active_keyframe_kf" in seed or "keyframes" in seed:
+        landmark_id_by_feat1_raw = get_active_landmark_lookup(seed)
     landmark_id_by_feat1 = None
     if landmark_id_by_feat1_raw is not None:
         landmark_id_by_feat1 = check_index_array_1d(
@@ -359,8 +361,11 @@ def append_tracked_observations_to_seed(
         R_cur = check_matrix_3x3(pose_out.get("R", None), name="pose_out['R']", dtype=float, finite=True)
         t_cur = check_vector_3(pose_out.get("t", None), name="pose_out['t']", dtype=float, finite=True)
 
+        landmark_lookup_raw = np.zeros((0,), dtype=np.int64)
+        if "landmark_id_by_feat1" in seed or "active_keyframe_kf" in seed or "keyframes" in seed:
+            landmark_lookup_raw = get_active_landmark_lookup(seed)
         landmark_id_by_feat1 = check_index_array_1d(
-            seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)),
+            landmark_lookup_raw,
             name="seed['landmark_id_by_feat1']",
             dtype=np.int64,
             allow_negative=True,
@@ -483,12 +488,12 @@ def append_tracked_observations_to_seed(
 def build_new_landmark_candidates(seed: dict, track_out: dict) -> NewLandmarkCandidates:
     # --- Checks ---
     # Check containers
-    seed = check_required_keys(seed, {"landmark_id_by_feat1"}, name="seed")
+    seed = check_dict(seed, name="seed")
     track_out = check_dict(track_out, name="track_out")
 
     # Read landmark lookup from keyframe feature index to landmark id
     landmark_id_by_feat1 = check_index_array_1d(
-        seed["landmark_id_by_feat1"],
+        get_active_landmark_lookup(seed),
         name="seed['landmark_id_by_feat1']",
         dtype=np.int64,
         allow_negative=True,
@@ -826,7 +831,7 @@ def append_new_landmarks_to_seed(
 ) -> dict:
     # --- Checks ---
     # Check containers
-    seed = check_required_keys(seed, {"landmarks", "landmark_id_by_feat1"}, name="seed")
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
 
     # Check triangulated batch
     if not isinstance(batch, TriangulatedLandmarkBatch):
@@ -846,7 +851,7 @@ def append_new_landmarks_to_seed(
 
     # Read and check lookup
     landmark_id_by_feat1 = check_index_array_1d(
-        seed["landmark_id_by_feat1"],
+        get_active_landmark_lookup(seed),
         name="seed['landmark_id_by_feat1']",
         dtype=np.int64,
         allow_negative=True,
@@ -993,7 +998,7 @@ def grow_map_from_tracking_result(
 ) -> MapGrowthResult:
     # --- Checks ---
     # Check containers
-    seed = check_required_keys(seed, {"landmarks", "landmark_id_by_feat1"}, name="seed")
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
     track_out = check_dict(track_out, name="track_out")
 
     # Use current-frame features as the default descriptor source when available

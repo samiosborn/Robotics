@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
-from slam.keyframe_state import store_current_pose, sync_active_keyframe_mirrors
+from slam.keyframe_state import set_active_keyframe_record, store_current_pose
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_diagnostic_summary_stats
@@ -82,14 +82,12 @@ def _support_basis_from_rescued_pose(
 
 def _seed_with_support_basis(seed: dict[str, Any], basis: dict[str, Any]) -> dict[str, Any]:
     seed_out = dict(seed)
-    seed_out["feats1"] = basis["feats"]
-    seed_out["keyframe_kf"] = int(basis["kf"])
-    seed_out["T_WC1"] = (
+    pose = (
         np.asarray(basis["R"], dtype=np.float64).copy(),
         np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
     )
-    seed_out["landmark_id_by_feat1"] = np.asarray(basis["landmark_id_by_feat1"], dtype=np.int64).reshape(-1).copy()
-    sync_active_keyframe_mirrors(seed_out)
+    lookup = np.asarray(basis["landmark_id_by_feat1"], dtype=np.int64).reshape(-1).copy()
+    set_active_keyframe_record(seed_out, int(basis["kf"]), pose, basis["feats"], lookup)
     return seed_out
 
 
