@@ -10,6 +10,7 @@ from core.checks import align_bool_mask_1d, as_2xN_points, check_1d_pair_same_le
 from geometry.camera import camera_centre, projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
 from slam.keyframe_state import get_active_landmark_lookup, sync_active_keyframe_mirrors_if_present
+from slam.landmark_state import add_landmark_observation, build_landmark_id_index, build_observation_indexes, create_landmark_record, get_landmarks, next_landmark_id
 
 
 # Bundle of tracked correspondences that are eligible to become new landmarks
@@ -144,11 +145,12 @@ def append_tracked_observations_to_seed(
         name="pose_out['pnp_inlier_mask']",
     )
 
-    # Read seed landmarks
-    landmarks_raw = seed["landmarks"]
-    if not isinstance(landmarks_raw, list):
-        raise ValueError("seed['landmarks'] must be a list")
-    landmarks = list(landmarks_raw)
+    # Read seed landmarks and disposable graph indexes
+    landmarks = list(get_landmarks(seed))
+    landmark_seed = {"landmarks": landmarks}
+    landmark_by_id = build_landmark_id_index(landmark_seed, context="seed['landmarks']")
+    observation_indexes = build_observation_indexes(landmark_seed, context="seed['landmarks']")
+    assignment_by_feature = dict(observation_indexes["landmark_id_by_feature"])
     landmark_id_by_feat1_raw = None
     if "landmark_id_by_feat1" in seed or "active_keyframe_kf" in seed or "keyframes" in seed:
         landmark_id_by_feat1_raw = get_active_landmark_lookup(seed)
@@ -160,15 +162,6 @@ def append_tracked_observations_to_seed(
             dtype=np.int64,
             allow_negative=True,
         ).copy()
-
-    # Build a landmark-id to list-index lookup
-    landmark_pos_by_id: dict[int, int] = {}
-    for i, lm in enumerate(landmarks):
-        if not isinstance(lm, dict):
-            continue
-        if "id" not in lm:
-            continue
-        landmark_pos_by_id[int(lm["id"])] = int(i)
 
     # Start stats
     stats = {
@@ -247,41 +240,24 @@ def append_tracked_observations_to_seed(
         pnp_inlier: bool,
         extra_reproj: bool,
     ) -> bool:
-        lm_pos = landmark_pos_by_id.get(int(lm_id), None)
-        if lm_pos is None:
+        lm = landmark_by_id.get(int(lm_id), None)
+        if lm is None:
             stats["n_missing_landmark"] += 1
             return False
 
-        lm = landmarks[lm_pos]
-        obs = lm.get("obs", None)
-        if not isinstance(obs, list):
-            obs = []
-
-        duplicate = False
-        for ob in obs:
-            if not isinstance(ob, dict):
-                continue
-            if int(ob.get("kf", -1)) != int(current_kf):
-                continue
-            if int(ob.get("feat", -1)) != int(feat_idx):
-                continue
-            duplicate = True
-            break
-
-        if duplicate:
+        added = add_landmark_observation(
+            lm,
+            int(current_kf),
+            int(feat_idx),
+            xy,
+            assignment_by_feature=assignment_by_feature,
+            context="tracked observation",
+        )
+        if not bool(added):
             stats["n_duplicate"] += 1
             stats["n_append_duplicates"] += 1
-            lm["obs"] = obs
             return False
 
-        obs.append(
-            {
-                "kf": int(current_kf),
-                "feat": int(feat_idx),
-                "xy": np.asarray(xy, dtype=np.float64).reshape(2,),
-            }
-        )
-        lm["obs"] = obs
         stats["n_added"] += 1
         stats["n_append_total"] += 1
         if bool(pnp_inlier):
@@ -422,12 +398,11 @@ def append_tracked_observations_to_seed(
             if (int(lm_id), int(feat_idx)) in pnp_inlier_pairs:
                 continue
 
-            lm_pos = landmark_pos_by_id.get(int(lm_id), None)
-            if lm_pos is None:
+            lm = landmark_by_id.get(int(lm_id), None)
+            if lm is None:
                 stats["n_missing_landmark"] += 1
                 continue
 
-            lm = landmarks[lm_pos]
             X_w_i = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
             if X_w_i.size != 3:
                 continue
@@ -843,11 +818,12 @@ def append_new_landmarks_to_seed(
     if current_kf < -1:
         raise ValueError(f"current_kf must be >= -1; got {current_kf}")
 
-    # Read seed landmarks
-    landmarks_raw = seed["landmarks"]
-    if not isinstance(landmarks_raw, list):
-        raise ValueError("seed['landmarks'] must be a list")
-    landmarks = list(landmarks_raw)
+    # Read seed landmarks and disposable graph indexes
+    landmarks = list(get_landmarks(seed))
+    landmark_seed = {"landmarks": landmarks}
+    landmark_by_id = build_landmark_id_index(landmark_seed, context="seed['landmarks']")
+    observation_indexes = build_observation_indexes(landmark_seed, context="seed['landmarks']")
+    assignment_by_feature = dict(observation_indexes["landmark_id_by_feature"])
 
     # Read and check lookup
     landmark_id_by_feat1 = check_index_array_1d(
@@ -902,8 +878,7 @@ def append_new_landmarks_to_seed(
         desc = np.asarray(getattr(descriptor_source, "desc", np.zeros((0,), dtype=np.float64)))
 
     # Next landmark id
-    existing_ids = [int(lm["id"]) for lm in landmarks if isinstance(lm, dict) and "id" in lm]
-    next_id = 0 if len(existing_ids) == 0 else (max(existing_ids) + 1)
+    next_id = next_landmark_id(landmark_seed)
 
     # Append each triangulated landmark
     n_added = 0
@@ -928,29 +903,44 @@ def append_new_landmarks_to_seed(
         if desc.ndim >= 1 and feat_cur < int(desc.shape[0]):
             descriptor_i = np.asarray(desc[feat_cur]).copy()
 
-        # Build observation list
-        obs = [
-            {"kf": int(keyframe_kf), "feat": feat_kf, "xy": x_kf_i},
-            {"kf": int(current_kf), "feat": feat_cur, "xy": x_cur_i},
-        ]
-
         # Build landmark dict in the same style as seed.py
         lm_id = int(next_id)
-        landmark = {
-            "id": lm_id,
-            "X_w": X_i,
-            "birth_source": "map_growth",
-            "birth_kf": int(current_kf),
-            "obs": obs,
-            "descriptor": descriptor_i,
-            "quality": {
+        if int(lm_id) in landmark_by_id:
+            raise ValueError(f"seed['landmarks'] already contains landmark id {lm_id}")
+        landmark = create_landmark_record(
+            lm_id,
+            X_i,
+            birth_source="map_growth",
+            birth_kf=int(current_kf),
+            descriptor=descriptor_i,
+            quality={
                 "reproj0_px": None,
                 "reproj1_px": None,
             },
-        }
+            context="map-growth landmark",
+        )
+        added_keyframe_obs = add_landmark_observation(
+            landmark,
+            int(keyframe_kf),
+            feat_kf,
+            x_kf_i,
+            assignment_by_feature=assignment_by_feature,
+            context="map-growth keyframe observation",
+        )
+        added_current_obs = add_landmark_observation(
+            landmark,
+            int(current_kf),
+            feat_cur,
+            x_cur_i,
+            assignment_by_feature=assignment_by_feature,
+            context="map-growth current observation",
+        )
+        if not bool(added_keyframe_obs and added_current_obs):
+            raise ValueError("map-growth landmark observations must be unique")
 
         # Append to the landmark list
         landmarks.append(landmark)
+        landmark_by_id[int(lm_id)] = landmark
 
         # Update the keyframe feature lookup
         landmark_id_by_feat1[feat_kf] = lm_id
@@ -1024,7 +1014,7 @@ def grow_map_from_tracking_result(
     )
 
     # Append valid landmarks into the seed
-    seed_before = int(len(seed["landmarks"]))
+    seed_before = int(len(get_landmarks(seed)))
     seed = append_new_landmarks_to_seed(
         seed,
         batch,
@@ -1032,7 +1022,7 @@ def grow_map_from_tracking_result(
         current_kf=current_kf,
         descriptor_source=descriptor_source,
     )
-    seed_after = int(len(seed["landmarks"]))
+    seed_after = int(len(get_landmarks(seed)))
 
     # Read append stats
     append_stats = seed.get("last_append_stats", {})

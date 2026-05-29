@@ -11,6 +11,8 @@ from geometry.lie import hat
 from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations, apply_left_pose_increment_wc
 from slam.keyframe_state import get_active_landmark_lookup
+from slam.landmark_state import build_landmark_id_index, count_landmark_observations
+
 
 # Bundle of 2D–3D correspondences for PnP
 @dataclass(frozen=True)
@@ -25,41 +27,6 @@ class PnPCorrespondences:
     cur_feat_idx: np.ndarray
     # Keyframe feature index per correspondence as (N,)
     kf_feat_idx: np.ndarray
-
-
-# Build lookup from landmark id to landmark dict
-def _landmark_dict_by_id(seed: dict) -> dict[int, dict]:
-    # Read landmarks
-    landmarks = seed.get("landmarks", [])
-    if not isinstance(landmarks, list):
-        raise ValueError("seed['landmarks'] must be a list")
-
-    # Build lookup
-    out: dict[int, dict] = {}
-    for lm in landmarks:
-        if not isinstance(lm, dict):
-            continue
-        if "id" not in lm:
-            continue
-        out[int(lm["id"])] = lm
-
-    return out
-
-
-# Count valid landmark observations
-def _landmark_observation_count(lm: dict) -> int:
-    # Read observation list
-    obs = lm.get("obs", None)
-    if not isinstance(obs, list):
-        return 0
-
-    # Count valid observation records
-    n_obs = 0
-    for ob in obs:
-        if isinstance(ob, dict):
-            n_obs += 1
-
-    return int(n_obs)
 
 
 # Read the explicit birth source for a landmark
@@ -990,7 +957,7 @@ def build_pnp_correspondences_with_stats(
         )
 
     # Build landmark lookup
-    lm_by_id = _landmark_dict_by_id(seed)
+    lm_by_id = build_landmark_id_index(seed, context="seed['landmarks']")
 
     # Collect valid correspondences
     X_cols: list[np.ndarray] = []
@@ -1078,7 +1045,7 @@ def build_pnp_correspondences_with_stats(
             continue
 
         # Classify the landmark origin and update raw counts
-        n_obs = _landmark_observation_count(lm)
+        n_obs = count_landmark_observations(lm)
         bootstrap_born = _landmark_is_bootstrap_born(lm)
 
         stats["n_corr_raw"] += 1

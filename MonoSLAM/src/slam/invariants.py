@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from core.checks import check_array, check_dict, check_int_ge0_no_bool, check_matrix_3x3, check_points_xy_N2plus, check_vector_3
+from slam.landmark_state import feature_assignment_key, observation_key
 
 
 _POSE_FIELDS = ("T_WC0", "T_WC1", "last_accepted_pose")
@@ -479,17 +480,17 @@ def _audit_landmarks(seed: dict[str, Any], report: dict[str, Any], context: str)
                 continue
 
             report["num_observations"] += 1
-            observation_key = (int(landmark_id), int(kf), int(feat))
-            if observation_key in observation_keys:
+            obs_key = observation_key(landmark_id, kf, feat)
+            if obs_key in observation_keys:
                 report["num_duplicate_observations"] += 1
                 _add_error(
                     report,
                     f"{ob_name} duplicates observation for landmark id {landmark_id}, kf {kf}, feat {feat}",
                 )
             else:
-                observation_keys.add(observation_key)
+                observation_keys.add(obs_key)
 
-            feature_key = (int(kf), int(feat))
+            feature_key = feature_assignment_key(kf, feat)
             previous_landmark_id = assignment_by_kf_feat.get(feature_key, None)
             if previous_landmark_id is None:
                 assignment_by_kf_feat[feature_key] = int(landmark_id)
