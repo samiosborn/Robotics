@@ -82,6 +82,14 @@ def check_int_ge0(x, name="value") -> int:
     return xi
 
 
+# Check integer >= 0 and reject bool
+def check_int_ge0_no_bool(x, name="value") -> int:
+    if isinstance(x, (bool, np.bool_)):
+        raise ValueError(f"{name} must be an integer, not bool")
+
+    return check_int_ge0(x, name=name)
+
+
 # Check integer > 0
 def check_int_gt0(x, name="value") -> int:
     if not isinstance(x, (int, np.integer)):
