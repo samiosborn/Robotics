@@ -11,6 +11,7 @@ from geometry.camera import camera_centre, projection_matrix, reprojection_error
 from geometry.triangulation import triangulate_points
 from slam.keyframe_state import get_active_landmark_lookup, sync_active_keyframe_mirrors_if_present
 from slam.landmark_state import add_landmark_observation, build_landmark_id_index, build_observation_indexes, create_landmark_record, get_landmarks, next_landmark_id
+from slam.map_mutation import new_map_mutation_report
 
 
 # Bundle of tracked correspondences that are eligible to become new landmarks
@@ -60,6 +61,8 @@ class MapGrowthResult:
     batch: TriangulatedLandmarkBatch
     # Step-level summary stats
     stats: dict
+    # Explicit map mutation report
+    mutation_report: dict
 
 
 # Append current-frame observations for already-known tracked landmarks
@@ -74,7 +77,8 @@ def append_tracked_observations_to_seed(
     max_append_reproj_error_px_existing: float = 2.0,
     prune_stale_map_growth: bool = True,
     eps: float = 1e-12,
-) -> tuple[dict, dict]:
+    return_report: bool = False,
+) -> tuple[dict, dict] | tuple[dict, dict, dict]:
     # --- Checks ---
     # Check containers
     seed = check_required_keys(seed, {"landmarks"}, name="seed")
@@ -189,6 +193,7 @@ def append_tracked_observations_to_seed(
         "n_landmarks_with_obs_current_kf_after_append": 0,
         "n_stale_map_growth_removed": 0,
     }
+    mutation_report = new_map_mutation_report(context="tracked_observation_append")
 
     # Record landmark birth-source stats for appended observations
     def _record_birth_source_append(lm: dict, *, pnp_inlier: bool, extra_reproj: bool) -> None:
@@ -243,23 +248,31 @@ def append_tracked_observations_to_seed(
         lm = landmark_by_id.get(int(lm_id), None)
         if lm is None:
             stats["n_missing_landmark"] += 1
+            mutation_report["missing_landmarks"] += 1
             return False
 
-        added = add_landmark_observation(
-            lm,
-            int(current_kf),
-            int(feat_idx),
-            xy,
-            assignment_by_feature=assignment_by_feature,
-            context="tracked observation",
-        )
+        try:
+            added = add_landmark_observation(
+                lm,
+                int(current_kf),
+                int(feat_idx),
+                xy,
+                assignment_by_feature=assignment_by_feature,
+                context="tracked observation",
+            )
+        except ValueError as exc:
+            if "feature assignment conflict" in str(exc):
+                mutation_report["feature_assignment_conflicts"] += 1
+            raise
         if not bool(added):
             stats["n_duplicate"] += 1
             stats["n_append_duplicates"] += 1
+            mutation_report["skipped_duplicate_observations"] += 1
             return False
 
         stats["n_added"] += 1
         stats["n_append_total"] += 1
+        mutation_report["added_observations"] += 1
         if bool(pnp_inlier):
             stats["n_append_pnp_inliers_added"] += 1
         if bool(extra_reproj):
@@ -274,6 +287,7 @@ def append_tracked_observations_to_seed(
 
         kept_landmarks: list = []
         n_removed = 0
+        n_lookup_cleared = 0
 
         for lm in landmarks:
             if not isinstance(lm, dict):
@@ -307,11 +321,14 @@ def append_tracked_observations_to_seed(
                         continue
                     if int(landmark_id_by_feat1[feat]) == lm_id:
                         landmark_id_by_feat1[feat] = -1
+                        n_lookup_cleared += 1
 
             n_removed += 1
 
         landmarks = kept_landmarks
         stats["n_stale_map_growth_removed"] = int(n_removed)
+        mutation_report["removed_landmarks"] += int(n_removed)
+        mutation_report["updated_active_lookup_entries"] += int(n_lookup_cleared)
 
     # Append one current-frame observation per inlier landmark track
     pnp_inlier_pairs: set[tuple[int, int]] = set()
@@ -401,6 +418,7 @@ def append_tracked_observations_to_seed(
             lm = landmark_by_id.get(int(lm_id), None)
             if lm is None:
                 stats["n_missing_landmark"] += 1
+                mutation_report["missing_landmarks"] += 1
                 continue
 
             X_w_i = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
@@ -454,7 +472,12 @@ def append_tracked_observations_to_seed(
         seed["landmark_id_by_feat1"] = landmark_id_by_feat1
         sync_active_keyframe_mirrors_if_present(seed)
     stats["n_landmarks_with_obs_current_kf_after_append"] = _count_landmarks_with_current_observation()
+    stats["mutation_report"] = mutation_report
     seed["last_tracked_observation_append_stats"] = stats
+    seed["last_tracked_observation_append_report"] = mutation_report
+
+    if bool(return_report):
+        return seed, stats, mutation_report
 
     return seed, stats
 
@@ -803,7 +826,8 @@ def append_new_landmarks_to_seed(
     keyframe_kf: int = 1,
     current_kf: int = -1,
     descriptor_source=None,
-) -> dict:
+    return_report: bool = False,
+) -> dict | tuple[dict, dict]:
     # --- Checks ---
     # Check containers
     seed = check_required_keys(seed, {"landmarks"}, name="seed")
@@ -824,6 +848,7 @@ def append_new_landmarks_to_seed(
     landmark_by_id = build_landmark_id_index(landmark_seed, context="seed['landmarks']")
     observation_indexes = build_observation_indexes(landmark_seed, context="seed['landmarks']")
     assignment_by_feature = dict(observation_indexes["landmark_id_by_feature"])
+    mutation_report = new_map_mutation_report(context="map_growth_append")
 
     # Read and check lookup
     landmark_id_by_feat1 = check_index_array_1d(
@@ -891,6 +916,9 @@ def append_new_landmarks_to_seed(
 
         # Skip if the keyframe feature is already assigned
         if int(landmark_id_by_feat1[feat_kf]) >= 0:
+            mutation_report["skipped_landmark_candidates"] += 1
+            mutation_report["skipped_mapped_keyframe_features"] += 1
+            mutation_report["feature_assignment_conflicts"] += 1
             continue
 
         # Read world point and image observations
@@ -900,7 +928,7 @@ def append_new_landmarks_to_seed(
 
         # Optional descriptor copy from the current-frame feature index
         descriptor_i = None
-        if desc.ndim >= 1 and feat_cur < int(desc.shape[0]):
+        if desc is not None and desc.ndim >= 1 and feat_cur < int(desc.shape[0]):
             descriptor_i = np.asarray(desc[feat_cur]).copy()
 
         # Build landmark dict in the same style as seed.py
@@ -919,23 +947,30 @@ def append_new_landmarks_to_seed(
             },
             context="map-growth landmark",
         )
-        added_keyframe_obs = add_landmark_observation(
-            landmark,
-            int(keyframe_kf),
-            feat_kf,
-            x_kf_i,
-            assignment_by_feature=assignment_by_feature,
-            context="map-growth keyframe observation",
-        )
-        added_current_obs = add_landmark_observation(
-            landmark,
-            int(current_kf),
-            feat_cur,
-            x_cur_i,
-            assignment_by_feature=assignment_by_feature,
-            context="map-growth current observation",
-        )
+        try:
+            added_keyframe_obs = add_landmark_observation(
+                landmark,
+                int(keyframe_kf),
+                feat_kf,
+                x_kf_i,
+                assignment_by_feature=assignment_by_feature,
+                context="map-growth keyframe observation",
+            )
+            added_current_obs = add_landmark_observation(
+                landmark,
+                int(current_kf),
+                feat_cur,
+                x_cur_i,
+                assignment_by_feature=assignment_by_feature,
+                context="map-growth current observation",
+            )
+        except ValueError as exc:
+            if "feature assignment conflict" in str(exc):
+                mutation_report["feature_assignment_conflicts"] += 1
+            raise
         if not bool(added_keyframe_obs and added_current_obs):
+            mutation_report["skipped_duplicate_observations"] += int(not bool(added_keyframe_obs))
+            mutation_report["skipped_duplicate_observations"] += int(not bool(added_current_obs))
             raise ValueError("map-growth landmark observations must be unique")
 
         # Append to the landmark list
@@ -949,6 +984,9 @@ def append_new_landmarks_to_seed(
         added_ids.append(lm_id)
         next_id += 1
         n_added += 1
+        mutation_report["added_landmarks"] += 1
+        mutation_report["added_observations"] += 2
+        mutation_report["updated_active_lookup_entries"] += 1
 
     # Pack back into the seed
     seed["landmarks"] = landmarks
@@ -959,10 +997,17 @@ def append_new_landmarks_to_seed(
     seed["last_append_stats"] = {
         "n_in_batch": int(track_idx.size),
         "n_added": int(n_added),
+        "n_skipped": int(mutation_report["skipped_landmark_candidates"]),
+        "n_feature_assignment_conflicts": int(mutation_report["feature_assignment_conflicts"]),
         "added_ids": np.asarray(added_ids, dtype=np.int64),
         "keyframe_kf": int(keyframe_kf),
         "current_kf": int(current_kf),
+        "mutation_report": mutation_report,
     }
+    seed["last_append_mutation_report"] = mutation_report
+
+    if bool(return_report):
+        return seed, mutation_report
 
     return seed
 
@@ -1015,12 +1060,13 @@ def grow_map_from_tracking_result(
 
     # Append valid landmarks into the seed
     seed_before = int(len(get_landmarks(seed)))
-    seed = append_new_landmarks_to_seed(
+    seed, mutation_report = append_new_landmarks_to_seed(
         seed,
         batch,
         keyframe_kf=keyframe_kf,
         current_kf=current_kf,
         descriptor_source=descriptor_source,
+        return_report=True,
     )
     seed_after = int(len(get_landmarks(seed)))
 
@@ -1036,6 +1082,7 @@ def grow_map_from_tracking_result(
         "seed_landmarks_before": int(seed_before),
         "seed_landmarks_after": int(seed_after),
         "reason": batch.stats.get("reason", None),
+        "mutation_report": mutation_report,
     }
 
     return MapGrowthResult(
@@ -1043,4 +1090,5 @@ def grow_map_from_tracking_result(
         candidates=candidates,
         batch=batch,
         stats=stats,
+        mutation_report=mutation_report,
     )

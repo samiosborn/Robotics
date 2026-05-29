@@ -11,6 +11,7 @@ from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
 from slam.keyframe_state import set_active_keyframe_record, store_current_pose
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
+from slam.map_mutation import merge_map_mutation_reports
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_diagnostic_summary_stats
 from slam.seed import seed_keyframe_pose
@@ -626,6 +627,7 @@ def process_frame_against_seed(
     # Localisation-only rescue frames may append existing-landmark observations only
     seed_out = seed
     tracked_obs_stats: dict[str, Any] = {}
+    tracked_obs_report: dict[str, Any] | None = None
     map_growth_out = None
     guarded_support_refresh_stats: dict[str, Any] = {
         "triggered": False,
@@ -635,7 +637,7 @@ def process_frame_against_seed(
     }
 
     if not localisation_only_rescue_frame:
-        seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
+        seed_out, tracked_obs_stats, tracked_obs_report = append_tracked_observations_to_seed(
             seed,
             pose_out,
             keyframe_kf=keyframe_kf,
@@ -645,6 +647,7 @@ def process_frame_against_seed(
             max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
             prune_stale_map_growth=True,
             eps=eps,
+            return_report=True,
         )
 
         # Grow the map only from non-rescue poses
@@ -678,7 +681,7 @@ def process_frame_against_seed(
             # Read the updated seed
             seed_out = map_growth_out.seed
     else:
-        seed_out, tracked_obs_stats = append_tracked_observations_to_seed(
+        seed_out, tracked_obs_stats, tracked_obs_report = append_tracked_observations_to_seed(
             seed,
             pose_out,
             keyframe_kf=keyframe_kf,
@@ -688,6 +691,7 @@ def process_frame_against_seed(
             max_append_reproj_error_px_existing=max_append_reproj_error_px_existing,
             prune_stale_map_growth=False,
             eps=eps,
+            return_report=True,
         )
 
         n_pnp_inliers = int(pose_stats.get("n_pnp_inliers", 0))
@@ -762,6 +766,11 @@ def process_frame_against_seed(
 
     # Read map-growth stats
     map_stats = map_growth_out.stats if map_growth_out is not None else {}
+    map_growth_report = map_growth_out.mutation_report if map_growth_out is not None else None
+    mutation_reports = [report for report in (tracked_obs_report, map_growth_report) if isinstance(report, dict)]
+    map_mutation_report = None
+    if len(mutation_reports) > 0:
+        map_mutation_report = merge_map_mutation_reports(*mutation_reports, context="frame_pipeline")
 
     # Read keyframe stats
     keyframe_stats = keyframe_out.stats if keyframe_out is not None else {}
@@ -818,6 +827,8 @@ def process_frame_against_seed(
         "track_out": track_out,
         "pose_out": pose_out,
         "map_growth_out": map_growth_out,
+        "tracked_observation_report": tracked_obs_report,
+        "map_mutation_report": map_mutation_report,
         "keyframe_out": keyframe_out,
         "R": np.asarray(pose_out["R"], dtype=np.float64),
         "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
