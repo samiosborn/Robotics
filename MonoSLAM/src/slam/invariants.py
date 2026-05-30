@@ -215,6 +215,69 @@ def _features_agree(feats_a, feats_b, name_a: str, name_b: str) -> bool:
     return bool(kps_a.shape == kps_b.shape and np.allclose(kps_a, kps_b))
 
 
+# Audit lookup entries against active landmark observations
+def _audit_active_lookup_matches_observations(
+    entries: list[tuple[int, int]],
+    *,
+    active_kf: int | None,
+    n_feats: int | None,
+    lookup_name: str,
+    landmark_info: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    lookup_by_feat = {int(feat): int(landmark_id) for feat, landmark_id in entries}
+    landmark_ids = landmark_info["landmark_ids"]
+    assignment_by_kf_feat = landmark_info["assignment_by_kf_feat"]
+    has_landmarks = bool(landmark_info["has_landmarks"])
+
+    for feat, landmark_id in entries:
+        if n_feats is not None and int(feat) >= int(n_feats):
+            _add_error(report, f"{lookup_name} feature index {feat} must be within active feature length {n_feats}")
+
+        if bool(has_landmarks) and int(landmark_id) not in landmark_ids:
+            _add_error(report, f"{lookup_name}[{feat}] references missing landmark id {landmark_id}")
+
+        if active_kf is None:
+            continue
+
+        observed_landmark_id = assignment_by_kf_feat.get((int(active_kf), int(feat)), None)
+        if observed_landmark_id is None:
+            _add_error(
+                report,
+                f"{lookup_name}[{feat}] maps to landmark id {landmark_id}, but no observation exists for active keyframe-feature pair (kf={active_kf}, feat={feat})",
+            )
+        elif int(observed_landmark_id) != int(landmark_id):
+            _add_error(
+                report,
+                f"{lookup_name}[{feat}] maps to landmark id {landmark_id}, but observation (kf={active_kf}, feat={feat}) maps to landmark id {observed_landmark_id}",
+            )
+
+    if active_kf is None:
+        return
+
+    for (obs_kf, feat), landmark_id in assignment_by_kf_feat.items():
+        if int(obs_kf) != int(active_kf):
+            continue
+        if n_feats is not None and int(feat) >= int(n_feats):
+            _add_error(
+                report,
+                f"active keyframe observation (kf={active_kf}, feat={feat}) maps to landmark id {landmark_id}, but feature index is outside active feature length {n_feats}",
+            )
+            continue
+
+        lookup_landmark_id = lookup_by_feat.get(int(feat), None)
+        if lookup_landmark_id is None:
+            _add_error(
+                report,
+                f"{lookup_name} is missing active observation (kf={active_kf}, feat={feat}) for landmark id {landmark_id}",
+            )
+        elif int(lookup_landmark_id) != int(landmark_id):
+            _add_error(
+                report,
+                f"{lookup_name}[{feat}] must match active observation landmark id {landmark_id}; got {lookup_landmark_id}",
+            )
+
+
 # Audit the canonical pose store
 def _audit_pose_store(seed: dict[str, Any], report: dict[str, Any], context: str) -> dict[int, Any]:
     if "poses" not in seed:
@@ -237,6 +300,13 @@ def _audit_pose_store(seed: dict[str, Any], report: dict[str, Any], context: str
             continue
 
         checked[int(pose_key)] = pose
+
+    if 0 in checked and "T_WC0" in seed:
+        try:
+            if not _poses_agree(checked[0], seed["T_WC0"], f"{context}['poses'][0]", f"{context}['T_WC0']"):
+                _add_error(report, f"{context}['poses'][0] must match {context}['T_WC0']")
+        except ValueError as exc:
+            _add_error(report, str(exc))
 
     return checked
 
@@ -295,7 +365,9 @@ def _audit_keyframe_store(
             except ValueError as exc:
                 _add_error(report, str(exc))
 
-        if "pose" in record:
+        if "pose" not in record:
+            _add_error(report, _missing_key_message(record_name, "pose", "keyframe validation"))
+        else:
             try:
                 check_pose_T_WC(record["pose"], name=f"{record_name}['pose']")
                 if int(kf) in poses and not _poses_agree(
@@ -305,15 +377,10 @@ def _audit_keyframe_store(
                     f"{context}['poses'][{kf}]",
                 ):
                     _add_error(report, f"{record_name}['pose'] must match {context}['poses'][{kf}]")
+                if int(kf) not in poses and "poses" in seed:
+                    _add_error(report, f"{context}['poses'] must contain keyframe {kf} from {record_name}")
             except ValueError as exc:
                 _add_error(report, str(exc))
-        elif int(kf) in poses:
-            try:
-                check_pose_T_WC(poses[int(kf)], name=f"{context}['poses'][{kf}]")
-            except ValueError as exc:
-                _add_error(report, str(exc))
-        else:
-            _add_error(report, _missing_key_message(record_name, "pose", "keyframe validation"))
 
         n_feats = None
         if "feats" not in record:
@@ -385,20 +452,21 @@ def _audit_active_keyframe_store(
     if not isinstance(record, dict):
         return
 
-    if "poses" in seed:
-        if int(active_kf) not in poses:
-            _add_error(report, f"{context}['poses'] must contain active keyframe {active_kf}")
-        elif "T_WC1" in seed:
-            try:
-                if not _poses_agree(
-                    poses[int(active_kf)],
-                    seed["T_WC1"],
-                    f"{context}['poses'][{active_kf}]",
-                    f"{context}['T_WC1']",
-                ):
-                    _add_error(report, f"{context}['poses'][{active_kf}] must match {context}['T_WC1']")
-            except ValueError as exc:
-                _add_error(report, str(exc))
+    if "poses" not in seed:
+        _add_error(report, f"{context}['active_keyframe_kf'] requires {context}['poses']")
+    elif int(active_kf) not in poses:
+        _add_error(report, f"{context}['poses'] must contain active keyframe {active_kf}")
+    elif "T_WC1" in seed:
+        try:
+            if not _poses_agree(
+                poses[int(active_kf)],
+                seed["T_WC1"],
+                f"{context}['poses'][{active_kf}]",
+                f"{context}['T_WC1']",
+            ):
+                _add_error(report, f"{context}['poses'][{active_kf}] must match {context}['T_WC1']")
+        except ValueError as exc:
+            _add_error(report, str(exc))
 
     if "pose" in record and "T_WC1" in seed:
         try:
@@ -509,66 +577,75 @@ def _audit_landmarks(seed: dict[str, Any], report: dict[str, Any], context: str)
 
 
 # Audit active keyframe lookup consistency
-def _audit_active_keyframe(seed: dict[str, Any], report: dict[str, Any], context: str, landmark_info: dict[str, Any]) -> None:
-    keyframe_kf = None
-    if "keyframe_kf" in seed:
+def _audit_active_keyframe(
+    seed: dict[str, Any],
+    report: dict[str, Any],
+    context: str,
+    landmark_info: dict[str, Any],
+    keyframes: dict[int, dict] | None = None,
+) -> None:
+    active_kf = None
+    if "active_keyframe_kf" in seed:
         try:
-            keyframe_kf = check_int_ge0_no_bool(seed["keyframe_kf"], name=f"{context}['keyframe_kf']")
+            active_kf = check_int_ge0_no_bool(seed["active_keyframe_kf"], name=f"{context}['active_keyframe_kf']")
+        except ValueError as exc:
+            _add_error(report, str(exc))
+    elif "keyframe_kf" in seed:
+        try:
+            active_kf = check_int_ge0_no_bool(seed["keyframe_kf"], name=f"{context}['keyframe_kf']")
         except ValueError as exc:
             _add_error(report, str(exc))
 
-        if "T_WC1" not in seed:
-            _add_error(report, _missing_key_message(context, "T_WC1", "active keyframe validation"))
+    if "keyframe_kf" in seed and "T_WC1" not in seed:
+        _add_error(report, _missing_key_message(context, "T_WC1", "active keyframe validation"))
+
+    active_record = None
+    if active_kf is not None and isinstance(keyframes, dict):
+        candidate = keyframes.get(int(active_kf), None)
+        if isinstance(candidate, dict):
+            active_record = candidate
 
     n_feats = None
-    if "feats1" in seed:
+    if active_record is not None and "feats" in active_record:
+        try:
+            feats = _feature_keypoints_array(active_record["feats"], f"{context}['keyframes'][{int(active_kf)}]['feats']")
+            n_feats = int(feats.shape[0])
+        except ValueError as exc:
+            _add_error(report, str(exc))
+    elif "feats1" in seed:
         try:
             feats1 = _feature_keypoints_array(seed["feats1"], f"{context}['feats1']")
             n_feats = int(feats1.shape[0])
         except ValueError as exc:
             _add_error(report, str(exc))
 
-    if "landmark_id_by_feat1" not in seed:
+    lookup = None
+    lookup_name = None
+    if active_record is not None and "landmark_id_by_feat" in active_record:
+        lookup = active_record["landmark_id_by_feat"]
+        lookup_name = f"{context}['keyframes'][{int(active_kf)}]['landmark_id_by_feat']"
+    elif "landmark_id_by_feat1" in seed:
+        lookup = seed["landmark_id_by_feat1"]
+        lookup_name = f"{context}['landmark_id_by_feat1']"
+
+    if lookup is None or lookup_name is None:
         return
 
     try:
-        entries = _active_lookup_entries(seed["landmark_id_by_feat1"], f"{context}['landmark_id_by_feat1']")
+        entries = _active_lookup_entries(lookup, lookup_name)
     except ValueError as exc:
         _add_error(report, str(exc))
         return
 
     report["num_active_lookup_entries"] = int(len(entries))
-    landmark_ids = landmark_info["landmark_ids"]
-    assignment_by_kf_feat = landmark_info["assignment_by_kf_feat"]
-    has_landmarks = bool(landmark_info["has_landmarks"])
-
-    for feat, landmark_id in entries:
-        if n_feats is not None and int(feat) >= int(n_feats):
-            _add_error(
-                report,
-                f"{context}['landmark_id_by_feat1'] feature index {feat} must be within seed['feats1'] length {n_feats}",
-            )
-
-        if bool(has_landmarks) and int(landmark_id) not in landmark_ids:
-            _add_error(
-                report,
-                f"{context}['landmark_id_by_feat1'][{feat}] references missing landmark id {landmark_id}",
-            )
-
-        if keyframe_kf is None:
-            continue
-
-        observed_landmark_id = assignment_by_kf_feat.get((int(keyframe_kf), int(feat)), None)
-        if observed_landmark_id is None:
-            _add_error(
-                report,
-                f"{context}['landmark_id_by_feat1'][{feat}] maps to landmark id {landmark_id}, but no observation exists for active keyframe-feature pair (kf={keyframe_kf}, feat={feat})",
-            )
-        elif int(observed_landmark_id) != int(landmark_id):
-            _add_error(
-                report,
-                f"{context}['landmark_id_by_feat1'][{feat}] maps to landmark id {landmark_id}, but observation (kf={keyframe_kf}, feat={feat}) maps to landmark id {observed_landmark_id}",
-            )
+    _audit_active_lookup_matches_observations(
+        entries,
+        active_kf=None if active_kf is None else int(active_kf),
+        n_feats=n_feats,
+        lookup_name=lookup_name,
+        landmark_info=landmark_info,
+        report=report,
+    )
 
 
 # Audit only landmark invariants
@@ -601,7 +678,7 @@ def audit_active_keyframe_lookup(seed, *, context: str = "seed", strict: bool = 
     _audit_active_keyframe_store(seed, report, context, poses, keyframes)
 
     landmark_info = _audit_landmarks(seed, report, context)
-    _audit_active_keyframe(seed, report, context, landmark_info)
+    _audit_active_keyframe(seed, report, context, landmark_info, keyframes)
     _raise_if_needed(report, strict)
     return report
 
@@ -630,7 +707,7 @@ def audit_seed_invariants(seed, *, context: str = "seed", strict: bool = True) -
     _audit_active_keyframe_store(seed, report, context, poses, keyframes)
 
     landmark_info = _audit_landmarks(seed, report, context)
-    _audit_active_keyframe(seed, report, context, landmark_info)
+    _audit_active_keyframe(seed, report, context, landmark_info, keyframes)
 
     _raise_if_needed(report, strict)
     return report

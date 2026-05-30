@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_positive
 from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
-from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, set_active_keyframe_record, store_current_pose
+from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
 from slam.map_mutation import merge_map_mutation_reports
 from slam.pnp_frontend import estimate_pose_from_seed
@@ -35,7 +35,7 @@ def _feature_keypoints_for_validation(feats, name: str) -> np.ndarray:
 # Resolve and validate active keyframe arguments against the seed
 def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyframe_kf: int) -> tuple[int, Any]:
     active_kf = None
-    if "active_keyframe_kf" in seed or "keyframe_kf" in seed:
+    if has_active_keyframe_state(seed):
         active_kf = get_active_keyframe_kf(seed)
         if int(active_kf) != int(keyframe_kf):
             raise ValueError(
@@ -43,16 +43,19 @@ def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyfra
             )
 
     active_feats = None
-    if "feats1" in seed or "keyframes" in seed or "active_keyframe_kf" in seed:
+    if has_active_keyframe_state(seed):
         active_feats = get_active_keyframe_features(seed)
-        arg_kps = _feature_keypoints_for_validation(keyframe_feats, "keyframe_feats")
-        active_kps = _feature_keypoints_for_validation(active_feats, "active keyframe feats")
-        if arg_kps.shape != active_kps.shape or not np.allclose(arg_kps, active_kps):
-            raise ValueError("keyframe_feats argument must match active keyframe features in seed")
+        if keyframe_feats is not None:
+            arg_kps = _feature_keypoints_for_validation(keyframe_feats, "keyframe_feats")
+            active_kps = _feature_keypoints_for_validation(active_feats, "active keyframe feats")
+            if arg_kps.shape != active_kps.shape or not np.allclose(arg_kps, active_kps):
+                raise ValueError("keyframe_feats argument must match active keyframe features in seed")
 
     if active_kf is None:
         active_kf = int(keyframe_kf)
     if active_feats is None:
+        if keyframe_feats is None:
+            raise ValueError("keyframe_feats argument is required when seed has no active keyframe state")
         active_feats = keyframe_feats
 
     return int(active_kf), active_feats
@@ -133,7 +136,7 @@ def _support_basis_from_rescued_pose(
         "R": np.asarray(pose_out["R"], dtype=np.float64).copy(),
         "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3).copy(),
         "feats": cur_feats,
-        "landmark_id_by_feat1": lookup,
+        "landmark_id_by_feat": lookup,
         "n_lookup_mapped": int(n_mapped),
         "n_accepted_support": int(np.sum(support_mask[:n_corr])),
     }, stats
@@ -145,7 +148,8 @@ def _seed_with_support_basis(seed: dict[str, Any], basis: dict[str, Any]) -> dic
         np.asarray(basis["R"], dtype=np.float64).copy(),
         np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
     )
-    lookup = np.asarray(basis["landmark_id_by_feat1"], dtype=np.int64).reshape(-1).copy()
+    lookup_raw = basis.get("landmark_id_by_feat", basis.get("landmark_id_by_feat1", None))
+    lookup = np.asarray(lookup_raw, dtype=np.int64).reshape(-1).copy()
     set_active_keyframe_record(seed_out, int(basis["kf"]), pose, basis["feats"], lookup)
     return seed_out
 
@@ -231,7 +235,9 @@ def _attempt_incoherent_support_recovery(
     basis = seed.get("_incoherent_recovery_support_basis", None)
     if not isinstance(basis, dict):
         return None, None
-    if basis.get("feats", None) is None or basis.get("landmark_id_by_feat1", None) is None:
+    if basis.get("feats", None) is None:
+        return None, None
+    if basis.get("landmark_id_by_feat", basis.get("landmark_id_by_feat1", None)) is None:
         return None, None
 
     anchor_seed = _seed_with_support_basis(seed, basis)

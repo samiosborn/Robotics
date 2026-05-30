@@ -175,6 +175,20 @@ def test_tracked_observation_append_rejects_misaligned_pnp_mask():
         append_tracked_observations_to_seed(seed, pose_out, current_kf=2, return_report=True)
 
 
+# Reject stale active keyframe ids during observation append
+def test_tracked_observation_append_rejects_stale_keyframe_argument():
+    seed = _seed()
+    pose_out = _pose_out(
+        landmark_ids=[0],
+        cur_feat_idx=[4],
+        x_cur=np.asarray([[11.0], [21.0]], dtype=np.float64),
+        inlier_mask=[True],
+    )
+
+    with pytest.raises(ValueError, match="keyframe_kf argument must match active keyframe state"):
+        append_tracked_observations_to_seed(seed, pose_out, keyframe_kf=2, current_kf=2, return_report=True)
+
+
 # Reject silently padded or truncated support masks in PnP diagnostics
 def test_pnp_spatial_coverage_rejects_misaligned_mask():
     x_cur = np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=np.float64)
@@ -267,6 +281,15 @@ def test_map_growth_append_duplicate_candidate_behaviour_is_explicit():
     assert report["feature_assignment_conflicts"] == 1
     assert seed["last_append_stats"]["n_added"] == 1
     assert seed["last_append_stats"]["n_skipped"] == 1
+
+
+# Reject stale active keyframe ids during map growth
+def test_map_growth_append_rejects_stale_keyframe_argument():
+    seed = _seed()
+    batch = _batch([1], [5])
+
+    with pytest.raises(ValueError, match="keyframe_kf argument must match active keyframe state"):
+        append_new_landmarks_to_seed(seed, batch, keyframe_kf=2, current_kf=2, return_report=True)
 
 
 # Keep existing diagnostics beside mutation reports

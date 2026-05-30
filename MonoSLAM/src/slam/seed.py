@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from core.checks import check_2xN_pair, check_matrix_3x3, check_required_keys, check_vector_3
+from core.checks import check_2xN_pair, check_matrix_3x3, check_vector_3
 from slam.keyframe_state import get_active_keyframe_pose, initialise_canonical_keyframe_state
 
 
@@ -67,17 +67,14 @@ def build_two_view_seed(x1, x2, *, idx_init, X_valid, R1, t1) -> dict:
 
 # Read the frozen keyframe pose stored inside the seed
 def seed_keyframe_pose(seed: dict) -> tuple[np.ndarray, np.ndarray]:
-    # Check seed contains the keyframe pose
-    seed = check_required_keys(seed, {"T_WC1"}, name="seed")
-
-    # Read stored pose tuple
-    T_WC1 = get_active_keyframe_pose(seed)
-    if not isinstance(T_WC1, (tuple, list)) or len(T_WC1) != 2:
-        raise ValueError("seed['T_WC1'] must be a length-2 tuple/list (R, t)")
+    # Read stored active pose tuple
+    pose = get_active_keyframe_pose(seed)
+    if not isinstance(pose, (tuple, list)) or len(pose) != 2:
+        raise ValueError("active keyframe pose must be a length-2 tuple/list (R, t)")
 
     # Check pose blocks
-    R = check_matrix_3x3(T_WC1[0], name="seed['T_WC1'][0]", dtype=float, finite=False)
-    t = check_vector_3(T_WC1[1], name="seed['T_WC1'][1]", dtype=float, finite=False)
+    R = check_matrix_3x3(pose[0], name="active keyframe pose[0]", dtype=float, finite=False)
+    t = check_vector_3(pose[1], name="active keyframe pose[1]", dtype=float, finite=False)
 
     return np.asarray(R, dtype=np.float64), np.asarray(t, dtype=np.float64).reshape(3,)
 

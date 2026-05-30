@@ -10,7 +10,7 @@ from geometry.camera import camera_centre, pixel_to_normalised, reprojection_err
 from geometry.lie import hat
 from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations, apply_left_pose_increment_wc
-from slam.keyframe_state import get_active_landmark_lookup
+from slam.keyframe_state import get_active_landmark_lookup, has_active_keyframe_state
 from slam.landmark_state import build_landmark_id_index, count_valid_landmark_observations
 
 
@@ -915,10 +915,10 @@ def build_pnp_correspondences_with_stats(
     )
 
     # Read landmark id map from keyframe features to landmarks
-    landmark_lookup_raw = np.zeros((0,), dtype=np.int64)
-    if "landmark_id_by_feat1" in seed or "active_keyframe_kf" in seed or "keyframes" in seed:
-        landmark_lookup_raw = get_active_landmark_lookup(seed)
-    landmark_id_by_feat1 = np.asarray(landmark_lookup_raw, dtype=np.int64).reshape(-1)
+    active_lookup_raw = np.zeros((0,), dtype=np.int64)
+    if has_active_keyframe_state(seed):
+        active_lookup_raw = get_active_landmark_lookup(seed)
+    active_lookup = np.asarray(active_lookup_raw, dtype=np.int64).reshape(-1)
 
     # Read tracked feature indices
     kf_feat_idx = np.asarray(
@@ -1016,11 +1016,11 @@ def build_pnp_correspondences_with_stats(
         feat1 = int(kf_feat_idx[i])
 
         # Skip invalid keyframe feature index
-        if feat1 < 0 or feat1 >= landmark_id_by_feat1.size:
+        if feat1 < 0 or feat1 >= active_lookup.size:
             continue
 
         # Map keyframe feature to landmark id
-        lm_id = int(landmark_id_by_feat1[feat1])
+        lm_id = int(active_lookup[feat1])
 
         # Skip unmatched features
         if lm_id < 0:

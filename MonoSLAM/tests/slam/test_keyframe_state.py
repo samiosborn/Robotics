@@ -10,13 +10,19 @@ from slam.invariants import audit_seed_invariants
 from slam.frame_pipeline import _copy_pose_blocks, process_frame_against_seed
 from slam.keyframe import promote_frame_to_keyframe
 from slam.keyframe_state import (
+    get_keyframe_record,
+    get_pose_for_kf,
     get_active_keyframe_features,
     get_active_keyframe_pose,
     get_active_keyframe_record,
     get_active_landmark_lookup,
     initialise_canonical_keyframe_state,
+    rebuild_active_landmark_lookup,
     set_active_keyframe_record,
+    set_keyframe_record,
+    set_pose_for_kf,
     sync_active_keyframe_mirrors,
+    sync_legacy_active_fields_from_canonical,
     validate_active_keyframe_state,
 )
 
@@ -96,6 +102,31 @@ def test_active_keyframe_field_helpers_return_mirrors():
     assert get_active_landmark_lookup(seed) is seed["landmark_id_by_feat1"]
 
 
+# Read active pose from canonical state when legacy pose is stale
+def test_active_pose_helper_reads_canonical_store_over_stale_legacy_pose():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    canonical_pose = _pose(8.0)
+    set_pose_for_kf(seed, 1, canonical_pose, context="unit active pose")
+    seed["T_WC1"] = _pose(99.0)
+
+    pose = get_active_keyframe_pose(seed)
+
+    assert pose is get_pose_for_kf(seed, 1)
+    np.testing.assert_allclose(pose[1], np.asarray([8.0, 0.0, 0.0], dtype=np.float64))
+
+
+# Sync legacy active fields from canonical state explicitly
+def test_sync_legacy_active_fields_repairs_stale_legacy_pose():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    set_pose_for_kf(seed, 1, _pose(6.0), context="unit active pose")
+    seed["T_WC1"] = _pose(99.0)
+
+    sync_legacy_active_fields_from_canonical(seed)
+
+    assert seed["T_WC1"] is get_pose_for_kf(seed, 1)
+    np.testing.assert_allclose(seed["T_WC1"][1], np.asarray([6.0, 0.0, 0.0], dtype=np.float64))
+
+
 # Reject missing active keyframes with a clear error
 def test_missing_active_keyframe_fails_clearly():
     seed = initialise_canonical_keyframe_state(_bootstrap_seed())
@@ -121,10 +152,16 @@ def test_sync_active_keyframe_mirrors_repairs_after_legacy_update():
     record = get_active_keyframe_record(seed)
 
     assert seed["active_keyframe_kf"] == 3
-    assert seed["poses"][3] is pose
-    assert record["pose"] is pose
+    assert seed["poses"][3] is seed["T_WC1"]
+    assert record["pose"] is seed["T_WC1"]
+    assert seed["T_WC1"] is not pose
+    assert not np.shares_memory(seed["T_WC1"][0], pose[0])
+    assert not np.shares_memory(seed["T_WC1"][1], pose[1])
     assert record["feats"] is feats
-    assert record["landmark_id_by_feat"] is lookup
+    assert record["landmark_id_by_feat"] is seed["landmark_id_by_feat1"]
+    assert seed["landmark_id_by_feat1"] is not lookup
+    assert not np.shares_memory(seed["landmark_id_by_feat1"], lookup)
+    np.testing.assert_array_equal(seed["landmark_id_by_feat1"], lookup)
 
 
 # Validate active mirror mismatches without repairing them
@@ -147,13 +184,61 @@ def test_set_active_keyframe_record_updates_legacy_and_canonical_state():
 
     assert seed["keyframe_kf"] == 4
     assert seed["active_keyframe_kf"] == 4
-    assert seed["T_WC1"] is pose
+    assert seed["T_WC1"] is seed["poses"][4]
     assert seed["feats1"] is feats
-    assert seed["landmark_id_by_feat1"] is lookup
-    assert seed["poses"][4] is pose
-    assert record["pose"] is pose
+    assert seed["landmark_id_by_feat1"] is record["landmark_id_by_feat"]
+    assert seed["landmark_id_by_feat1"] is not lookup
+    assert seed["poses"][4] is record["pose"]
+    assert record["pose"] is not pose
+    assert not np.shares_memory(record["pose"][0], pose[0])
+    assert not np.shares_memory(record["pose"][1], pose[1])
     seed["landmarks"][1]["obs"].append({"kf": 4, "feat": 1, "xy": np.asarray([7.0, 6.0], dtype=np.float64)})
     assert validate_active_keyframe_state(seed)["errors"] == []
+
+
+# Copy canonical pose and lookup inputs when storing keyframe records
+def test_set_keyframe_record_copies_pose_and_lookup_inputs():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    pose = _pose(5.0)
+    lookup = np.asarray([1, -1], dtype=np.int64)
+    feats = _features([[1.0, 2.0], [3.0, 4.0]])
+
+    record = set_keyframe_record(seed, 5, pose, feats, lookup, sync_active=False, context="unit keyframe")
+    pose[1][0] = 99.0
+    lookup[0] = 99
+
+    assert record is get_keyframe_record(seed, 5)
+    assert not np.shares_memory(record["pose"][1], pose[1])
+    assert not np.shares_memory(record["landmark_id_by_feat"], lookup)
+    np.testing.assert_allclose(record["pose"][1], np.asarray([5.0, 0.0, 0.0], dtype=np.float64))
+    np.testing.assert_array_equal(record["landmark_id_by_feat"], np.asarray([1, -1], dtype=np.int64))
+
+
+# Rebuild active lookup from active keyframe observations
+def test_rebuild_active_lookup_repairs_stale_cache_from_observations():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    seed["keyframes"][1]["landmark_id_by_feat"] = np.asarray([99, 99, 99], dtype=np.int64)
+    seed["landmark_id_by_feat1"] = np.asarray([99, 99, 99], dtype=np.int64)
+
+    lookup = rebuild_active_landmark_lookup(seed, context="unit active lookup")
+
+    np.testing.assert_array_equal(lookup, np.asarray([-1, 0, 1], dtype=np.int64))
+    assert seed["landmark_id_by_feat1"] is seed["keyframes"][1]["landmark_id_by_feat"]
+
+
+# Reject conflicting observations during active lookup rebuild
+def test_rebuild_active_lookup_rejects_active_feature_conflicts():
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    seed["landmarks"].append(
+        {
+            "id": 2,
+            "X_w": np.asarray([2.0, 0.0, 5.0], dtype=np.float64),
+            "obs": [{"kf": 1, "feat": 1, "xy": np.asarray([30.0, 40.0], dtype=np.float64)}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="feature assignment conflict"):
+        rebuild_active_landmark_lookup(seed, context="unit active lookup")
 
 
 # Reject stale active-keyframe frame-pipeline indices

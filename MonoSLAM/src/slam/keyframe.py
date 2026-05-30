@@ -9,8 +9,8 @@ import numpy as np
 from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre
 from geometry.rotation import angle_between_rotmats
-from slam.keyframe_state import set_active_keyframe_record
-from slam.landmark_state import build_observation_indexes, iter_landmark_observations
+from slam.keyframe_state import build_landmark_lookup_for_kf, set_active_keyframe_record
+from slam.landmark_state import iter_landmark_observations
 from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
@@ -19,6 +19,11 @@ _PROMOTION_COVERAGE_GRID_COLS = 4
 _PROMOTION_COVERAGE_GRID_ROWS = 3
 _MIN_LINKED_OBS_CELLS_FOR_PROMOTION = 4
 _MIN_LINKED_OBS_BBOX_AREA_FRACTION_FOR_PROMOTION = 0.15
+
+
+# Build the feature-index lookup for a given keyframe id
+def _build_landmark_id_by_feat_for_kf(seed: dict, n_feat: int, kf_index: int) -> np.ndarray:
+    return build_landmark_lookup_for_kf(seed, n_feat, kf_index, context="keyframe lookup")
 
 
 # Keyframe decision bundle
@@ -43,30 +48,6 @@ class KeyframeUpdateResult:
     promoted: bool
     # Step-level stats
     stats: dict
-
-
-# Build the feature-index to landmark-id lookup for a given keyframe id
-def _build_landmark_id_by_feat_for_kf(seed: dict, n_feat: int, kf_index: int) -> np.ndarray:
-    # Check seed contains landmarks
-    seed = check_required_keys(seed, {"landmarks"}, name="seed")
-
-    # Check sizes
-    n_feat = check_int_ge0(n_feat, name="n_feat")
-    kf_index = check_int_ge0(kf_index, name="kf_index")
-
-    # Initialise lookup as unmapped
-    landmark_id_by_feat = np.full((n_feat,), -1, dtype=np.int64)
-
-    # Scan checked observation assignments for this keyframe
-    indexes = build_observation_indexes(seed, context="seed['landmarks']")
-    for (obs_kf, feat), landmark_id in indexes["landmark_id_by_feature"].items():
-        if int(obs_kf) != int(kf_index):
-            continue
-        if int(feat) < 0 or int(feat) >= int(n_feat):
-            continue
-        landmark_id_by_feat[int(feat)] = int(landmark_id)
-
-    return landmark_id_by_feat
 
 
 # Count landmarks that have an observation in a given keyframe
@@ -192,7 +173,7 @@ def should_make_keyframe(
 ) -> KeyframeDecision:
     # --- Checks ---
     # Check required seed structure
-    seed = check_required_keys(seed, {"T_WC1", "landmarks"}, name="seed")
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
 
     # Check container types
     if not isinstance(pose_out, dict):
@@ -368,22 +349,22 @@ def promote_frame_to_keyframe(
     n_feat = int(kps_xy.shape[0])
 
     # Build a fresh feature-to-landmark lookup for this new keyframe
-    landmark_id_by_feat1 = _build_landmark_id_by_feat_for_kf(seed, n_feat, current_kf)
+    active_lookup = build_landmark_lookup_for_kf(seed, n_feat, current_kf, context="keyframe promotion lookup")
 
     # Build the new keyframe pose
-    T_WC1 = (
+    pose = (
         np.asarray(R_cur, dtype=np.float64),
         np.asarray(t_cur, dtype=np.float64).reshape(3,),
     )
 
     # Store legacy mirrors and sync canonical active state
-    set_active_keyframe_record(seed, int(current_kf), T_WC1, cur_feats, landmark_id_by_feat1)
+    set_active_keyframe_record(seed, int(current_kf), pose, cur_feats, active_lookup)
 
     # Store promotion diagnostics
     seed["last_keyframe_promotion"] = {
         "current_kf": int(current_kf),
         "n_feat": int(n_feat),
-        "n_linked_landmarks": int(np.sum(landmark_id_by_feat1 >= 0)),
+        "n_linked_landmarks": int(np.sum(active_lookup >= 0)),
     }
 
     return seed
@@ -408,7 +389,7 @@ def consider_promote_keyframe(
 ) -> KeyframeUpdateResult:
     # --- Checks ---
     # Check required seed structure
-    seed = check_required_keys(seed, {"landmarks", "T_WC1"}, name="seed")
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
 
     # Check containers
     if not isinstance(pose_out, dict):

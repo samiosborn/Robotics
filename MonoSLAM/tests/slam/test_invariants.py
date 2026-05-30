@@ -292,6 +292,26 @@ def test_active_lookup_without_active_observation_fails():
         audit_seed_invariants(seed)
 
 
+# Reject active observations missing from the active lookup cache
+def test_active_observation_missing_from_lookup_cache_fails():
+    seed = _valid_canonical_seed()
+    stale_lookup = np.asarray([-1, 10, -1], dtype=np.int64)
+    seed["landmark_id_by_feat1"] = stale_lookup
+    seed["keyframes"][1]["landmark_id_by_feat"] = stale_lookup
+
+    with pytest.raises(ValueError, match="missing active observation"):
+        audit_seed_invariants(seed)
+
+
+# Reject active pose stores missing the active keyframe pose
+def test_active_pose_missing_from_pose_store_fails():
+    seed = _valid_canonical_seed()
+    del seed["poses"][1]
+
+    with pytest.raises(ValueError, match="poses.*active keyframe 1"):
+        audit_seed_invariants(seed)
+
+
 # Reject malformed canonical pose stores
 def test_malformed_pose_store_fails_validation():
     seed = _valid_canonical_seed()
