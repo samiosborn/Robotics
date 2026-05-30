@@ -32,12 +32,23 @@ def _feature_keypoints_for_validation(feats, name: str) -> np.ndarray:
     return np.asarray(kps_xy[:, :2], dtype=np.float64)
 
 
-# Resolve and validate active keyframe arguments against the seed
-def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyframe_kf: int) -> tuple[int, Any]:
+# Resolve new and legacy frame input conventions
+def _resolve_frame_image_and_compat_features(seed: dict[str, Any], keyframe_feats_or_cur_im, cur_im):
+    if cur_im is not None:
+        return cur_im, keyframe_feats_or_cur_im
+
+    if not has_active_keyframe_state(seed):
+        raise ValueError("cur_im argument is required when seed has no active keyframe state")
+
+    return keyframe_feats_or_cur_im, None
+
+
+# Resolve and validate compatibility active-keyframe args against the seed
+def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyframe_kf: int | None) -> tuple[int, Any]:
     active_kf = None
     if has_active_keyframe_state(seed):
         active_kf = get_active_keyframe_kf(seed)
-        if int(active_kf) != int(keyframe_kf):
+        if keyframe_kf is not None and int(active_kf) != int(keyframe_kf):
             raise ValueError(
                 f"keyframe_kf argument must match active keyframe state; got {int(keyframe_kf)} and seed active {int(active_kf)}"
             )
@@ -52,6 +63,8 @@ def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyfra
                 raise ValueError("keyframe_feats argument must match active keyframe features in seed")
 
     if active_kf is None:
+        if keyframe_kf is None:
+            keyframe_kf = 1
         active_kf = int(keyframe_kf)
     if active_feats is None:
         if keyframe_feats is None:
@@ -344,8 +357,8 @@ def _attempt_incoherent_support_recovery(
 def process_frame_against_seed(
     K: np.ndarray,
     seed: dict[str, Any],
-    keyframe_feats: FrameFeatures,
-    cur_im: np.ndarray,
+    keyframe_feats_or_cur_im: FrameFeatures | np.ndarray,
+    cur_im: np.ndarray | None = None,
     *,
     feature_cfg: dict[str, Any],
     match_mode: str | None = None,
@@ -403,7 +416,7 @@ def process_frame_against_seed(
     pnp_threshold_stability_max_camera_centre_direction_deg: float = 120.0,
     pnp_threshold_stability_disjoint_iou: float = 0.05,
     enable_pnp_threshold_stability_gate: bool = False,
-    keyframe_kf: int = 1,
+    keyframe_kf: int | None = None,
     current_kf: int = -1,
     grow_map: bool = True,
     min_parallax_deg: float = 1.0,
@@ -429,6 +442,7 @@ def process_frame_against_seed(
         raise ValueError("feature_cfg must be a dict")
     if not isinstance(F_cfg, dict):
         raise ValueError("F_cfg must be a dict")
+    cur_im, keyframe_feats = _resolve_frame_image_and_compat_features(seed, keyframe_feats_or_cur_im, cur_im)
 
     # Read current image shape for PnP spatial coverage checks
     if image_shape is None:
@@ -438,7 +452,8 @@ def process_frame_against_seed(
         image_shape = (int(cur_im_arr.shape[0]), int(cur_im_arr.shape[1]))
 
     # Check frame indices
-    keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
+    if keyframe_kf is not None:
+        keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
     current_kf = int(current_kf)
     if current_kf < -1:
         raise ValueError(f"current_kf must be >= -1; got {current_kf}")

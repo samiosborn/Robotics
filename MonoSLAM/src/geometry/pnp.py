@@ -10,7 +10,7 @@ from geometry.camera import camera_centre, pixel_to_normalised, reprojection_err
 from geometry.lie import hat
 from geometry.rotation import angle_between_rotmats
 from geometry.pose import angle_between_translations, apply_left_pose_increment_wc
-from slam.keyframe_state import get_active_landmark_lookup, has_active_keyframe_state
+from slam.keyframe_state import get_rebuilt_active_landmark_lookup, has_active_keyframe_state
 from slam.landmark_state import build_landmark_id_index, count_valid_landmark_observations
 
 
@@ -917,7 +917,7 @@ def build_pnp_correspondences_with_stats(
     # Read landmark id map from keyframe features to landmarks
     active_lookup_raw = np.zeros((0,), dtype=np.int64)
     if has_active_keyframe_state(seed):
-        active_lookup_raw = get_active_landmark_lookup(seed)
+        active_lookup_raw = get_rebuilt_active_landmark_lookup(seed, context="pnp correspondence active lookup")
     active_lookup = np.asarray(active_lookup_raw, dtype=np.int64).reshape(-1)
 
     # Read tracked feature indices

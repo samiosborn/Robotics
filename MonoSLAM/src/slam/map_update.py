@@ -9,7 +9,7 @@ import numpy as np
 from core.checks import as_2xN_points, check_1d_pair_same_length, check_2xN_pair, check_dict, check_index_array_1d, check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_points_2xN, check_points_xy_N2_rows, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre, projection_matrix, reprojection_errors_sq, world_to_camera_points
 from geometry.triangulation import triangulate_points
-from slam.keyframe_state import get_active_keyframe_kf, get_active_landmark_lookup, has_active_keyframe_state, rebuild_active_landmark_lookup
+from slam.keyframe_state import get_active_keyframe_kf, get_rebuilt_active_landmark_lookup, has_active_keyframe_state, rebuild_active_landmark_lookup
 from slam.landmark_state import add_landmark_observation, build_landmark_id_index, build_observation_indexes, count_valid_landmark_observations, create_landmark_record, get_landmarks, next_landmark_id
 from slam.map_mutation import new_map_mutation_report
 
@@ -78,6 +78,14 @@ def _resolve_active_keyframe_kf_argument(seed: dict, keyframe_kf: int, *, contex
         )
 
     return int(active_kf)
+
+
+# Rebuild active lookup cache before runtime use
+def _active_lookup_for_runtime(seed: dict, *, context: str) -> np.ndarray:
+    if not has_active_keyframe_state(seed):
+        return np.zeros((0,), dtype=np.int64)
+
+    return get_rebuilt_active_landmark_lookup(seed, context=str(context))
 
 
 # Append current-frame observations for already-known tracked landmarks
@@ -174,12 +182,12 @@ def append_tracked_observations_to_seed(
     assignment_by_feature = dict(observation_indexes["landmark_id_by_feature"])
     active_lookup_raw = None
     if has_active_keyframe_state(seed):
-        active_lookup_raw = get_active_landmark_lookup(seed)
+        active_lookup_raw = _active_lookup_for_runtime(seed, context="tracked observation append active lookup")
     active_lookup = None
     if active_lookup_raw is not None:
         active_lookup = check_index_array_1d(
             active_lookup_raw,
-            name="seed['landmark_id_by_feat1']",
+            name="active keyframe lookup",
             dtype=np.int64,
             allow_negative=True,
         ).copy()
@@ -369,12 +377,10 @@ def append_tracked_observations_to_seed(
         R_cur = check_matrix_3x3(pose_out.get("R", None), name="pose_out['R']", dtype=float, finite=True)
         t_cur = check_vector_3(pose_out.get("t", None), name="pose_out['t']", dtype=float, finite=True)
 
-        active_lookup_extra_raw = np.zeros((0,), dtype=np.int64)
-        if has_active_keyframe_state(seed):
-            active_lookup_extra_raw = get_active_landmark_lookup(seed)
+        active_lookup_extra_raw = _active_lookup_for_runtime(seed, context="tracked observation extra active lookup")
         active_lookup_extra = check_index_array_1d(
             active_lookup_extra_raw,
-            name="seed['landmark_id_by_feat1']",
+            name="active keyframe lookup",
             dtype=np.int64,
             allow_negative=True,
         )
@@ -504,9 +510,9 @@ def build_new_landmark_candidates(seed: dict, track_out: dict) -> NewLandmarkCan
     track_out = check_dict(track_out, name="track_out")
 
     # Read landmark lookup from keyframe feature index to landmark id
-    landmark_id_by_feat1 = check_index_array_1d(
-        get_active_landmark_lookup(seed),
-        name="seed['landmark_id_by_feat1']",
+    active_lookup = check_index_array_1d(
+        _active_lookup_for_runtime(seed, context="new landmark candidate active lookup"),
+        name="active keyframe lookup",
         dtype=np.int64,
         allow_negative=True,
     )
@@ -565,7 +571,7 @@ def build_new_landmark_candidates(seed: dict, track_out: dict) -> NewLandmarkCan
         )
 
     # Valid keyframe feature indices must lie inside the seed lookup
-    valid_kf = (kf_feat_idx >= 0) & (kf_feat_idx < int(landmark_id_by_feat1.size))
+    valid_kf = (kf_feat_idx >= 0) & (kf_feat_idx < int(active_lookup.size))
 
     # Valid current-frame feature indices must be non-negative
     valid_cur = (cur_feat_idx >= 0)
@@ -573,7 +579,7 @@ def build_new_landmark_candidates(seed: dict, track_out: dict) -> NewLandmarkCan
     # A tracked keyframe feature is a candidate only if it is currently unmapped
     unmapped = np.zeros((M,), dtype=bool)
     if np.any(valid_kf):
-        unmapped[valid_kf] = (landmark_id_by_feat1[kf_feat_idx[valid_kf]] < 0)
+        unmapped[valid_kf] = (active_lookup[kf_feat_idx[valid_kf]] < 0)
 
     # Keep only valid, currently unmapped correspondences
     keep = valid_kf & valid_cur & unmapped
@@ -865,9 +871,9 @@ def append_new_landmarks_to_seed(
     mutation_report = new_map_mutation_report(context="map_growth_append")
 
     # Read and check lookup
-    landmark_id_by_feat1 = check_index_array_1d(
-        get_active_landmark_lookup(seed),
-        name="seed['landmark_id_by_feat1']",
+    active_lookup = check_index_array_1d(
+        _active_lookup_for_runtime(seed, context="map-growth append active lookup"),
+        name="active keyframe lookup",
         dtype=np.int64,
         allow_negative=True,
     ).copy()
@@ -906,9 +912,9 @@ def append_new_landmarks_to_seed(
 
     # Check feature-index bounds against the seed lookup
     if track_idx.size > 0:
-        if int(kf_feat_idx.max()) >= int(landmark_id_by_feat1.size):
+        if int(kf_feat_idx.max()) >= int(active_lookup.size):
             raise ValueError(
-                f"batch.kf_feat_idx contains index {int(kf_feat_idx.max())} outside seed lookup size {landmark_id_by_feat1.size}"
+                f"batch.kf_feat_idx contains index {int(kf_feat_idx.max())} outside active lookup size {active_lookup.size}"
             )
 
     # Read descriptor source if supplied
@@ -929,7 +935,7 @@ def append_new_landmarks_to_seed(
         feat_cur = int(cur_feat_idx[i])
 
         # Skip if the keyframe feature is already assigned
-        if int(landmark_id_by_feat1[feat_kf]) >= 0:
+        if int(active_lookup[feat_kf]) >= 0:
             mutation_report["skipped_landmark_candidates"] += 1
             mutation_report["skipped_mapped_keyframe_features"] += 1
             mutation_report["feature_assignment_conflicts"] += 1
@@ -992,7 +998,7 @@ def append_new_landmarks_to_seed(
         landmark_by_id[int(lm_id)] = landmark
 
         # Update the keyframe feature lookup
-        landmark_id_by_feat1[feat_kf] = lm_id
+        active_lookup[feat_kf] = lm_id
 
         # Advance counters
         added_ids.append(lm_id)
@@ -1006,7 +1012,7 @@ def append_new_landmarks_to_seed(
     seed["landmarks"] = landmarks
     rebuild_active_landmark_lookup(seed, context="map-growth append active lookup")
 
-    # Store append diagnostics
+    # Store append presentation diagnostics
     seed["last_append_stats"] = {
         "n_in_batch": int(track_idx.size),
         "n_added": int(n_added),
@@ -1084,9 +1090,8 @@ def grow_map_from_tracking_result(
     )
     seed_after = int(len(get_landmarks(seed)))
 
-    # Read append stats
-    append_stats = seed.get("last_append_stats", {})
-    n_added = int(append_stats.get("n_added", max(seed_after - seed_before, 0)))
+    # Read mutation count from the explicit report
+    n_added = int(mutation_report["added_landmarks"])
 
     # Pack step-level stats
     stats = {

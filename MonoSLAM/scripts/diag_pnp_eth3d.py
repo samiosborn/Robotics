@@ -2277,12 +2277,10 @@ def main() -> None:
         frontend_out = process_frame_against_seed(
             K,
             seed,
-            ref_keyframe_feats,
             cur_im,
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
             **pipeline_pnp_kwargs,
-            keyframe_kf=ref_keyframe_index,
             current_kf=i,
             max_append_reproj_error_px_existing=float(max_append_reproj_error_px_existing),
         )

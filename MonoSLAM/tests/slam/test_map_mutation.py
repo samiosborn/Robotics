@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from geometry.pnp import PnPCorrespondences, build_pnp_correspondences_with_stats, pnp_inlier_spatial_coverage
+from slam import map_update as map_update_module
 from slam.invariants import audit_seed_invariants
 from slam.keyframe_state import initialise_canonical_keyframe_state
 from slam.map_mutation import (
@@ -19,6 +20,7 @@ from slam.map_update import (
     TriangulatedLandmarkBatch,
     append_new_landmarks_to_seed,
     append_tracked_observations_to_seed,
+    build_new_landmark_candidates,
 )
 
 
@@ -212,6 +214,45 @@ def test_pnp_correspondence_build_rejects_malformed_observation_support():
         build_pnp_correspondences_with_stats(seed, track_out, min_landmark_observations=2)
 
 
+# Repair stale active lookup cache before PnP support building
+def test_pnp_correspondence_build_repairs_stale_active_lookup_cache():
+    seed = _seed()
+    stale_lookup = np.asarray([-1, -1, -1], dtype=np.int64)
+    seed["keyframes"][1]["landmark_id_by_feat"] = stale_lookup
+    seed["landmark_id_by_feat1"] = stale_lookup
+    track_out = {
+        "kf_feat_idx": np.asarray([0], dtype=np.int64),
+        "cur_feat_idx": np.asarray([4], dtype=np.int64),
+        "xy_kf": np.asarray([[10.0, 20.0]], dtype=np.float64),
+        "xy_cur": np.asarray([[11.0, 21.0]], dtype=np.float64),
+    }
+
+    corrs, stats = build_pnp_correspondences_with_stats(seed, track_out, min_landmark_observations=1)
+
+    np.testing.assert_array_equal(seed["landmark_id_by_feat1"], np.asarray([0, -1, -1], dtype=np.int64))
+    np.testing.assert_array_equal(corrs.landmark_ids, np.asarray([0], dtype=np.int64))
+    assert stats["n_corr_raw"] == 1
+
+
+# Repair stale active lookup cache before map-growth candidate selection
+def test_map_growth_candidate_build_repairs_stale_active_lookup_cache():
+    seed = _seed()
+    stale_lookup = np.asarray([0, 99, -1], dtype=np.int64)
+    seed["keyframes"][1]["landmark_id_by_feat"] = stale_lookup
+    seed["landmark_id_by_feat1"] = stale_lookup
+    track_out = {
+        "kf_feat_idx": np.asarray([1], dtype=np.int64),
+        "cur_feat_idx": np.asarray([5], dtype=np.int64),
+        "xy_kf": np.asarray([[30.0, 40.0]], dtype=np.float64),
+        "xy_cur": np.asarray([[31.0, 41.0]], dtype=np.float64),
+    }
+
+    candidates = build_new_landmark_candidates(seed, track_out)
+
+    np.testing.assert_array_equal(seed["landmark_id_by_feat1"], np.asarray([0, -1, -1], dtype=np.int64))
+    np.testing.assert_array_equal(candidates.kf_feat_idx, np.asarray([1], dtype=np.int64))
+
+
 # Report one duplicate tracked observation skip
 def test_tracked_observation_append_reports_skipped_duplicate_observation():
     seed = _seed()
@@ -250,6 +291,58 @@ def test_tracked_observation_append_still_preserves_seed_state_shape():
     assert "last_tracked_observation_append_stats" in seed
     assert stats["mutation_report"] is report
     assert audit_seed_invariants(seed)["errors"] == []
+
+
+# Use mutation reports rather than legacy append stats for map-growth summaries
+def test_map_growth_result_uses_mutation_report_not_legacy_append_stats(monkeypatch):
+    seed = _seed()
+    candidates = map_update_module.NewLandmarkCandidates(
+        track_idx=np.asarray([0], dtype=np.int64),
+        kf_feat_idx=np.asarray([1], dtype=np.int64),
+        cur_feat_idx=np.asarray([5], dtype=np.int64),
+        x_kf=np.asarray([[30.0], [40.0]], dtype=np.float64),
+        x_cur=np.asarray([[31.0], [41.0]], dtype=np.float64),
+    )
+    batch = _batch([1], [5])
+    mutation_report = new_map_mutation_report(context="patched")
+    mutation_report["added_landmarks"] = 1
+    mutation_report["added_observations"] = 2
+
+    # Return a deterministic candidate bundle
+    def _fake_build_new_landmark_candidates(seed_arg, track_out_arg):
+        return candidates
+
+    # Return a deterministic triangulated batch
+    def _fake_triangulate_new_landmarks(*args, **kwargs):
+        return batch
+
+    # Publish stale legacy stats beside the explicit report
+    def _fake_append_new_landmarks_to_seed(seed_arg, batch_arg, **kwargs):
+        seed_arg["landmarks"] = list(seed_arg["landmarks"]) + [
+            {"id": 1, "X_w": np.asarray([1.0, 0.0, 5.0], dtype=np.float64), "obs": []}
+        ]
+        seed_arg["last_append_stats"] = {"n_added": 99}
+        seed_arg["last_append_mutation_report"] = mutation_report
+        return seed_arg, mutation_report
+
+    monkeypatch.setattr(map_update_module, "build_new_landmark_candidates", _fake_build_new_landmark_candidates)
+    monkeypatch.setattr(map_update_module, "triangulate_new_landmarks", _fake_triangulate_new_landmarks)
+    monkeypatch.setattr(map_update_module, "append_new_landmarks_to_seed", _fake_append_new_landmarks_to_seed)
+
+    result = map_update_module.grow_map_from_tracking_result(
+        seed,
+        {},
+        np.eye(3, dtype=np.float64),
+        np.eye(3, dtype=np.float64),
+        np.eye(3, dtype=np.float64),
+        np.zeros((3,), dtype=np.float64),
+        np.eye(3, dtype=np.float64),
+        np.asarray([1.0, 0.0, 0.0], dtype=np.float64),
+        current_kf=2,
+    )
+
+    assert result.stats["n_added"] == 1
+    assert result.mutation_report is mutation_report
 
 
 # Report one map-growth landmark and its observations

@@ -276,11 +276,9 @@ def main() -> None:
         out = process_frame_against_seed(
             K,
             seed,
-            keyframe_feats,
             cur_im,
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
-            keyframe_kf=keyframe_index,
             current_kf=i,
             **frontend_kwargs["pnp_frontend_kwargs"],
         )

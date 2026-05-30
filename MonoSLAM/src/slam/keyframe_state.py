@@ -367,7 +367,7 @@ def get_active_landmark_lookup(seed):
     return _get_active_record_field(seed, "landmark_id_by_feat", "landmark_id_by_feat1")
 
 
-# Store a new active keyframe through legacy mirrors
+# Store a new canonical active keyframe and sync legacy mirrors
 def set_active_keyframe_record(seed, kf, pose, feats, landmark_id_by_feat) -> dict:
     seed = _check_seed_dict(seed)
     kf = check_int_ge0_no_bool(kf, name="kf")
@@ -466,11 +466,18 @@ def set_active_landmark_lookup(seed, landmark_id_by_feat, *, context: str = "act
 # Rebuild active lookup cache from landmark observations
 def rebuild_active_landmark_lookup(seed, *, context: str = "active_lookup") -> np.ndarray:
     seed = _check_seed_dict(seed)
+    if "active_keyframe_kf" not in seed:
+        sync_active_keyframe_mirrors_if_present(seed)
     active_kf = get_active_keyframe_kf(seed)
     feats = get_active_keyframe_features(seed)
     n_feat = _checked_feature_count(feats, name=f"{context} active features")
     lookup = build_landmark_lookup_for_kf(seed, n_feat, int(active_kf), context=str(context))
     return set_active_landmark_lookup(seed, lookup, context=str(context))
+
+
+# Rebuild and read the active lookup cache for runtime consumers
+def get_rebuilt_active_landmark_lookup(seed, *, context: str = "active_lookup") -> np.ndarray:
+    return rebuild_active_landmark_lookup(seed, context=str(context))
 
 
 # Store an accepted current-frame pose

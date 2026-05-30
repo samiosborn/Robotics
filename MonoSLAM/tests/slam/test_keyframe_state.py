@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from slam import frame_pipeline as frame_pipeline_module
 from slam.invariants import audit_seed_invariants
 from slam.frame_pipeline import _copy_pose_blocks, process_frame_against_seed
 from slam.keyframe import promote_frame_to_keyframe
@@ -274,6 +275,37 @@ def test_process_frame_rejects_stale_active_keyframe_features_argument():
             keyframe_kf=1,
             current_kf=2,
         )
+
+
+# Derive active frame-pipeline inputs from canonical state
+def test_process_frame_derives_active_keyframe_state_from_seed(monkeypatch):
+    seed = initialise_canonical_keyframe_state(_bootstrap_seed())
+    canonical_feats = get_active_keyframe_features(seed)
+    seed["feats1"] = _features([[99.0, 99.0]])
+    cur_im = np.zeros((8, 8), dtype=np.float64)
+    calls = {}
+
+    # Capture the keyframe features used by the pipeline
+    def _fake_track_against_keyframe(K, keyframe_feats, cur_im_arg, **kwargs):
+        calls["keyframe_feats"] = keyframe_feats
+        calls["cur_im"] = cur_im_arg
+        return {"stats": {"n_matches": 0, "n_inliers": 0, "reason": "unit_no_inliers"}}
+
+    monkeypatch.setattr(frame_pipeline_module, "track_against_keyframe", _fake_track_against_keyframe)
+
+    out = frame_pipeline_module.process_frame_against_seed(
+        np.eye(3, dtype=np.float64),
+        seed,
+        cur_im,
+        feature_cfg={},
+        F_cfg={},
+        current_kf=2,
+    )
+
+    assert calls["keyframe_feats"] is canonical_feats
+    assert calls["cur_im"] is cur_im
+    assert out["ok"] is False
+    assert out["stats"]["reason"] == "unit_no_inliers"
 
 
 # Copy accepted pose blocks before storing frame-pipeline state

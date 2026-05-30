@@ -52,18 +52,14 @@ print(f"Bootstrap OK: {len(seed['landmarks'])} landmarks")
 pnp_kwargs = dict(frontend_kwargs["pnp_frontend_kwargs"])
 pnp_kwargs["grow_map"] = False
 
-keyframe_feats = seed["feats1"]
-keyframe_kf = 1
-
 frames_to_test = [2, 3, 4, 5]
 for frame_idx in frames_to_test:
     im, ts, frame_id = seq.get(frame_idx)
     frame_out = process_frame_against_seed(
-        K, seed, keyframe_feats,
+        K, seed,
         im,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_kf,
         current_kf=frame_idx,
         **pnp_kwargs,
     )
@@ -73,9 +69,6 @@ for frame_idx in frames_to_test:
     # Update for next iteration
     if frame_out["ok"]:
         seed = frame_out["seed"]
-        if bool(frame_out["stats"].get("keyframe_promoted", False)):
-            keyframe_feats = frame_out["track_out"]["cur_feats"]
-            keyframe_kf = int(frame_idx)
 
 print("\n=== CONCLUSION ===")
 print("If frames work with bootstrap-only, the problem is map growth / observation appending")
