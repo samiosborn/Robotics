@@ -17,6 +17,7 @@ from geometry.camera import world_to_camera_points, reprojection_errors_sq
 from geometry.pose import apply_left_pose_increment_wc
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features
 from slam.tracking import track_against_keyframe
 from slam.seed import seed_keyframe_pose
 from geometry.pnp import build_pnp_correspondences_with_stats
@@ -81,15 +82,14 @@ def main() -> None:
     )
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
+    keyframe_1_feats = get_active_keyframe_features(seed)
 
     # Process frame 2
     im2, ts2, id2 = seq.get(2)
     out_frame2 = process_frame_against_seed(
-        K, seed, keyframe_1_feats, im2,
+        K, seed, im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=1,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )

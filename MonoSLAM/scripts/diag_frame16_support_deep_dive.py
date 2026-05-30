@@ -14,6 +14,12 @@ from geometry.camera import reprojection_residuals, world_to_camera_points
 from geometry.pnp import PnPCorrespondences, _pnp_inlier_mask_from_pose, _slice_pnp_correspondences, build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac, pnp_local_displacement_consistency_mask
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import (
+    get_active_keyframe_features,
+    get_active_keyframe_kf,
+    get_rebuilt_active_landmark_lookup,
+    set_active_keyframe_record,
+)
 from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
@@ -228,8 +234,32 @@ def _diagnostic_seed_snapshot(seed: dict) -> dict:
         landmarks.append(lm_copy)
 
     out["landmarks"] = landmarks
-    if "landmark_id_by_feat1" in seed:
-        out["landmark_id_by_feat1"] = np.asarray(seed["landmark_id_by_feat1"], dtype=np.int64).copy()
+    poses = {}
+    for kf, pose in seed.get("poses", {}).items():
+        if isinstance(pose, tuple) and len(pose) == 2:
+            poses[int(kf)] = (
+                np.asarray(pose[0], dtype=np.float64).copy(),
+                np.asarray(pose[1], dtype=np.float64).reshape(3).copy(),
+            )
+        else:
+            poses[int(kf)] = pose
+    out["poses"] = poses
+
+    keyframes = {}
+    for kf, record in seed.get("keyframes", {}).items():
+        if not isinstance(record, dict):
+            keyframes[int(kf)] = record
+            continue
+        rec = dict(record)
+        if isinstance(rec.get("pose", None), tuple) and len(rec["pose"]) == 2:
+            rec["pose"] = (
+                np.asarray(rec["pose"][0], dtype=np.float64).copy(),
+                np.asarray(rec["pose"][1], dtype=np.float64).reshape(3).copy(),
+            )
+        if rec.get("landmark_id_by_feat", None) is not None:
+            rec["landmark_id_by_feat"] = np.asarray(rec["landmark_id_by_feat"], dtype=np.int64).copy()
+        keyframes[int(kf)] = rec
+    out["keyframes"] = keyframes
 
     pose = _copy_pose(seed.get("last_accepted_pose", None))
     if pose is not None:
@@ -241,7 +271,6 @@ def _diagnostic_seed_snapshot(seed: dict) -> dict:
 # Copy the active lookup basis into a reusable anchor
 def _copy_basis_snapshot(
     seed: dict,
-    keyframe_index: int,
     *,
     label: str,
     kind: str,
@@ -250,29 +279,29 @@ def _copy_basis_snapshot(
 ) -> dict | None:
     if not isinstance(seed, dict):
         return None
-    feats = seed.get("feats1", None)
-    if feats is None or not hasattr(feats, "kps_xy"):
-        return None
-    lookup_raw = seed.get("landmark_id_by_feat1", None)
-    if lookup_raw is None:
+    try:
+        feats = get_active_keyframe_features(seed)
+        lookup = get_rebuilt_active_landmark_lookup(seed, context="diagnostic basis snapshot lookup")
+        active_kf = get_active_keyframe_kf(seed)
+    except Exception:
         return None
     try:
         R, t = seed_keyframe_pose(seed)
     except Exception:
         return None
 
-    lookup = np.asarray(lookup_raw, dtype=np.int64).reshape(-1).copy()
+    lookup = np.asarray(lookup, dtype=np.int64).reshape(-1).copy()
     kps_xy = np.asarray(feats.kps_xy)
     n_feat = int(kps_xy.shape[0]) if kps_xy.ndim >= 1 else 0
     return {
         "label": str(label),
         "kind": str(kind),
         "source_frame": None if source_frame is None else int(source_frame),
-        "kf": int(seed.get("keyframe_kf", keyframe_index)),
+        "kf": int(active_kf),
         "R": np.asarray(R, dtype=np.float64).copy(),
         "t": np.asarray(t, dtype=np.float64).reshape(3).copy(),
         "feats": feats,
-        "landmark_id_by_feat1": lookup,
+        "landmark_id_by_feat": lookup,
         "localisation_only": bool(localisation_only),
         "n_feat": int(n_feat),
         "n_lookup_mapped": int(np.sum(lookup >= 0)),
@@ -343,7 +372,7 @@ def _reconstruct_rescued_support_basis(track_out: dict, pose_out: dict, current_
         "R": np.asarray(pose_out["R"], dtype=np.float64).copy(),
         "t": np.asarray(pose_out["t"], dtype=np.float64).reshape(3).copy(),
         "feats": cur_feats,
-        "landmark_id_by_feat1": lookup,
+        "landmark_id_by_feat": lookup,
         "localisation_only": True,
         "n_feat": int(n_feat),
         "n_lookup_mapped": int(n_mapped),
@@ -355,26 +384,27 @@ def _reconstruct_rescued_support_basis(track_out: dict, pose_out: dict, current_
 # Build a seed with a diagnostic active basis
 def _seed_with_basis(seed: dict, basis: dict) -> dict:
     out = dict(seed)
-    out["feats1"] = basis["feats"]
-    out["keyframe_kf"] = int(basis["kf"])
-    out["T_WC1"] = (
+    out["poses"] = dict(seed.get("poses", {}))
+    out["keyframes"] = dict(seed.get("keyframes", {}))
+    pose = (
         np.asarray(basis["R"], dtype=np.float64).copy(),
         np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
     )
-    out["landmark_id_by_feat1"] = np.asarray(basis["landmark_id_by_feat1"], dtype=np.int64).reshape(-1).copy()
+    lookup = np.asarray(basis["landmark_id_by_feat"], dtype=np.int64).reshape(-1).copy()
+    set_active_keyframe_record(out, int(basis["kf"]), pose, basis["feats"], lookup)
     return out
 
 
 # Build the support funnel from one tracked frame
 def _support_funnel(seed: dict, track_out: dict, pnp_cfg: dict, image_shape: tuple[int, int]) -> dict:
-    landmark_id_by_feat1 = np.asarray(seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="support deep-dive active lookup")
     lm_by_id = _landmarks_by_id(seed)
     kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     xy_kf = np.asarray(track_out.get("xy_kf", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
     xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
     n_tracks = int(kf_feat_idx.size)
 
-    in_range = (kf_feat_idx >= 0) & (kf_feat_idx < int(landmark_id_by_feat1.size))
+    in_range = (kf_feat_idx >= 0) & (kf_feat_idx < int(active_lookup.size))
     mapped = np.zeros((n_tracks,), dtype=bool)
     valid_landmark = np.zeros((n_tracks,), dtype=bool)
     valid_xw = np.zeros((n_tracks,), dtype=bool)
@@ -384,7 +414,7 @@ def _support_funnel(seed: dict, track_out: dict, pnp_cfg: dict, image_shape: tup
     for i in range(n_tracks):
         if not bool(in_range[i]):
             continue
-        lm_id = int(landmark_id_by_feat1[int(kf_feat_idx[i])])
+        lm_id = int(active_lookup[int(kf_feat_idx[i])])
         if lm_id < 0:
             continue
         mapped[i] = True
@@ -455,7 +485,7 @@ def _support_funnel(seed: dict, track_out: dict, pnp_cfg: dict, image_shape: tup
 
 # Build mapped correspondences before observation eligibility gates
 def _build_mapped_correspondences(seed: dict, track_out: dict) -> PnPCorrespondences:
-    landmark_id_by_feat1 = np.asarray(seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="mapped correspondence active lookup")
     lm_by_id = _landmarks_by_id(seed)
     kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
@@ -477,10 +507,10 @@ def _build_mapped_correspondences(seed: dict, track_out: dict) -> PnPCorresponde
 
     for i in range(n_tracks):
         feat1 = int(kf_feat_idx[i])
-        if feat1 < 0 or feat1 >= int(landmark_id_by_feat1.size):
+        if feat1 < 0 or feat1 >= int(active_lookup.size):
             continue
 
-        lm_id = int(landmark_id_by_feat1[feat1])
+        lm_id = int(active_lookup[feat1])
         if lm_id < 0:
             continue
 
@@ -920,8 +950,9 @@ def _subgroup_local_displacement_summary(seed: dict, corrs, pnp_cfg: dict, mask:
             "count": int(np.sum(mask)),
         }
 
-    feats = seed.get("feats1", None)
-    if feats is None or not hasattr(feats, "kps_xy"):
+    try:
+        feats = get_active_keyframe_features(seed)
+    except Exception:
         return {
             "available": False,
             "reason": "missing_keyframe_features",
@@ -1379,10 +1410,11 @@ def _frame16_reference_poses(seed_before: dict, accepted_history: list[dict]) ->
         refs.append({"label": f"last_accepted_kf_{last_pose['kf']}", **last_pose})
 
     R_kf, t_kf = seed_keyframe_pose(seed_before)
+    active_kf = get_active_keyframe_kf(seed_before)
     refs.append(
         {
-            "label": f"active_keyframe_kf_{int(seed_before.get('keyframe_kf', -1))}",
-            "kf": int(seed_before.get("keyframe_kf", -1)),
+            "label": f"active_keyframe_kf_{int(active_kf)}",
+            "kf": int(active_kf),
             "R": np.asarray(R_kf, dtype=np.float64),
             "t": np.asarray(t_kf, dtype=np.float64).reshape(3),
             "localisation_only": False,
@@ -1813,7 +1845,7 @@ def _active_basis_features_for_landmark(seed: dict, lm_id: int, keyframe_index: 
     if not isinstance(obs, list):
         return []
 
-    lookup = np.asarray(seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    lookup = get_rebuilt_active_landmark_lookup(seed, context="active basis landmark feature lookup")
     feats = []
     for ob in obs:
         if not isinstance(ob, dict):
@@ -2494,7 +2526,10 @@ def _frame16_support_filter_experiments(seed_before: dict, corrs, K: np.ndarray,
             )
         )
 
-    kf_feats = seed_before.get("feats1", None)
+    try:
+        kf_feats = get_active_keyframe_features(seed_before)
+    except Exception:
+        kf_feats = None
     if kf_feats is not None and hasattr(kf_feats, "kps_xy"):
         kps_xy = np.asarray(kf_feats.kps_xy, dtype=np.float64)
         kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
@@ -2560,7 +2595,10 @@ def _frame16_2d_3d_separation_test(seed_before: dict, corrs, K: np.ndarray, pnp_
     kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
     xy_cur_all = np.asarray(corrs.x_cur, dtype=np.float64).T
 
-    feats = seed_before.get("feats1", None)
+    try:
+        feats = get_active_keyframe_features(seed_before)
+    except Exception:
+        feats = None
     if feats is None or not hasattr(feats, "kps_xy"):
         return {
             "available": False,
@@ -2668,7 +2706,6 @@ def _frame16_candidate_recovery_anchors(
 
     current_basis = _copy_basis_snapshot(
         frame16_seed_before,
-        int(frame16_keyframe_index_before),
         label="current_active_keyframe_basis",
         kind="active_keyframe_basis",
         source_frame=int(frame16_keyframe_index_before),
@@ -2885,8 +2922,6 @@ def main() -> None:
         raise RuntimeError(f"Bootstrap failed: {boot.get('stats', {}).get('reason', None)}")
 
     seed = boot["seed"]
-    keyframe_feats = seed["feats1"]
-    keyframe_index = 1
     accepted_history: list[dict] = []
     analysed: dict[int, dict] = {}
     comparison_rows: dict[int, dict] = {}
@@ -2903,7 +2938,6 @@ def main() -> None:
 
     initial_basis = _copy_basis_snapshot(
         seed,
-        keyframe_index,
         label="initial_bootstrap_keyframe_basis",
         kind="promoted_keyframe_basis",
         source_frame=1,
@@ -2916,18 +2950,15 @@ def main() -> None:
         cur_im, _, _ = seq.get(frame_index)
         seed_before = seed
         seed_before_snapshot = _diagnostic_seed_snapshot(seed)
-        keyframe_feats_before = keyframe_feats
-        keyframe_index_before = int(keyframe_index)
+        keyframe_index_before = get_active_keyframe_kf(seed)
         accepted_history_before = [dict(pose) for pose in accepted_history]
 
         out = process_frame_against_seed(
             K,
             seed,
-            keyframe_feats,
             cur_im,
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
-            keyframe_kf=keyframe_index,
             current_kf=frame_index,
             **pnp_cfg,
         )
@@ -3000,11 +3031,8 @@ def main() -> None:
                 if rescued_basis is not None:
                     rescued_support_basis_history.append(rescued_basis)
         if bool(out.get("stats", {}).get("keyframe_promoted", False)):
-            keyframe_feats = out["track_out"]["cur_feats"]
-            keyframe_index = int(frame_index)
             promoted_basis = _copy_basis_snapshot(
                 seed,
-                keyframe_index,
                 label=f"promoted_keyframe_basis_kf_{int(frame_index)}",
                 kind="promoted_keyframe_basis",
                 source_frame=int(frame_index),

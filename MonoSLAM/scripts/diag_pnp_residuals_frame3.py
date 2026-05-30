@@ -90,8 +90,6 @@ def main():
         print("Bootstrap failed"); return
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
-
     # --- TEST 1: Bootstrap reprojection quality ---
     # Project X_w using R1, t1 and compare with frame-1 obs stored in seed
     print("=== Test 1: Bootstrap reprojection quality (project X_w with R1, t1 vs frame-1 obs) ===")
@@ -116,10 +114,9 @@ def main():
 
     # --- Process frame 2 to get seed_after_frame2 ---
     out_frame2 = process_frame_against_seed(
-        K, seed, keyframe_1_feats, im2,
+        K, seed, im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=1,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
@@ -181,7 +178,7 @@ def main():
 
     # --- TEST 4: Project X_w with KF2 pose (seed after frame-2 promotion) ---
     # Shows whether the KF2 pose is consistent with frame-3 observations (i.e., how much motion).
-    print("\n=== Test 4: Residuals under KF2 pose (T_WC1 after frame-2 promotion) ===")
+    print("\n=== Test 4: Residuals under KF2 active keyframe pose after promotion ===")
     R_kf2, t_kf2 = seed_keyframe_pose(seed_after_frame2)
     x_pred_kf2 = _project(K, R_kf2, t_kf2, X_w)
     res_kf2 = x_cur - x_pred_kf2

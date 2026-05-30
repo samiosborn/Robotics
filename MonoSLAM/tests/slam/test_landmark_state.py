@@ -155,6 +155,8 @@ def test_bootstrap_seed_landmark_arrays_are_copied():
     np.testing.assert_allclose(landmark["X_w"], np.asarray([0.0, 1.0, 5.0], dtype=np.float64))
     np.testing.assert_allclose(landmark["obs"][0]["xy"], np.asarray([1.0, 2.0], dtype=np.float64))
     np.testing.assert_allclose(landmark["obs"][1]["xy"], np.asarray([5.0, 6.0], dtype=np.float64))
+    for field in ("T_WC0", "T_WC1", "feats0", "feats1", "keyframe_kf", "landmark_id_by_feat1"):
+        assert field not in seed
 
 
 # Count only checked observation records as valid

@@ -9,7 +9,7 @@ import pytest
 from geometry.pnp import PnPCorrespondences, build_pnp_correspondences_with_stats, pnp_inlier_spatial_coverage
 from slam import map_update as map_update_module
 from slam.invariants import audit_seed_invariants
-from slam.keyframe_state import initialise_canonical_keyframe_state
+from slam.keyframe_state import get_active_landmark_lookup, set_active_keyframe_record
 from slam.map_mutation import (
     add_report_warning,
     count_report_changes,
@@ -37,10 +37,9 @@ def _pose(tx: float = 0.0):
 # Build a small canonical seed with one active landmark
 def _seed():
     seed = {
-        "T_WC1": _pose(1.0),
-        "keyframe_kf": 1,
-        "feats1": _features([[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]),
-        "landmark_id_by_feat1": np.asarray([0, -1, -1], dtype=np.int64),
+        "poses": {},
+        "keyframes": {},
+        "active_keyframe_kf": 1,
         "landmarks": [
             {
                 "id": 0,
@@ -53,7 +52,14 @@ def _seed():
             }
         ],
     }
-    return initialise_canonical_keyframe_state(seed)
+    set_active_keyframe_record(
+        seed,
+        1,
+        _pose(1.0),
+        _features([[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]),
+        np.asarray([0, -1, -1], dtype=np.int64),
+    )
+    return seed
 
 
 # Build a synthetic pose output with PnP correspondences
@@ -177,20 +183,6 @@ def test_tracked_observation_append_rejects_misaligned_pnp_mask():
         append_tracked_observations_to_seed(seed, pose_out, current_kf=2, return_report=True)
 
 
-# Reject stale active keyframe ids during observation append
-def test_tracked_observation_append_rejects_stale_keyframe_argument():
-    seed = _seed()
-    pose_out = _pose_out(
-        landmark_ids=[0],
-        cur_feat_idx=[4],
-        x_cur=np.asarray([[11.0], [21.0]], dtype=np.float64),
-        inlier_mask=[True],
-    )
-
-    with pytest.raises(ValueError, match="keyframe_kf argument must match active keyframe state"):
-        append_tracked_observations_to_seed(seed, pose_out, keyframe_kf=2, current_kf=2, return_report=True)
-
-
 # Reject silently padded or truncated support masks in PnP diagnostics
 def test_pnp_spatial_coverage_rejects_misaligned_mask():
     x_cur = np.asarray([[10.0, 20.0], [30.0, 40.0]], dtype=np.float64)
@@ -219,7 +211,6 @@ def test_pnp_correspondence_build_repairs_stale_active_lookup_cache():
     seed = _seed()
     stale_lookup = np.asarray([-1, -1, -1], dtype=np.int64)
     seed["keyframes"][1]["landmark_id_by_feat"] = stale_lookup
-    seed["landmark_id_by_feat1"] = stale_lookup
     track_out = {
         "kf_feat_idx": np.asarray([0], dtype=np.int64),
         "cur_feat_idx": np.asarray([4], dtype=np.int64),
@@ -229,7 +220,7 @@ def test_pnp_correspondence_build_repairs_stale_active_lookup_cache():
 
     corrs, stats = build_pnp_correspondences_with_stats(seed, track_out, min_landmark_observations=1)
 
-    np.testing.assert_array_equal(seed["landmark_id_by_feat1"], np.asarray([0, -1, -1], dtype=np.int64))
+    np.testing.assert_array_equal(get_active_landmark_lookup(seed), np.asarray([0, -1, -1], dtype=np.int64))
     np.testing.assert_array_equal(corrs.landmark_ids, np.asarray([0], dtype=np.int64))
     assert stats["n_corr_raw"] == 1
 
@@ -239,7 +230,6 @@ def test_map_growth_candidate_build_repairs_stale_active_lookup_cache():
     seed = _seed()
     stale_lookup = np.asarray([0, 99, -1], dtype=np.int64)
     seed["keyframes"][1]["landmark_id_by_feat"] = stale_lookup
-    seed["landmark_id_by_feat1"] = stale_lookup
     track_out = {
         "kf_feat_idx": np.asarray([1], dtype=np.int64),
         "cur_feat_idx": np.asarray([5], dtype=np.int64),
@@ -249,7 +239,7 @@ def test_map_growth_candidate_build_repairs_stale_active_lookup_cache():
 
     candidates = build_new_landmark_candidates(seed, track_out)
 
-    np.testing.assert_array_equal(seed["landmark_id_by_feat1"], np.asarray([0, -1, -1], dtype=np.int64))
+    np.testing.assert_array_equal(get_active_landmark_lookup(seed), np.asarray([0, -1, -1], dtype=np.int64))
     np.testing.assert_array_equal(candidates.kf_feat_idx, np.asarray([1], dtype=np.int64))
 
 
@@ -286,7 +276,7 @@ def test_tracked_observation_append_still_preserves_seed_state_shape():
     seed, stats, report = append_tracked_observations_to_seed(seed, pose_out, current_kf=2, return_report=True)
 
     assert "landmarks" in seed
-    assert "landmark_id_by_feat1" in seed
+    assert "landmark_id_by_feat1" not in seed
     assert "keyframes" in seed
     assert "last_tracked_observation_append_stats" in seed
     assert stats["mutation_report"] is report
@@ -356,7 +346,7 @@ def test_map_growth_append_reports_added_landmark_and_observations():
     assert report["added_observations"] == 2
     assert report["updated_active_lookup_entries"] == 1
     assert report["skipped_landmark_candidates"] == 0
-    assert int(seed["landmark_id_by_feat1"][1]) == 1
+    assert int(get_active_landmark_lookup(seed)[1]) == 1
     assert seed["last_append_mutation_report"] is report
 
 
@@ -374,15 +364,6 @@ def test_map_growth_append_duplicate_candidate_behaviour_is_explicit():
     assert report["feature_assignment_conflicts"] == 1
     assert seed["last_append_stats"]["n_added"] == 1
     assert seed["last_append_stats"]["n_skipped"] == 1
-
-
-# Reject stale active keyframe ids during map growth
-def test_map_growth_append_rejects_stale_keyframe_argument():
-    seed = _seed()
-    batch = _batch([1], [5])
-
-    with pytest.raises(ValueError, match="keyframe_kf argument must match active keyframe state"):
-        append_new_landmarks_to_seed(seed, batch, keyframe_kf=2, current_kf=2, return_report=True)
 
 
 # Keep existing diagnostics beside mutation reports

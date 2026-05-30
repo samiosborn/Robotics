@@ -6,6 +6,7 @@ from frontend_eth3d_common import ROOT, frontend_kwargs_from_cfg, load_runtime_c
 from datasets.eth3d import load_eth3d_sequence
 from slam.frontend import bootstrap_from_two_frames
 from slam.frame_pipeline import process_frame_against_seed
+from slam.keyframe_state import get_active_keyframe_features
 
 # --- CONFIG ---
 PROFILE = "eth3d_c2"
@@ -42,7 +43,7 @@ def fresh_bootstrap():
     if not boot['ok']:
         raise Exception(f"Bootstrap failed: {boot['stats']}")
     seed = boot['seed']
-    keyframe_feats = seed['feats1']
+    keyframe_feats = get_active_keyframe_features(seed)
     keyframe_index = 1
     return seed, keyframe_feats, keyframe_index
 
@@ -56,11 +57,9 @@ im2, ts2, id2 = seq.get(2)
 out2_a = process_frame_against_seed(
     K,
     seed_a,
-    keyframe_feats_a,
     im2,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=keyframe_index_a,
     current_kf=2,
     grow_map=True,
     **frontend_kwargs["pnp_frontend_kwargs"],
@@ -83,11 +82,9 @@ im3, ts3, id3 = seq.get(3)
 out3_a = process_frame_against_seed(
     K,
     seed_a,
-    keyframe_feats_a,
     im3,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=keyframe_index_a,
     current_kf=3,
     grow_map=True,
     **frontend_kwargs["pnp_frontend_kwargs"],
@@ -108,11 +105,9 @@ im2, ts2, id2 = seq.get(2)
 out2_b = process_frame_against_seed(
     K,
     seed_b,
-    keyframe_feats_b,
     im2,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=keyframe_index_b,
     current_kf=2,
     grow_map=False,
     **frontend_kwargs["pnp_frontend_kwargs"],
@@ -135,11 +130,9 @@ im3, ts3, id3 = seq.get(3)
 out3_b = process_frame_against_seed(
     K,
     seed_b,
-    keyframe_feats_b,
     im3,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=keyframe_index_b,
     current_kf=3,
     grow_map=False,
     **frontend_kwargs["pnp_frontend_kwargs"],

@@ -12,6 +12,8 @@ from datasets.eth3d import load_eth3d_sequence
 from geometry.camera import reprojection_errors_sq, world_to_camera_points
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_rebuilt_active_landmark_lookup
+from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
 
 
@@ -90,11 +92,9 @@ def main() -> None:
     im2, _ts2, _id2 = seq.get(2)
     frame2_out = process_frame_against_seed(
         K, seed,
-        seed["feats1"],
         im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=i1,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
@@ -144,13 +144,14 @@ def analyze_landmark_quality(K, seed, track_out):
         return
 
     # Use the keyframe pose stored in the seed (frame 2 after processing)
-    T_WC1 = seed.get("T_WC1")
-    if T_WC1 is None or not isinstance(T_WC1, (tuple, list)) or len(T_WC1) != 2:
+    try:
+        R_kf, t_kf = seed_keyframe_pose(seed)
+    except ValueError:
         print("No keyframe pose in seed")
         return
 
-    R_kf = np.asarray(T_WC1[0], dtype=np.float64)
-    t_kf = np.asarray(T_WC1[1], dtype=np.float64).reshape(3)
+    R_kf = np.asarray(R_kf, dtype=np.float64)
+    t_kf = np.asarray(t_kf, dtype=np.float64).reshape(3)
 
     # Get the tracked correspondences
     kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", []), dtype=np.int64)
@@ -165,7 +166,10 @@ def analyze_landmark_quality(K, seed, track_out):
     lm_by_id = {int(lm["id"]): lm for lm in landmarks if isinstance(lm, dict) and "id" in lm}
 
     # Find which tracked features correspond to landmarks via the seed lookup table
-    landmark_id_by_feat_kf = np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64)
+    landmark_id_by_feat_kf = np.asarray(
+        get_rebuilt_active_landmark_lookup(seed, context="landmark quality active lookup"),
+        dtype=np.int64,
+    )
     
     reproj_by_source = {"bootstrap": [], "map_growth": [], "unknown": []}
     

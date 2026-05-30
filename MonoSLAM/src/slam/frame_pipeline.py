@@ -7,71 +7,14 @@ from typing import Any
 import numpy as np
 
 from core.checks import check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_positive
-from features.pipeline import FrameFeatures
 from slam.keyframe import consider_promote_keyframe
-from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
+from slam.keyframe_state import get_active_keyframe_features, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
 from slam.map_mutation import merge_map_mutation_reports
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_diagnostic_summary_stats
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
-
-
-# Read feature keypoints for active-state validation
-def _feature_keypoints_for_validation(feats, name: str) -> np.ndarray:
-    if not hasattr(feats, "kps_xy"):
-        raise ValueError(f"{name} must have attribute 'kps_xy'")
-
-    kps_xy = np.asarray(getattr(feats, "kps_xy"), dtype=np.float64)
-    if kps_xy.ndim != 2 or int(kps_xy.shape[1]) < 2:
-        raise ValueError(f"{name}.kps_xy must have shape (N,2+); got {kps_xy.shape}")
-    if not np.isfinite(kps_xy[:, :2]).all():
-        raise ValueError(f"{name}.kps_xy first two columns must be finite")
-
-    return np.asarray(kps_xy[:, :2], dtype=np.float64)
-
-
-# Resolve new and legacy frame input conventions
-def _resolve_frame_image_and_compat_features(seed: dict[str, Any], keyframe_feats_or_cur_im, cur_im):
-    if cur_im is not None:
-        return cur_im, keyframe_feats_or_cur_im
-
-    if not has_active_keyframe_state(seed):
-        raise ValueError("cur_im argument is required when seed has no active keyframe state")
-
-    return keyframe_feats_or_cur_im, None
-
-
-# Resolve and validate compatibility active-keyframe args against the seed
-def _resolve_active_keyframe_inputs(seed: dict[str, Any], keyframe_feats, keyframe_kf: int | None) -> tuple[int, Any]:
-    active_kf = None
-    if has_active_keyframe_state(seed):
-        active_kf = get_active_keyframe_kf(seed)
-        if keyframe_kf is not None and int(active_kf) != int(keyframe_kf):
-            raise ValueError(
-                f"keyframe_kf argument must match active keyframe state; got {int(keyframe_kf)} and seed active {int(active_kf)}"
-            )
-
-    active_feats = None
-    if has_active_keyframe_state(seed):
-        active_feats = get_active_keyframe_features(seed)
-        if keyframe_feats is not None:
-            arg_kps = _feature_keypoints_for_validation(keyframe_feats, "keyframe_feats")
-            active_kps = _feature_keypoints_for_validation(active_feats, "active keyframe feats")
-            if arg_kps.shape != active_kps.shape or not np.allclose(arg_kps, active_kps):
-                raise ValueError("keyframe_feats argument must match active keyframe features in seed")
-
-    if active_kf is None:
-        if keyframe_kf is None:
-            keyframe_kf = 1
-        active_kf = int(keyframe_kf)
-    if active_feats is None:
-        if keyframe_feats is None:
-            raise ValueError("keyframe_feats argument is required when seed has no active keyframe state")
-        active_feats = keyframe_feats
-
-    return int(active_kf), active_feats
 
 
 # Copy a pose block for accepted-pose storage
@@ -161,7 +104,7 @@ def _seed_with_support_basis(seed: dict[str, Any], basis: dict[str, Any]) -> dic
         np.asarray(basis["R"], dtype=np.float64).copy(),
         np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
     )
-    lookup_raw = basis.get("landmark_id_by_feat", basis.get("landmark_id_by_feat1", None))
+    lookup_raw = basis.get("landmark_id_by_feat", None)
     lookup = np.asarray(lookup_raw, dtype=np.int64).reshape(-1).copy()
     set_active_keyframe_record(seed_out, int(basis["kf"]), pose, basis["feats"], lookup)
     return seed_out
@@ -250,7 +193,7 @@ def _attempt_incoherent_support_recovery(
         return None, None
     if basis.get("feats", None) is None:
         return None, None
-    if basis.get("landmark_id_by_feat", basis.get("landmark_id_by_feat1", None)) is None:
+    if basis.get("landmark_id_by_feat", None) is None:
         return None, None
 
     anchor_seed = _seed_with_support_basis(seed, basis)
@@ -357,8 +300,7 @@ def _attempt_incoherent_support_recovery(
 def process_frame_against_seed(
     K: np.ndarray,
     seed: dict[str, Any],
-    keyframe_feats_or_cur_im: FrameFeatures | np.ndarray,
-    cur_im: np.ndarray | None = None,
+    cur_im: np.ndarray,
     *,
     feature_cfg: dict[str, Any],
     match_mode: str | None = None,
@@ -416,7 +358,6 @@ def process_frame_against_seed(
     pnp_threshold_stability_max_camera_centre_direction_deg: float = 120.0,
     pnp_threshold_stability_disjoint_iou: float = 0.05,
     enable_pnp_threshold_stability_gate: bool = False,
-    keyframe_kf: int | None = None,
     current_kf: int = -1,
     grow_map: bool = True,
     min_parallax_deg: float = 1.0,
@@ -442,7 +383,9 @@ def process_frame_against_seed(
         raise ValueError("feature_cfg must be a dict")
     if not isinstance(F_cfg, dict):
         raise ValueError("F_cfg must be a dict")
-    cur_im, keyframe_feats = _resolve_frame_image_and_compat_features(seed, keyframe_feats_or_cur_im, cur_im)
+    if not has_active_keyframe_state(seed):
+        raise ValueError("seed must contain canonical active keyframe state")
+    keyframe_feats = get_active_keyframe_features(seed)
 
     # Read current image shape for PnP spatial coverage checks
     if image_shape is None:
@@ -452,12 +395,9 @@ def process_frame_against_seed(
         image_shape = (int(cur_im_arr.shape[0]), int(cur_im_arr.shape[1]))
 
     # Check frame indices
-    if keyframe_kf is not None:
-        keyframe_kf = check_int_ge0(keyframe_kf, name="keyframe_kf")
     current_kf = int(current_kf)
     if current_kf < -1:
         raise ValueError(f"current_kf must be >= -1; got {current_kf}")
-    keyframe_kf, keyframe_feats = _resolve_active_keyframe_inputs(seed, keyframe_feats, keyframe_kf)
 
     # Check map-growth controls
     min_parallax_deg = check_positive(min_parallax_deg, name="min_parallax_deg", eps=0.0)
@@ -720,7 +660,6 @@ def process_frame_against_seed(
         seed_out, tracked_obs_stats, tracked_obs_report = append_tracked_observations_to_seed(
             seed,
             pose_out,
-            keyframe_kf=keyframe_kf,
             current_kf=current_kf,
             K=K,
             track_out=track_out,
@@ -749,7 +688,6 @@ def process_frame_against_seed(
                 t_kf,
                 R_cur,
                 t_cur,
-                keyframe_kf=keyframe_kf,
                 current_kf=current_kf,
                 descriptor_source=track_out.get("cur_feats", None),
                 min_parallax_deg=min_parallax_deg,
@@ -764,7 +702,6 @@ def process_frame_against_seed(
         seed_out, tracked_obs_stats, tracked_obs_report = append_tracked_observations_to_seed(
             seed,
             pose_out,
-            keyframe_kf=keyframe_kf,
             current_kf=current_kf,
             K=K,
             track_out=track_out,

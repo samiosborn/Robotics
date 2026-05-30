@@ -17,6 +17,7 @@ from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thi
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features
 from slam.pnp_config import pnp_frontend_kwargs_from_cfg
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
@@ -2109,7 +2110,7 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_feats = seed["feats1"]
+    keyframe_feats = get_active_keyframe_features(seed)
     keyframe_index = i1
 
     print(f"initial landmarks: {len(seed.get('landmarks', []))}")

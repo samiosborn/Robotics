@@ -9,6 +9,9 @@ import pytest
 from slam.invariants import audit_seed_invariants
 
 
+LEGACY_ROOT_FIELDS = ("T_WC0", "T_WC1", "feats0", "feats1", "keyframe_kf", "landmark_id_by_feat1")
+
+
 # Build a feature stub with keypoints
 def _features(kps_xy):
     return SimpleNamespace(kps_xy=np.asarray(kps_xy, dtype=np.float64))
@@ -30,15 +33,33 @@ def _landmark(landmark_id: int, *, feat: int = 0, kf: int = 1):
     }
 
 
-# Build a valid active seed
-def _valid_seed_with_landmarks():
+# Build a valid canonical seed
+def _valid_canonical_seed(*, active_lookup=None):
+    pose0 = _pose_rt()
+    pose1 = _pose_rt(1.0)
+    feats0 = _features([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]])
+    feats1 = _features([[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]])
+    lookup = np.asarray([-1, 10, 11], dtype=np.int64) if active_lookup is None else active_lookup
     return {
-        "T_WC0": _pose_rt(),
-        "T_WC1": _pose_rt(1.0),
-        "last_accepted_pose": {"kf": 2, "R": np.eye(3, dtype=np.float64), "t": np.asarray([2.0, 0.0, 0.0])},
-        "keyframe_kf": 1,
-        "feats1": _features([[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]]),
-        "landmark_id_by_feat1": np.asarray([-1, 10, 11], dtype=np.int64),
+        "poses": {
+            0: pose0,
+            1: pose1,
+        },
+        "keyframes": {
+            0: {
+                "kf": 0,
+                "pose": pose0,
+                "feats": feats0,
+                "landmark_id_by_feat": np.asarray([-1, -1, -1, -1, 10], dtype=np.int64),
+            },
+            1: {
+                "kf": 1,
+                "pose": pose1,
+                "feats": feats1,
+                "landmark_id_by_feat": lookup,
+            },
+        },
+        "active_keyframe_kf": 1,
         "landmarks": [
             {
                 "id": 10,
@@ -60,30 +81,7 @@ def _valid_seed_with_landmarks():
     }
 
 
-# Build a valid seed with canonical keyframe stores
-def _valid_canonical_seed(*, active_lookup=None):
-    seed = _valid_seed_with_landmarks()
-    if active_lookup is not None:
-        seed["landmark_id_by_feat1"] = active_lookup
-
-    seed["feats0"] = _features([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]])
-    seed["poses"] = {
-        0: seed["T_WC0"],
-        1: seed["T_WC1"],
-    }
-    seed["keyframes"] = {
-        1: {
-            "kf": 1,
-            "pose": seed["T_WC1"],
-            "feats": seed["feats1"],
-            "landmark_id_by_feat": seed["landmark_id_by_feat1"],
-        }
-    }
-    seed["active_keyframe_kf"] = 1
-    return seed
-
-
-# Accept a partial seed with no optional structures
+# Accept a partial seed with no runtime structures
 def test_valid_minimal_seed():
     report = audit_seed_invariants({}, context="minimal")
 
@@ -93,9 +91,11 @@ def test_valid_minimal_seed():
     assert report["errors"] == []
 
 
-# Accept a valid seed with landmarks and observations
-def test_valid_seed_with_landmarks_and_observations():
-    report = audit_seed_invariants(_valid_seed_with_landmarks())
+# Accept a canonical seed with landmarks and observations
+def test_valid_canonical_seed_passes_and_has_no_legacy_root_fields():
+    seed = _valid_canonical_seed()
+
+    report = audit_seed_invariants(seed)
 
     assert report["num_landmarks"] == 2
     assert report["num_observations"] == 4
@@ -103,12 +103,34 @@ def test_valid_seed_with_landmarks_and_observations():
     assert report["num_duplicate_observations"] == 0
     assert report["num_feature_assignment_conflicts"] == 0
     assert report["errors"] == []
+    for field in LEGACY_ROOT_FIELDS:
+        assert field not in seed
 
 
-# Reject pose fields with malformed shapes
-def test_invalid_pose_shape():
-    with pytest.raises(ValueError, match="T_WC1.*shape"):
-        audit_seed_invariants({"T_WC1": np.eye(3, dtype=np.float64)})
+# Reject removed root pose mirrors
+def test_seed_with_root_legacy_t_wc1_fails():
+    seed = _valid_canonical_seed()
+    seed["T_WC1"] = _pose_rt(9.0)
+
+    with pytest.raises(ValueError, match="removed legacy root fields.*T_WC1"):
+        audit_seed_invariants(seed)
+
+
+# Reject removed root active lookup mirrors
+def test_seed_with_root_legacy_active_lookup_fails():
+    seed = _valid_canonical_seed()
+    seed["landmark_id_by_feat1"] = np.asarray([-1, 10, 11], dtype=np.int64)
+
+    with pytest.raises(ValueError, match="removed legacy root fields.*landmark_id_by_feat1"):
+        audit_seed_invariants(seed)
+
+
+# Reject missing canonical stores after active state appears
+def test_missing_canonical_stores_fail_after_bootstrap_context():
+    seed = {"active_keyframe_kf": 1}
+
+    with pytest.raises(ValueError, match="missing required key 'poses'"):
+        audit_seed_invariants(seed, context="post_bootstrap")
 
 
 # Reject landmark records with malformed world points
@@ -153,7 +175,6 @@ def test_malformed_observation_record():
 
 # Reject duplicate observations on one landmark
 def test_duplicate_observation_on_same_landmark_kf_feat():
-    # Reuse the same observation twice on one landmark
     ob = {"kf": 1, "feat": 0, "xy": np.asarray([10.0, 20.0], dtype=np.float64)}
     seed = {
         "landmarks": [
@@ -171,7 +192,6 @@ def test_duplicate_observation_on_same_landmark_kf_feat():
 
 # Reject feature assignment conflicts across landmarks
 def test_one_keyframe_feature_pair_assigned_to_two_landmarks():
-    # Create two landmarks that claim the same keyframe feature
     seed = {
         "landmarks": [
             _landmark(0, feat=3, kf=1),
@@ -185,25 +205,17 @@ def test_one_keyframe_feature_pair_assigned_to_two_landmarks():
 
 # Reject active lookup entries for missing landmarks
 def test_active_lookup_points_to_missing_landmark_id():
-    seed = {
-        "feats1": _features([[10.0, 20.0]]),
-        "landmark_id_by_feat1": np.asarray([99], dtype=np.int64),
-        "landmarks": [],
-    }
+    seed = _valid_canonical_seed(active_lookup=np.asarray([99, -1, -1], dtype=np.int64))
 
     with pytest.raises(ValueError, match="missing landmark id 99"):
         audit_seed_invariants(seed)
 
 
-# Reject active lookup feature indices outside feats1
+# Reject active lookup feature indices outside active features
 def test_active_lookup_feature_index_out_of_range():
-    seed = {
-        "feats1": _features([[10.0, 20.0]]),
-        "landmark_id_by_feat1": {2: 0},
-        "landmarks": [_landmark(0, feat=0, kf=1)],
-    }
+    seed = _valid_canonical_seed(active_lookup={3: 10, 1: 10, 2: 11})
 
-    with pytest.raises(ValueError, match="feature index 2"):
+    with pytest.raises(ValueError, match="feature index 3"):
         audit_seed_invariants(seed)
 
 
@@ -229,14 +241,13 @@ def test_canonical_numpy_lookup_with_sentinel_is_accepted():
     report = audit_seed_invariants(_valid_canonical_seed())
 
     assert report["num_poses"] == 2
-    assert report["num_keyframes"] == 1
+    assert report["num_keyframes"] == 2
     assert report["errors"] == []
 
 
 # Accept canonical stores with dict lookup entries
 def test_canonical_dict_lookup_is_accepted():
     seed = _valid_canonical_seed(active_lookup={1: 10, 2: 11})
-    seed["keyframes"][1]["landmark_id_by_feat"] = seed["landmark_id_by_feat1"]
 
     report = audit_seed_invariants(seed)
 
@@ -248,7 +259,6 @@ def test_canonical_dict_lookup_is_accepted():
 def test_active_keyframe_missing_from_keyframe_store_fails():
     seed = _valid_canonical_seed()
     seed["active_keyframe_kf"] = 3
-    seed["keyframe_kf"] = 3
 
     with pytest.raises(ValueError, match="existing keyframe"):
         audit_seed_invariants(seed)
@@ -263,21 +273,12 @@ def test_keyframe_record_kf_mismatch_fails():
         audit_seed_invariants(seed)
 
 
-# Reject active canonical pose mirrors that diverge from legacy T_WC1
-def test_active_keyframe_pose_mirror_mismatch_fails():
+# Reject pose/keyframe drift
+def test_pose_store_and_keyframe_record_pose_drift_fails():
     seed = _valid_canonical_seed()
     seed["keyframes"][1]["pose"] = _pose_rt(9.0)
 
-    with pytest.raises(ValueError, match="active keyframe record pose"):
-        audit_seed_invariants(seed)
-
-
-# Reject active canonical lookup mirrors that diverge from legacy lookup
-def test_active_keyframe_lookup_mirror_mismatch_fails():
-    seed = _valid_canonical_seed()
-    seed["keyframes"][1]["landmark_id_by_feat"] = np.asarray([-1, 11, 10], dtype=np.int64)
-
-    with pytest.raises(ValueError, match="active keyframe record lookup"):
+    with pytest.raises(ValueError, match="must match seed\\['poses'\\]\\[1\\]"):
         audit_seed_invariants(seed)
 
 
@@ -295,9 +296,7 @@ def test_active_lookup_without_active_observation_fails():
 # Reject active observations missing from the active lookup cache
 def test_active_observation_missing_from_lookup_cache_fails():
     seed = _valid_canonical_seed()
-    stale_lookup = np.asarray([-1, 10, -1], dtype=np.int64)
-    seed["landmark_id_by_feat1"] = stale_lookup
-    seed["keyframes"][1]["landmark_id_by_feat"] = stale_lookup
+    seed["keyframes"][1]["landmark_id_by_feat"] = np.asarray([-1, 10, -1], dtype=np.int64)
 
     with pytest.raises(ValueError, match="missing active observation"):
         audit_seed_invariants(seed)

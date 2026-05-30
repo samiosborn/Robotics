@@ -19,6 +19,7 @@ from datasets.eth3d import load_eth3d_sequence
 from geometry.pnp import build_pnp_correspondences_with_stats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_rebuilt_active_landmark_lookup
 from slam.tracking import track_against_keyframe
 
 
@@ -97,16 +98,12 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
-    keyframe_1_index = i1
-
     # Process frame 2
     im2, ts2, id2 = seq.get(2)
     out_frame2 = process_frame_against_seed(
-        K, seed, keyframe_1_feats, im2,
+        K, seed, im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_1_index,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
@@ -117,7 +114,8 @@ def main() -> None:
     print(f"Frame 2 processed: ok={out_frame2['ok']}, keyframe_promoted={out_frame2['stats']['keyframe_promoted']}")
     print(f"Seed state: {len(seed_after_frame2['landmarks'])} landmarks")
     print(f"New keyframe KF2 has {len(keyframe_2_feats.kps_xy)} features")
-    print(f"landmark_id_by_feat1 size: {len(seed_after_frame2.get('landmark_id_by_feat1', []))}")
+    active_lookup = get_rebuilt_active_landmark_lookup(seed_after_frame2, context="pnp corr diagnostic active lookup")
+    print(f"active lookup size: {len(active_lookup)}")
 
     # Now process frame 3 - track it first
     im3, ts3, id3 = seq.get(3)
@@ -186,17 +184,20 @@ def main() -> None:
         
         # Check what happened
         kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", []), dtype=np.int64)
-        landmark_id_by_feat1 = np.asarray(seed_after_frame2.get("landmark_id_by_feat1", []), dtype=np.int64)
+        active_lookup = np.asarray(
+            get_rebuilt_active_landmark_lookup(seed_after_frame2, context="pnp corr diagnostic active lookup"),
+            dtype=np.int64,
+        )
         
         print(f"Tracked KF feature indices: {kf_feat_idx.size} total")
-        print(f"landmark_id_by_feat1 size: {landmark_id_by_feat1.size}")
+        print(f"active lookup size: {active_lookup.size}")
         
         # Check alignment
-        valid_kf = (kf_feat_idx >= 0) & (kf_feat_idx < landmark_id_by_feat1.size)
+        valid_kf = (kf_feat_idx >= 0) & (kf_feat_idx < active_lookup.size)
         print(f"Valid KF feature indices: {np.sum(valid_kf)} / {kf_feat_idx.size}")
         
         if np.any(valid_kf):
-            landmark_ids = landmark_id_by_feat1[kf_feat_idx[valid_kf]]
+            landmark_ids = active_lookup[kf_feat_idx[valid_kf]]
             mapped = np.sum(landmark_ids >= 0)
             print(f"Of valid KF features, mapped to landmarks: {mapped}")
             print(f"Unmapped: {np.sum(landmark_ids < 0)}")

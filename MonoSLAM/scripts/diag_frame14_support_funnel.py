@@ -16,6 +16,12 @@ from geometry.pose import angle_between_translations
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import (
+    get_active_keyframe_features,
+    get_active_keyframe_kf,
+    get_rebuilt_active_landmark_lookup,
+    set_active_keyframe_record,
+)
 from slam.keyframe import _build_landmark_id_by_feat_for_kf
 from slam.tracking import track_against_keyframe
 
@@ -102,6 +108,14 @@ def _quality_summary(records: list[dict]) -> dict:
     return out
 
 
+# Copy canonical stores before diagnostic edits
+def _copy_seed_with_canonical_stores(seed: dict) -> dict:
+    seed_out = copy.copy(seed)
+    seed_out["poses"] = dict(seed.get("poses", {}))
+    seed_out["keyframes"] = dict(seed.get("keyframes", {}))
+    return seed_out
+
+
 # Summarise one landmark subgroup
 def _summarise_landmark_records(records: list[dict], image_shape: tuple[int, int]) -> dict:
     xy = np.asarray([record["xy_cur"] for record in records], dtype=np.float64).reshape(-1, 2) if len(records) else np.zeros((0, 2), dtype=np.float64)
@@ -121,13 +135,13 @@ def _summarise_landmark_records(records: list[dict], image_shape: tuple[int, int
 
 
 # Build a diagnostic keyframe lookup from current-frame tracks
-def _diagnostic_refresh_keyframe(seed: dict, track_out: dict, pose_out: dict, current_kf: int) -> tuple[dict, object, dict]:
-    seed_out = copy.copy(seed)
+def _diagnostic_refresh_keyframe(seed: dict, track_out: dict, pose_out: dict, current_kf: int) -> tuple[dict, dict]:
+    seed_out = _copy_seed_with_canonical_stores(seed)
     cur_feats = track_out.get("cur_feats", None)
     if cur_feats is None or not hasattr(cur_feats, "kps_xy"):
         raise RuntimeError("Cannot refresh diagnostic keyframe without current features")
 
-    old_lookup = np.asarray(seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    old_lookup = get_rebuilt_active_landmark_lookup(seed, context="diagnostic keyframe refresh active lookup")
     kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     n_feat = int(np.asarray(cur_feats.kps_xy).shape[0])
@@ -154,13 +168,11 @@ def _diagnostic_refresh_keyframe(seed: dict, track_out: dict, pose_out: dict, cu
             n_mapped += 1
         new_lookup[cur_feat] = lm_id
 
-    seed_out["feats1"] = cur_feats
-    seed_out["landmark_id_by_feat1"] = new_lookup
-    seed_out["keyframe_kf"] = int(current_kf)
-    seed_out["T_WC1"] = (
+    pose = (
         np.asarray(pose_out["R"], dtype=np.float64),
         np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
     )
+    set_active_keyframe_record(seed_out, int(current_kf), pose, cur_feats, new_lookup)
     seed_out["diagnostic_keyframe_refresh"] = {
         "current_kf": int(current_kf),
         "n_feat": int(n_feat),
@@ -169,12 +181,12 @@ def _diagnostic_refresh_keyframe(seed: dict, track_out: dict, pose_out: dict, cu
         "n_conflicts": int(n_conflicts),
     }
 
-    return seed_out, cur_feats, dict(seed_out["diagnostic_keyframe_refresh"])
+    return seed_out, dict(seed_out["diagnostic_keyframe_refresh"])
 
 
 # Promote a rescued frame into a diagnostic lookup basis from visible landmarks
-def _diagnostic_promote_rescued_lookup_basis(seed: dict, track_out: dict, pose_out: dict, current_kf: int) -> tuple[dict, object, dict]:
-    seed_out = copy.copy(seed)
+def _diagnostic_promote_rescued_lookup_basis(seed: dict, track_out: dict, pose_out: dict, current_kf: int) -> tuple[dict, dict]:
+    seed_out = _copy_seed_with_canonical_stores(seed)
     cur_feats = track_out.get("cur_feats", None)
     if cur_feats is None or not hasattr(cur_feats, "kps_xy"):
         raise RuntimeError("Cannot promote diagnostic lookup basis without current features")
@@ -234,13 +246,12 @@ def _diagnostic_promote_rescued_lookup_basis(seed: dict, track_out: dict, pose_o
         n_added += 1
 
     seed_out["landmarks"] = landmarks
-    seed_out["feats1"] = cur_feats
-    seed_out["T_WC1"] = (
+    pose = (
         np.asarray(pose_out["R"], dtype=np.float64),
         np.asarray(pose_out["t"], dtype=np.float64).reshape(3),
     )
-    seed_out["keyframe_kf"] = int(current_kf)
-    seed_out["landmark_id_by_feat1"] = _build_landmark_id_by_feat_for_kf(seed_out, n_feat, int(current_kf))
+    lookup = _build_landmark_id_by_feat_for_kf(seed_out, n_feat, int(current_kf))
+    set_active_keyframe_record(seed_out, int(current_kf), pose, cur_feats, lookup)
     stats = {
         "current_kf": int(current_kf),
         "n_feat": int(n_feat),
@@ -248,11 +259,11 @@ def _diagnostic_promote_rescued_lookup_basis(seed: dict, track_out: dict, pose_o
         "n_observations_added": int(n_added),
         "n_duplicate_observations": int(n_duplicate),
         "n_missing_landmarks": int(n_missing),
-        "n_lookup_mapped": int(np.sum(np.asarray(seed_out["landmark_id_by_feat1"], dtype=np.int64) >= 0)),
+        "n_lookup_mapped": int(np.sum(lookup >= 0)),
     }
     seed_out["diagnostic_rescued_lookup_promotion"] = stats
 
-    return seed_out, cur_feats, stats
+    return seed_out, stats
 
 
 # Append existing-landmark PnP inlier observations without pruning or growth
@@ -670,26 +681,28 @@ def _pose_delta(reference_pose: dict | None, pose_row: dict) -> dict:
 
 
 # Analyse one frame before advancing the frontend state
-def _analyse_frame(seed: dict, keyframe_feats, keyframe_index: int, seq, K: np.ndarray, frontend_kwargs: dict, frame_index: int, *, experiment: str) -> dict:
+def _analyse_frame(seed: dict, seq, K: np.ndarray, frontend_kwargs: dict, frame_index: int, *, experiment: str) -> dict:
     cur_im, cur_ts, cur_id = seq.get(frame_index)
     image_shape = (int(np.asarray(cur_im).shape[0]), int(np.asarray(cur_im).shape[1]))
     pnp_cfg = frontend_kwargs["pnp_frontend_kwargs"]
+    active_feats = get_active_keyframe_features(seed)
+    active_kf = get_active_keyframe_kf(seed)
     track_out = track_against_keyframe(
         K,
-        keyframe_feats,
+        active_feats,
         cur_im,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
     )
 
-    landmark_id_by_feat1 = np.asarray(seed.get("landmark_id_by_feat1", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="support funnel active lookup")
     lm_by_id = _landmarks_by_id(seed)
     kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     xy_kf = np.asarray(track_out.get("xy_kf", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
     xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
 
     n_tracks = int(kf_feat_idx.size)
-    in_range = (kf_feat_idx >= 0) & (kf_feat_idx < int(landmark_id_by_feat1.size))
+    in_range = (kf_feat_idx >= 0) & (kf_feat_idx < int(active_lookup.size))
     mapped = np.zeros((n_tracks,), dtype=bool)
     valid_landmark = np.zeros((n_tracks,), dtype=bool)
     valid_xw = np.zeros((n_tracks,), dtype=bool)
@@ -703,7 +716,7 @@ def _analyse_frame(seed: dict, keyframe_feats, keyframe_index: int, seq, K: np.n
     for i in range(n_tracks):
         if not bool(in_range[i]):
             continue
-        lm_id = int(landmark_id_by_feat1[int(kf_feat_idx[i])])
+        lm_id = int(active_lookup[int(kf_feat_idx[i])])
         if lm_id < 0:
             continue
         mapped[i] = True
@@ -828,11 +841,11 @@ def _analyse_frame(seed: dict, keyframe_feats, keyframe_index: int, seq, K: np.n
         "frame_index": int(frame_index),
         "frame_id": str(cur_id),
         "timestamp": float(cur_ts),
-        "active_keyframe_index": int(keyframe_index),
-        "reference_keyframe_index": int(keyframe_index),
-        "seed_feats1_size": int(getattr(seed.get("feats1", None), "kps_xy", np.zeros((0, 2))).shape[0]),
-        "landmark_id_by_feat1_size": int(landmark_id_by_feat1.size),
-        "landmark_id_by_feat1_mapped_count": int(np.sum(landmark_id_by_feat1 >= 0)),
+        "active_keyframe_index": int(active_kf),
+        "reference_keyframe_index": int(active_kf),
+        "active_keyframe_features_size": int(active_feats.kps_xy.shape[0]),
+        "active_landmark_lookup_size": int(active_lookup.size),
+        "active_landmark_lookup_mapped_count": int(np.sum(active_lookup >= 0)),
         "seed_landmarks": int(len(seed.get("landmarks", []))),
         "last_accepted_pose_kf": None if not isinstance(reference_pose, dict) else reference_pose.get("kf", None),
         "last_accepted_pose_localisation_only": None if not isinstance(reference_pose, dict) else reference_pose.get("localisation_only", None),
@@ -841,7 +854,7 @@ def _analyse_frame(seed: dict, keyframe_feats, keyframe_index: int, seq, K: np.n
             "raw_tracked_pairs": int(n_tracks),
             "track_inliers_reported": int(track_out.get("stats", {}).get("n_inliers", 0)),
             "kf_feat_idx_in_range": int(np.sum(in_range)),
-            "mapped_by_landmark_id_by_feat1": int(np.sum(mapped)),
+            "mapped_by_active_lookup": int(np.sum(mapped)),
             "unmapped_in_range": int(np.sum(in_range & ~mapped)),
             "valid_landmark": int(np.sum(valid_landmark)),
             "valid_X_w": int(np.sum(valid_xw)),
@@ -904,8 +917,6 @@ def main() -> None:
         raise RuntimeError(f"Bootstrap failed: {boot.get('stats', {}).get('reason', None)}")
 
     seed = boot["seed"]
-    keyframe_feats = seed["feats1"]
-    keyframe_index = 1
     refresh_frame = None if args.refresh_frame is None else int(args.refresh_frame)
     rescued_lookup_promotion_frame = (
         None if args.rescued_lookup_promotion_frame is None else int(args.rescued_lookup_promotion_frame)
@@ -926,8 +937,6 @@ def main() -> None:
                 json.dumps(
                     _analyse_frame(
                         seed,
-                        keyframe_feats,
-                        keyframe_index,
                         seq,
                         K,
                         frontend_kwargs,
@@ -940,21 +949,20 @@ def main() -> None:
 
         cur_im, _, _ = seq.get(frame_index)
         seed_before = seed
+        active_keyframe_before = get_active_keyframe_kf(seed)
         seed_landmarks_before = _seed_landmark_count(seed)
         out = process_frame_against_seed(
             K,
             seed,
-            keyframe_feats,
             cur_im,
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
-            keyframe_kf=keyframe_index,
             current_kf=frame_index,
             **frontend_kwargs["pnp_frontend_kwargs"],
         )
         pipeline_standard = _standard_frame_stats(
             frame_index=frame_index,
-            reference_keyframe_index=keyframe_index,
+            reference_keyframe_index=active_keyframe_before,
             frontend_out=out,
             seed_after=out.get("seed", {}),
             seed_landmarks_before=seed_landmarks_before,
@@ -967,13 +975,14 @@ def main() -> None:
                     **pipeline_standard,
                     "ok": bool(pipeline_standard["pipeline_ok"]),
                     "reason": pipeline_standard["pipeline_reason"],
-                    "active_keyframe_before": int(keyframe_index),
+                    "active_keyframe_before": int(active_keyframe_before),
                     "keyframe_promoted": bool(pipeline_standard["pipeline_keyframe_promoted"]),
                 },
                 sort_keys=True,
             )
         )
         seed = out["seed"]
+        promoted = bool(out.get("stats", {}).get("keyframe_promoted", False))
         if (
             bool(args.append_existing_on_rescue)
             and int(frame_index) >= int(append_existing_on_rescue_from)
@@ -991,7 +1000,7 @@ def main() -> None:
                         "event": "diagnostic_append_existing_on_rescue",
                         "experiment": str(experiment),
                         "frame_index": int(frame_index),
-                        "active_keyframe": int(keyframe_index),
+                        "active_keyframe": int(get_active_keyframe_kf(seed)),
                         "n_append_total": int(append_stats.get("n_added", 0)),
                         "n_append_pnp_inliers_added": int(append_stats.get("n_added", 0)),
                         "n_append_extra_reproj_added": 0,
@@ -1004,51 +1013,52 @@ def main() -> None:
                     sort_keys=True,
                 )
             )
-        if bool(out.get("stats", {}).get("keyframe_promoted", False)):
-            keyframe_feats = out["track_out"]["cur_feats"]
-            keyframe_index = int(frame_index)
-        elif (
-            rescued_lookup_promotion_frame is not None
+        if (
+            not promoted
+            and rescued_lookup_promotion_frame is not None
             and int(frame_index) == int(rescued_lookup_promotion_frame)
             and bool(out.get("ok", False))
             and bool(out.get("stats", {}).get("localisation_only_rescue_frame", False))
         ):
-            seed, keyframe_feats, promotion_stats = _diagnostic_promote_rescued_lookup_basis(
+            seed, promotion_stats = _diagnostic_promote_rescued_lookup_basis(
                 seed,
                 out["track_out"],
                 out["pose_out"],
                 int(frame_index),
             )
-            keyframe_index = int(frame_index)
             print(
                 json.dumps(
                     {
                         "event": "diagnostic_rescued_lookup_promotion",
                         "experiment": str(experiment),
                         "frame_index": int(frame_index),
-                        "old_active_keyframe": int(seed_before.get("keyframe_kf", keyframe_index)),
-                        "new_active_keyframe": int(keyframe_index),
+                        "old_active_keyframe": int(active_keyframe_before),
+                        "new_active_keyframe": int(get_active_keyframe_kf(seed)),
                         "stats": promotion_stats,
                     },
                     sort_keys=True,
                 )
             )
-        elif refresh_frame is not None and int(frame_index) == int(refresh_frame) and bool(out.get("ok", False)):
-            seed, keyframe_feats, refresh_stats = _diagnostic_refresh_keyframe(
+        elif (
+            not promoted
+            and refresh_frame is not None
+            and int(frame_index) == int(refresh_frame)
+            and bool(out.get("ok", False))
+        ):
+            seed, refresh_stats = _diagnostic_refresh_keyframe(
                 seed,
                 out["track_out"],
                 out["pose_out"],
                 int(frame_index),
             )
-            keyframe_index = int(frame_index)
             print(
                 json.dumps(
                     {
                         "event": "diagnostic_keyframe_refresh",
                         "experiment": str(experiment),
                         "frame_index": int(frame_index),
-                        "old_active_keyframe": int(seed_before.get("keyframe_kf", keyframe_index)),
-                        "new_active_keyframe": int(keyframe_index),
+                        "old_active_keyframe": int(active_keyframe_before),
+                        "new_active_keyframe": int(get_active_keyframe_kf(seed)),
                         "stats": refresh_stats,
                     },
                     sort_keys=True,

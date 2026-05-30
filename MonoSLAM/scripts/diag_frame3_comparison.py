@@ -129,7 +129,6 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
     keyframe_1_index = i1
 
     print(f"initial landmarks: {len(seed.get('landmarks', []))}")
@@ -140,17 +139,14 @@ def main() -> None:
     out_frame2 = process_frame_against_seed(
         K,
         seed,
-        keyframe_1_feats,
         im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_1_index,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
 
     seed_after_frame2 = out_frame2["seed"]
-    keyframe_2_feats = out_frame2["track_out"]["cur_feats"]
     keyframe_2_index = 2
 
     print(f"after frame 2: landmarks={len(seed_after_frame2.get('landmarks', []))}")
@@ -166,11 +162,9 @@ def main() -> None:
     out_vs_kf1 = process_frame_against_seed(
         K,
         seed,  # Original seed
-        keyframe_1_feats,
         im_test,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_1_index,
         current_kf=test_frame,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
@@ -180,11 +174,9 @@ def main() -> None:
     out_vs_kf2 = process_frame_against_seed(
         K,
         seed_after_frame2,  # Seed after frame 2 promotion
-        keyframe_2_feats,
         im_test,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_2_index,
         current_kf=test_frame,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )

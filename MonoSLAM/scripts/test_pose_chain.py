@@ -18,6 +18,8 @@ from datasets.eth3d import load_eth3d_sequence
 from geometry.camera import camera_centre, project_points
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_pose_for_kf
+from slam.seed import seed_keyframe_pose
 
 profile_path = ROOT / "configs" / "profiles" / "eth3d_c2.yaml"
 cfg, K = _load_runtime_cfg(profile_path)
@@ -51,8 +53,8 @@ seed = boot["seed"]
 print(f"Bootstrap OK: {len(seed['landmarks'])} landmarks")
 
 # Print bootstrap pose info
-R0, t0 = seed["T_WC0"]
-R1, t1 = seed["T_WC1"]
+R0, t0 = get_pose_for_kf(seed, 0)
+R1, t1 = seed_keyframe_pose(seed)
 C0 = camera_centre(R0, t0)
 C1 = camera_centre(R1, t1)
 baseline = float(np.linalg.norm(C1 - C0))
@@ -64,15 +66,12 @@ print(f"Frame 1 camera centre: {C1}")
 pnp_kwargs = dict(frontend_kwargs["pnp_frontend_kwargs"])
 pnp_kwargs["grow_map"] = False
 
-keyframe_feats = seed["feats1"]
-
 im2, ts2, id2 = seq.get(2)
 out2 = process_frame_against_seed(
-    K, seed, keyframe_feats,
+    K, seed,
     im2,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=1,
     current_kf=2,
     **pnp_kwargs,
 )
@@ -131,11 +130,10 @@ if R2 is not None and t2 is not None:
 print(f"\nTesting frame 3...")
 im3, ts3, id3 = seq.get(3)
 out3 = process_frame_against_seed(
-    K, seed2, out2["track_out"]["cur_feats"],
+    K, seed2,
     im3,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=2,
     current_kf=3,
     **pnp_kwargs,
 )

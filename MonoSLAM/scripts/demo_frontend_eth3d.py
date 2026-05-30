@@ -13,6 +13,7 @@ from datasets.eth3d import load_eth3d_sequence
 from features.viz import draw_matches
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features
 
 
 # Draw one match visualisation
@@ -254,7 +255,7 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_feats = seed["feats1"]
+    keyframe_feats = get_active_keyframe_features(seed)
     keyframe_index = i1
 
     print(f"initial landmarks: {len(seed.get('landmarks', []))}")

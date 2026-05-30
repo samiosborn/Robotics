@@ -93,16 +93,14 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
     keyframe_1_index = i1
 
     # Process frame 2
     im2, ts2, id2 = seq.get(2)
     out_frame2 = process_frame_against_seed(
-        K, seed, keyframe_1_feats, im2,
+        K, seed, im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_1_index,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )

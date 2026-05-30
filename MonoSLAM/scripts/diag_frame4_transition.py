@@ -30,6 +30,7 @@ from geometry.pnp import (
 )
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, get_rebuilt_active_landmark_lookup
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
@@ -76,7 +77,7 @@ def _birth_source_counts(landmarks, landmark_ids):
 
 
 def _seed_snapshot(seed):
-    lmid = np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64)
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="frame transition snapshot lookup")
     landmarks = seed.get("landmarks", [])
     obs_by_kf = {}
     obs_by_kf_source = {}
@@ -96,10 +97,10 @@ def _seed_snapshot(seed):
         "seed_id": id(seed),
         "keys": set(seed.keys()),
         "n_landmarks": int(len(landmarks)),
-        "landmark_id_by_feat1_size": int(lmid.size),
-        "landmark_id_by_feat1_mapped": int(np.sum(lmid >= 0)),
-        "keyframe_kf": seed.get("keyframe_kf", None),
-        "has_feats1": "feats1" in seed,
+        "active_lookup_size": int(active_lookup.size),
+        "active_lookup_mapped": int(np.sum(active_lookup >= 0)),
+        "active_keyframe_kf": get_active_keyframe_kf(seed),
+        "has_active_features": hasattr(get_active_keyframe_features(seed), "kps_xy"),
         "has_last_append_stats": "last_append_stats" in seed,
         "has_last_tracked_observation_append_stats": "last_tracked_observation_append_stats" in seed,
         "has_last_keyframe_promotion": "last_keyframe_promotion" in seed,
@@ -118,11 +119,11 @@ def _print_seed_delta(before, after, current_kf):
     print(
         "  landmarks: "
         f"{before['n_landmarks']} -> {after['n_landmarks']}  "
-        "landmark_id_by_feat1: "
-        f"{before['landmark_id_by_feat1_size']}/{before['landmark_id_by_feat1_mapped']} -> "
-        f"{after['landmark_id_by_feat1_size']}/{after['landmark_id_by_feat1_mapped']}"
+        "active lookup: "
+        f"{before['active_lookup_size']}/{before['active_lookup_mapped']} -> "
+        f"{after['active_lookup_size']}/{after['active_lookup_mapped']}"
     )
-    print(f"  keyframe_kf: {before['keyframe_kf']} -> {after['keyframe_kf']}")
+    print(f"  active_keyframe_kf: {before['active_keyframe_kf']} -> {after['active_keyframe_kf']}")
     print(f"  observations at kf={current_kf}: {before_obs} -> {after_obs}")
     src_counts = {}
     for (kf, src), count in after["obs_by_kf_source"].items():
@@ -773,7 +774,7 @@ def _point_mask_inside_bbox(xy, bbox):
 def _print_frame4_pose_support_audit(seed, track4, pose4, pnp_kw, image_shape):
     landmarks = seed.get("landmarks", [])
     lm_by_id = {int(lm["id"]): lm for lm in landmarks if isinstance(lm, dict) and "id" in lm}
-    landmark_id_by_feat1 = np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64).reshape(-1)
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="frame 4 pose support audit lookup")
     kf_feat_idx = np.asarray(track4.get("kf_feat_idx", []), dtype=np.int64).reshape(-1)
     cur_feat_idx = np.asarray(track4.get("cur_feat_idx", []), dtype=np.int64).reshape(-1)
     xy_cur = np.asarray(track4.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
@@ -791,11 +792,11 @@ def _print_frame4_pose_support_audit(seed, track4, pose4, pnp_kw, image_shape):
     allow_bootstrap = bool(pnp_kw.get("allow_bootstrap_landmarks_for_pose", True))
     min_post_bootstrap = int(pnp_kw.get("min_post_bootstrap_observations_for_pose", 3))
 
-    in_range = (kf_feat_idx >= 0) & (kf_feat_idx < int(landmark_id_by_feat1.size))
+    in_range = (kf_feat_idx >= 0) & (kf_feat_idx < int(active_lookup.size))
     mapped = np.zeros((M,), dtype=bool)
     mapped_lm_ids = np.full((M,), -1, dtype=np.int64)
-    mapped[in_range] = landmark_id_by_feat1[kf_feat_idx[in_range]] >= 0
-    mapped_lm_ids[in_range] = landmark_id_by_feat1[kf_feat_idx[in_range]]
+    mapped[in_range] = active_lookup[kf_feat_idx[in_range]] >= 0
+    mapped_lm_ids[in_range] = active_lookup[kf_feat_idx[in_range]]
 
     valid_landmark = np.zeros((M,), dtype=bool)
     pose_eligible = np.zeros((M,), dtype=bool)
@@ -1070,41 +1071,37 @@ def main():
     assert boot["ok"], "Bootstrap failed"
 
     seed = boot["seed"]
-    feats_kf = seed["feats1"]
-    kf_idx = 1
+    feats_kf = get_active_keyframe_features(seed)
+    kf_idx = get_active_keyframe_kf(seed)
 
     # --- Frame 2 ---
     out2 = process_frame_against_seed(
-        K, seed, feats_kf, im2,
+        K, seed, im2,
         feature_cfg=kwargs["feature_cfg"],
         F_cfg=kwargs["F_cfg"],
-        keyframe_kf=kf_idx,
         current_kf=2,
         **pnp_kw,
     )
     assert out2["ok"], "Frame 2 failed"
     seed = out2["seed"]
-    if out2["stats"]["keyframe_promoted"]:
-        feats_kf = out2["track_out"]["cur_feats"]
-        kf_idx = 2
+    feats_kf = get_active_keyframe_features(seed)
+    kf_idx = get_active_keyframe_kf(seed)
     print(f"frame 2: ok=True  kf_promoted={out2['stats']['keyframe_promoted']}  kf_idx_now={kf_idx}")
     _print_step_stats("Frame 2", out2)
 
     # --- Frame 3 ---
     seed_before_frame3 = _seed_snapshot(seed)
     out3 = process_frame_against_seed(
-        K, seed, feats_kf, im3,
+        K, seed, im3,
         feature_cfg=kwargs["feature_cfg"],
         F_cfg=kwargs["F_cfg"],
-        keyframe_kf=kf_idx,
         current_kf=3,
         **pnp_kw,
     )
     assert out3["ok"], "Frame 3 failed"
     seed = out3["seed"]
-    if out3["stats"]["keyframe_promoted"]:
-        feats_kf = out3["track_out"]["cur_feats"]
-        kf_idx = 3
+    feats_kf = get_active_keyframe_features(seed)
+    kf_idx = get_active_keyframe_kf(seed)
     print(f"frame 3: ok=True  kf_promoted={out3['stats']['keyframe_promoted']}  kf_idx_now={kf_idx}")
     _print_step_stats("Frame 3", out3)
 
@@ -1117,19 +1114,19 @@ def main():
 
     # --- Inspect seed state after frame 3 promotion ---
     landmarks = seed.get("landmarks", [])
-    lmid_by_feat1 = np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64)
-    n_feat1 = int(lmid_by_feat1.size)
-    n_mapped = int(np.sum(lmid_by_feat1 >= 0))
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="frame 3 promotion active lookup")
+    n_feat_active = int(active_lookup.size)
+    n_mapped = int(np.sum(active_lookup >= 0))
     n_lm = int(len(landmarks))
     n_feats_kf = int(feats_kf.kps_xy.shape[0]) if hasattr(feats_kf, "kps_xy") else -1
 
     print(f"\n=== Seed state after frame-3 promotion ===")
     print(f"  n_landmarks={n_lm}")
-    print(f"  landmark_id_by_feat1 size={n_feat1}  mapped={n_mapped}")
+    print(f"  active lookup size={n_feat_active}  mapped={n_mapped}")
     print(f"  feats_kf keypoints={n_feats_kf}")
 
-    # Check consistency: do lmid_by_feat1 size and feats_kf kp count match?
-    print(f"  size match (lmid_by_feat1 vs feats_kf.kps_xy): {n_feat1 == n_feats_kf}")
+    # Check active lookup size against active keyframe features.
+    print(f"  size match (active lookup vs feats_kf.kps_xy): {n_feat_active == n_feats_kf}")
 
     # Count obs at kf=3 per landmark
     obs_at_kf3 = {}
@@ -1142,19 +1139,19 @@ def main():
                 obs_at_kf3[lm_id] = obs_at_kf3.get(lm_id, 0) + 1
 
     print(f"  landmarks with obs at kf=3: {len(obs_at_kf3)}")
-    print(f"  mapped landmark birth sources: {_birth_source_counts(landmarks, lmid_by_feat1[lmid_by_feat1 >= 0])}")
+    print(f"  mapped landmark birth sources: {_birth_source_counts(landmarks, active_lookup[active_lookup >= 0])}")
 
-    # Verify that mapped entries in lmid_by_feat1 correspond to landmarks with obs at kf=3
+    # Verify that mapped active lookup entries have frame-3 observations.
     n_consistent = 0
     n_inconsistent = 0
-    for feat_i, lm_id in enumerate(lmid_by_feat1):
+    for feat_i, lm_id in enumerate(active_lookup):
         if lm_id < 0:
             continue
         if lm_id in obs_at_kf3:
             n_consistent += 1
         else:
             n_inconsistent += 1
-    print(f"  landmark_id_by_feat1 entries -> obs at kf=3: consistent={n_consistent}  inconsistent={n_inconsistent}")
+    print(f"  active lookup entries -> obs at kf=3: consistent={n_consistent}  inconsistent={n_inconsistent}")
 
     # --- Build frame-4 track and correspondences ---
     print(f"\n=== Frame-4 tracking against kf_idx={kf_idx} ===")
@@ -1208,7 +1205,7 @@ def main():
     # --- Check KF pose stored in seed ---
     R_kf, t_kf = seed_keyframe_pose(seed)
     errs_kf = _reproj_err_px(K, R_kf, t_kf, X_w4, x_cur4)
-    print(f"  (seed T_WC1 is frame-3 pose: {np.allclose(R_kf, R3) and np.allclose(t_kf, t3)})")
+    print(f"  (active keyframe pose is frame-3 pose: {np.allclose(R_kf, R3) and np.allclose(t_kf, t3)})")
     _print_err_summary("frame-4 corrs @ seed keyframe pose", errs_kf)
 
     # --- Full-data DLT on frame-4 correspondences ---
@@ -1236,11 +1233,11 @@ def main():
     kf_feat_idx4 = np.asarray(track4.get("kf_feat_idx", []), dtype=np.int64)
     cur_feat_idx4 = np.asarray(track4.get("cur_feat_idx", []), dtype=np.int64)
     print(f"  track4 kf_feat_idx: size={kf_feat_idx4.size}  min={kf_feat_idx4.min() if kf_feat_idx4.size > 0 else 'N/A'}  max={kf_feat_idx4.max() if kf_feat_idx4.size > 0 else 'N/A'}")
-    print(f"  landmark_id_by_feat1 size={n_feat1}")
+    print(f"  active lookup size={n_feat_active}")
     if kf_feat_idx4.size > 0:
-        in_range = (kf_feat_idx4 >= 0) & (kf_feat_idx4 < n_feat1)
+        in_range = (kf_feat_idx4 >= 0) & (kf_feat_idx4 < n_feat_active)
         mapped = np.zeros(kf_feat_idx4.size, dtype=bool)
-        mapped[in_range] = lmid_by_feat1[kf_feat_idx4[in_range]] >= 0
+        mapped[in_range] = active_lookup[kf_feat_idx4[in_range]] >= 0
         print(f"  kf_feat_idx in range: {int(in_range.sum())}/{kf_feat_idx4.size}")
         print(f"  kf_feat_idx mapped to landmark: {int(mapped.sum())}/{kf_feat_idx4.size}")
         _spatial_summary("raw frame-4 tracks", track4.get("xy_cur", np.zeros((0, 2))), im4.shape)

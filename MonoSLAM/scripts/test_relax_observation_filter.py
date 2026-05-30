@@ -16,6 +16,7 @@ from datasets.eth3d import load_eth3d_sequence
 from geometry.pnp import build_pnp_correspondences_with_stats, estimate_pose_pnp_ransac
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features
 from slam.tracking import track_against_keyframe
 
 
@@ -82,22 +83,19 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
-    keyframe_1_index = i1
 
     # Process frame 2
     im2, ts2, id2 = seq.get(2)
     out_frame2 = process_frame_against_seed(
-        K, seed, keyframe_1_feats, im2,
+        K, seed, im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_1_index,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
 
     seed_after_frame2 = out_frame2["seed"]
-    keyframe_2_feats = out_frame2["track_out"]["cur_feats"]
+    keyframe_2_feats = get_active_keyframe_features(seed_after_frame2)
 
     # Now test frame 3 with different filter settings
     im3, ts3, id3 = seq.get(3)

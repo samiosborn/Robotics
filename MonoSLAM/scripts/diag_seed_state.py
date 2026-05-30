@@ -19,17 +19,20 @@ from core.checks import check_dir, check_int_ge0
 from datasets.eth3d import load_eth3d_sequence
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, get_rebuilt_active_landmark_lookup
 
 
 def _dump_seed_structure(seed: dict, frame_idx: int, out_path: Path) -> None:
     """Dump compact seed structure diagnostic."""
+    active_lookup = get_rebuilt_active_landmark_lookup(seed, context="seed structure diagnostic lookup")
+    active_feats = get_active_keyframe_features(seed)
     out_data = {
         "frame": int(frame_idx),
         "n_landmarks": len(seed.get("landmarks", [])),
-        "landmark_id_by_feat1_size": len(seed.get("landmark_id_by_feat1", [])),
-        "landmark_id_by_feat1_mapped": int(np.sum(np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64) >= 0)),
-        "keyframe_kf": seed.get("keyframe_kf", None),
-        "n_feats1": seed.get("feats1").kps_xy.shape[0] if seed.get("feats1") is not None else 0,
+        "active_lookup_size": int(active_lookup.size),
+        "active_lookup_mapped": int(np.sum(active_lookup >= 0)),
+        "active_keyframe_kf": get_active_keyframe_kf(seed),
+        "n_active_feats": int(active_feats.kps_xy.shape[0]),
     }
     
     # Analyze landmarks
@@ -63,9 +66,8 @@ def _dump_seed_structure(seed: dict, frame_idx: int, out_path: Path) -> None:
             if len(obs) == 0:
                 alignment_issues.append(f"Landmark {lm_id} has no observations")
     
-    # Check landmark_id_by_feat1 for orphaned references
-    landmark_id_by_feat1 = np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64)
-    for feat_idx, lm_id in enumerate(landmark_id_by_feat1):
+    # Check active lookup for orphaned references
+    for feat_idx, lm_id in enumerate(active_lookup):
         if lm_id >= 0 and lm_id not in landmark_ids_in_lm_list:
             alignment_issues.append(
                 f"Feature {feat_idx} references non-existent landmark {lm_id}"
@@ -152,8 +154,6 @@ def main() -> None:
         return
 
     seed = boot["seed"]
-    keyframe_1_feats = seed["feats1"]
-    keyframe_1_index = i1
 
     print(f"Bootstrap OK: {len(seed['landmarks'])} landmarks")
     _dump_seed_structure(seed, -1, out_dir / "seed_after_bootstrap.json")
@@ -161,31 +161,28 @@ def main() -> None:
     # Process frame 2
     im2, ts2, id2 = seq.get(2)
     out_frame2 = process_frame_against_seed(
-        K, seed, keyframe_1_feats, im2,
+        K, seed, im2,
         feature_cfg=frontend_kwargs["feature_cfg"],
         F_cfg=frontend_kwargs["F_cfg"],
-        keyframe_kf=keyframe_1_index,
         current_kf=2,
         **frontend_kwargs["pnp_frontend_kwargs"],
     )
 
     seed_after_frame2 = out_frame2["seed"]
-    keyframe_2_feats = out_frame2["track_out"]["cur_feats"]
-    keyframe_2_index = 2
 
     print(f"Frame 2 OK: {out_frame2['ok']}, landmarks now {len(seed_after_frame2['landmarks'])}, keyframe promoted: {out_frame2['stats']['keyframe_promoted']}")
     _dump_seed_structure(seed_after_frame2, 2, out_dir / "seed_after_frame2.json")
 
-    # Detailed analysis of landmark_id_by_feat1 after frame 2 processing
-    print("\n=== Landmark ID by Feature Lookup Analysis ===")
+    # Detailed analysis of active lookup after frame 2 processing
+    print("\n=== Active Landmark Lookup Analysis ===")
     
-    landmark_id_by_feat1_old = np.asarray(seed.get("landmark_id_by_feat1", []), dtype=np.int64)
-    landmark_id_by_feat1_new = np.asarray(seed_after_frame2.get("landmark_id_by_feat1", []), dtype=np.int64)
+    active_lookup_old = get_rebuilt_active_landmark_lookup(seed, context="bootstrap active lookup diagnostic")
+    active_lookup_new = get_rebuilt_active_landmark_lookup(seed_after_frame2, context="frame 2 active lookup diagnostic")
     
-    print(f"Old lookup size (KF1): {landmark_id_by_feat1_old.size}")
-    print(f"New lookup size (KF2): {landmark_id_by_feat1_new.size}")
-    print(f"Old mapping coverage: {int((landmark_id_by_feat1_old >= 0).sum())} / {landmark_id_by_feat1_old.size}")
-    print(f"New mapping coverage: {int((landmark_id_by_feat1_new >= 0).sum())} / {landmark_id_by_feat1_new.size}")
+    print(f"Old active lookup size: {active_lookup_old.size}")
+    print(f"New active lookup size: {active_lookup_new.size}")
+    print(f"Old mapping coverage: {int((active_lookup_old >= 0).sum())} / {active_lookup_old.size}")
+    print(f"New mapping coverage: {int((active_lookup_new >= 0).sum())} / {active_lookup_new.size}")
     
     # Find which landmarks have observations in frame 2
     frame2_lm_ids = set()
@@ -201,16 +198,16 @@ def main() -> None:
     
     # Check if those landmarks are in the lookup
     found_in_lookup = 0
-    for feat_idx, lm_id in enumerate(landmark_id_by_feat1_new):
+    for feat_idx, lm_id in enumerate(active_lookup_new):
         if lm_id in frame2_lm_ids:
             found_in_lookup += 1
     
-    print(f"Of those, found in landmark_id_by_feat1: {found_in_lookup}")
+    print(f"Of those, found in active lookup: {found_in_lookup}")
     
     # Detailed mapping diagnostic
-    print("\nDetailed landmark_id_by_feat1 mapping (first 50 entries):")
-    for feat_idx in range(min(50, landmark_id_by_feat1_new.size)):
-        lm_id = int(landmark_id_by_feat1_new[feat_idx])
+    print("\nDetailed active lookup mapping (first 50 entries):")
+    for feat_idx in range(min(50, active_lookup_new.size)):
+        lm_id = int(active_lookup_new[feat_idx])
         status = "mapped" if lm_id >= 0 else "unmapped"
         in_frame2 = lm_id in frame2_lm_ids
         print(f"  Feature {feat_idx}: {status} (lm_id={lm_id}, in_frame2={in_frame2})")

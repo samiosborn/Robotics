@@ -1,10 +1,25 @@
 # src/slam/seed.py
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from core.checks import check_2xN_pair, check_matrix_3x3, check_vector_3
-from slam.keyframe_state import get_active_keyframe_pose, initialise_canonical_keyframe_state
+from slam.keyframe_state import (
+    get_active_keyframe_pose,
+    set_active_keyframe_record,
+    set_keyframe_record,
+    set_pose_for_kf,
+)
+
+
+# Build a minimal feature bundle from bootstrap point columns
+def _feature_bundle_from_2xN(x, *, name: str):
+    points = np.asarray(x, dtype=np.float64)
+    if points.ndim != 2 or int(points.shape[0]) != 2:
+        raise ValueError(f"{name} must be (2,N); got {points.shape}")
+    return SimpleNamespace(kps_xy=np.asarray(points.T, dtype=np.float64).copy())
 
 
 # Build a two-view seed map from validated bootstrap outputs
@@ -54,15 +69,38 @@ def build_two_view_seed(x1, x2, *, idx_init, X_valid, R1, t1) -> dict:
         mask_init[idx_init] = True
 
     seed = {
-        "T_WC0": (R0, t0),
-        "T_WC1": (R1, t1),
-        "keyframe_kf": 1,
+        "poses": {},
+        "keyframes": {},
+        "active_keyframe_kf": 1,
         "landmarks": landmarks,
         "mask_init": mask_init,
         "idx_init": idx_init,
     }
 
-    return initialise_canonical_keyframe_state(seed)
+    lookup0 = np.full((n_cols,), -1, dtype=np.int64)
+    lookup1 = np.full((n_cols,), -1, dtype=np.int64)
+    for lm_id, j in enumerate(idx_init):
+        lookup0[int(j)] = int(lm_id)
+        lookup1[int(j)] = int(lm_id)
+
+    set_pose_for_kf(seed, 0, (R0, t0), context="bootstrap pose 0")
+    set_keyframe_record(
+        seed,
+        0,
+        (R0, t0),
+        _feature_bundle_from_2xN(x1, name="x1"),
+        lookup0,
+        context="bootstrap keyframe 0",
+    )
+    set_active_keyframe_record(
+        seed,
+        1,
+        (R1, t1),
+        _feature_bundle_from_2xN(x2, name="x2"),
+        lookup1,
+    )
+
+    return seed
 
 
 # Read the frozen keyframe pose stored inside the seed
@@ -131,7 +169,8 @@ def attach_feature_bookkeeping_to_seed(seed, feats0, feats1, matches):
         if desc1.ndim >= 1 and feat1 < int(desc1.shape[0]):
             lm["descriptor"] = np.asarray(desc1[feat1]).copy()
 
-    landmark_id_by_feat1 = np.full((n_feat1,), -1, dtype=np.int64)
+    lookup0 = np.full((n_feat0,), -1, dtype=np.int64)
+    lookup1 = np.full((n_feat1,), -1, dtype=np.int64)
     for lm in landmarks:
         if not isinstance(lm, dict):
             continue
@@ -139,15 +178,20 @@ def attach_feature_bookkeeping_to_seed(seed, feats0, feats1, matches):
         obs = lm.get("obs")
         if not isinstance(obs, list) or len(obs) < 2:
             continue
+        feat0 = int(obs[0].get("feat", -1))
         feat1 = int(obs[1].get("feat", -1))
+        if 0 <= feat0 < n_feat0:
+            lookup0[feat0] = lm_id
         if 0 <= feat1 < n_feat1:
-            landmark_id_by_feat1[feat1] = lm_id
+            lookup1[feat1] = lm_id
 
-    # Pack
+    pose0 = seed["poses"][0]
+    pose1 = seed["poses"][1]
+
+    # Pack canonical keyframe records
     seed["landmarks"] = landmarks
-    seed["landmark_id_by_feat1"] = landmark_id_by_feat1
-    seed["feats0"] = feats0
-    seed["feats1"] = feats1
     seed["matches01"] = matches
+    set_keyframe_record(seed, 0, pose0, feats0, lookup0, context="bootstrap keyframe 0")
+    set_active_keyframe_record(seed, 1, pose1, feats1, lookup1)
 
-    return initialise_canonical_keyframe_state(seed)
+    return seed

@@ -47,35 +47,31 @@ def fresh_bootstrap():
         print("Bootstrap failed")
         sys.exit(1)
     seed = boot["seed"]
-    keyframe_feats = seed["feats1"]
-    return seed, keyframe_feats
+    return seed
 
 
 # Test with grow_map enabled (default)
 print("\n=== WITH MAP GROWTH ===")
-seed_a, keyframe_feats_a = fresh_bootstrap()
+seed_a = fresh_bootstrap()
 print(f"Bootstrap OK: {len(seed_a['landmarks'])} landmarks")
 
 frame2_out_with_growth = process_frame_against_seed(
-    K, seed_a, keyframe_feats_a,
+    K, seed_a,
     im2,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=1,
     current_kf=2,
     **frontend_kwargs["pnp_frontend_kwargs"],
 )
 print(f"Frame 2: ok={frame2_out_with_growth['ok']} n_landmarks={len(frame2_out_with_growth['seed']['landmarks'])}")
 
 seed_after_f2_a = frame2_out_with_growth["seed"]
-keyframe_feats_f2_a = frame2_out_with_growth["track_out"]["cur_feats"]
 
 frame3_out_with_growth = process_frame_against_seed(
-    K, seed_after_f2_a, keyframe_feats_f2_a,
+    K, seed_after_f2_a,
     im3,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=2,
     current_kf=3,
     **frontend_kwargs["pnp_frontend_kwargs"],
 )
@@ -83,32 +79,29 @@ print(f"Frame 3: ok={frame3_out_with_growth['ok']} reason={frame3_out_with_growt
 
 # Test WITHOUT map growth using a fresh seed so branch-A mutations don't pollute branch-B
 print("\n=== WITHOUT MAP GROWTH ===")
-seed_b, keyframe_feats_b = fresh_bootstrap()
+seed_b = fresh_bootstrap()
 print(f"Bootstrap OK: {len(seed_b['landmarks'])} landmarks")
 
 pnp_kwargs_frozen = dict(frontend_kwargs["pnp_frontend_kwargs"])
 pnp_kwargs_frozen["grow_map"] = False
 
 frame2_out_frozen = process_frame_against_seed(
-    K, seed_b, keyframe_feats_b,
+    K, seed_b,
     im2,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=1,
     current_kf=2,
     **pnp_kwargs_frozen,
 )
 print(f"Frame 2: ok={frame2_out_frozen['ok']} n_landmarks={len(frame2_out_frozen['seed']['landmarks'])}")
 
 seed_frozen_after_f2 = frame2_out_frozen["seed"]
-keyframe_feats_frozen_f2 = frame2_out_frozen["track_out"]["cur_feats"]
 
 frame3_out_frozen = process_frame_against_seed(
-    K, seed_frozen_after_f2, keyframe_feats_frozen_f2,
+    K, seed_frozen_after_f2,
     im3,
     feature_cfg=frontend_kwargs["feature_cfg"],
     F_cfg=frontend_kwargs["F_cfg"],
-    keyframe_kf=2,
     current_kf=3,
     **pnp_kwargs_frozen,
 )

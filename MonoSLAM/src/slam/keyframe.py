@@ -357,7 +357,7 @@ def promote_frame_to_keyframe(
         np.asarray(t_cur, dtype=np.float64).reshape(3,),
     )
 
-    # Store legacy mirrors and sync canonical active state
+    # Store the canonical active keyframe state
     set_active_keyframe_record(seed, int(current_kf), pose, cur_feats, active_lookup)
 
     # Store promotion diagnostics

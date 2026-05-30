@@ -21,6 +21,7 @@ from geometry.pnp import (
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features
 from slam.tracking import track_against_keyframe
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -339,11 +340,9 @@ def _advance_frontend_to_frame(seed: dict, keyframe_feats, keyframe_index: int, 
         out = process_frame_against_seed(
             K,
             seed,
-            keyframe_feats,
             cur_im,
             feature_cfg=frontend_kwargs["feature_cfg"],
             F_cfg=frontend_kwargs["F_cfg"],
-            keyframe_kf=keyframe_index,
             current_kf=frame_index,
             **frontend_kwargs["pnp_frontend_kwargs"],
         )
@@ -396,7 +395,7 @@ def main() -> None:
         raise RuntimeError(f"Bootstrap failed: {boot.get('stats', {}).get('reason', None)}")
 
     seed = boot["seed"]
-    keyframe_feats = seed["feats1"]
+    keyframe_feats = get_active_keyframe_features(seed)
     keyframe_index = 1
 
     seed, keyframe_feats, keyframe_index = _advance_frontend_to_frame(
