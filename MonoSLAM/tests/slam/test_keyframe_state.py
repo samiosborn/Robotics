@@ -140,6 +140,25 @@ def test_set_active_keyframe_record_updates_canonical_state_only():
     assert validate_active_keyframe_state(seed)["errors"] == []
 
 
+# _seed_with_support_basis must not mutate the original seed nested stores
+def test_seed_with_support_basis_does_not_mutate_original_seed():
+    seed = _canonical_seed()
+    basis = {
+        "kf": 2,
+        "R": np.eye(3, dtype=np.float64),
+        "t": np.asarray([2.0, 0.0, 0.0], dtype=np.float64),
+        "feats": _features([[1.0, 2.0], [3.0, 4.0]]),
+        "landmark_id_by_feat": np.asarray([-1, -1], dtype=np.int64),
+    }
+
+    seed_out = frame_pipeline_module._seed_with_support_basis(seed, basis)
+
+    assert 2 not in seed["poses"]
+    assert 2 not in seed["keyframes"]
+    assert seed_out["poses"][2][1][0] == pytest.approx(2.0)
+    assert seed_out["keyframes"][2]["kf"] == 2
+
+
 # Copy canonical pose and lookup inputs when storing keyframe records
 def test_set_keyframe_record_copies_pose_and_lookup_inputs():
     seed = _canonical_seed()

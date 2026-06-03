@@ -25,6 +25,15 @@ def _copy_pose_blocks(R, t) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
+def _copy_seed_for_active_record(seed: dict[str, Any]) -> dict[str, Any]:
+    seed_out = dict(seed)
+    if "poses" in seed and isinstance(seed["poses"], dict):
+        seed_out["poses"] = dict(seed["poses"])
+    if "keyframes" in seed and isinstance(seed["keyframes"], dict):
+        seed_out["keyframes"] = dict(seed["keyframes"])
+    return seed_out
+
+
 def _support_basis_from_rescued_pose(
     track_out: dict[str, Any],
     pose_out: dict[str, Any],
@@ -99,7 +108,7 @@ def _support_basis_from_rescued_pose(
 
 
 def _seed_with_support_basis(seed: dict[str, Any], basis: dict[str, Any]) -> dict[str, Any]:
-    seed_out = dict(seed)
+    seed_out = _copy_seed_for_active_record(seed)
     pose = (
         np.asarray(basis["R"], dtype=np.float64).copy(),
         np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
@@ -116,7 +125,7 @@ def _refresh_active_lookup_basis_from_rescued_support(
     pose_out: dict[str, Any],
     current_kf: int,
 ) -> tuple[dict[str, Any], dict[str, int]]:
-    seed_out = dict(seed)
+    seed_out = _copy_seed_for_active_record(seed)
     basis, stats = _support_basis_from_rescued_pose(track_out, pose_out, current_kf)
     if basis is None:
         return seed_out, stats
