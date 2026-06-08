@@ -17,7 +17,7 @@ from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thi
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-from slam.keyframe_state import get_active_keyframe_features
+from slam.keyframe_state import get_active_keyframe_features, get_pose_for_kf
 from slam.pnp_config import pnp_frontend_kwargs_from_cfg
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
@@ -1470,6 +1470,311 @@ def _birth_source_masks(seed: dict, landmark_ids: np.ndarray) -> dict:
     }
 
 
+# Convert a diagnostic pose value into R and t
+def _diag_pose_to_rt(pose) -> tuple[np.ndarray, np.ndarray] | None:
+    try:
+        if isinstance(pose, dict):
+            if "R" not in pose or "t" not in pose:
+                return None
+            return np.asarray(pose["R"], dtype=np.float64).reshape(3, 3), np.asarray(pose["t"], dtype=np.float64).reshape(3)
+
+        if isinstance(pose, (tuple, list)) and len(pose) == 2:
+            return np.asarray(pose[0], dtype=np.float64).reshape(3, 3), np.asarray(pose[1], dtype=np.float64).reshape(3)
+
+        arr = np.asarray(pose, dtype=np.float64)
+        if arr.shape != (4, 4):
+            return None
+        return arr[:3, :3], arr[:3, 3].reshape(3)
+    except Exception:
+        return None
+
+
+# Check whether a local BA observation can project under the stored pose
+def _diag_projection_valid(K: np.ndarray, R: np.ndarray, t: np.ndarray, X_w: np.ndarray, *, eps: float) -> bool:
+    try:
+        X_c = np.asarray(R, dtype=np.float64) @ np.asarray(X_w, dtype=np.float64).reshape(3) + np.asarray(t, dtype=np.float64).reshape(3)
+    except Exception:
+        return False
+
+    if not np.isfinite(X_c).all():
+        return False
+
+    z = float(X_c[2])
+    if z <= float(eps):
+        return False
+
+    fx = float(K[0, 0])
+    fy = float(K[1, 1])
+    cx = float(K[0, 2])
+    cy = float(K[1, 2])
+    u = fx * float(X_c[0]) / z + cx
+    v = fy * float(X_c[1]) / z + cy
+
+    return bool(np.isfinite(u) and np.isfinite(v))
+
+
+# Reconstruct the landmark id set used by the successful local BA window
+def _local_ba_optimised_landmark_ids(K: np.ndarray, seed: dict, local_ba_stats: dict, *, eps: float) -> list[int]:
+    if not isinstance(seed, dict) or not isinstance(local_ba_stats, dict):
+        return []
+    if not bool(local_ba_stats.get("succeeded", False)):
+        return []
+
+    local_kfs = [int(kf) for kf in local_ba_stats.get("local_keyframes", [])]
+    if len(local_kfs) == 0:
+        return []
+
+    local_kf_set = set(int(kf) for kf in local_kfs)
+    pose_by_kf: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for kf in local_kfs:
+        try:
+            pose_blocks = _diag_pose_to_rt(get_pose_for_kf(seed, int(kf), context="diagnostic local BA pose"))
+        except Exception:
+            pose_blocks = None
+        if pose_blocks is not None:
+            pose_by_kf[int(kf)] = pose_blocks
+
+    if len(pose_by_kf) == 0:
+        return []
+
+    ids: list[int] = []
+    landmarks = seed.get("landmarks", []) if isinstance(seed.get("landmarks", []), list) else []
+    for lm in landmarks:
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+
+        lm_id = int(lm["id"])
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            continue
+
+        valid_obs_kfs: set[int] = set()
+        obs = lm.get("obs", [])
+        if not isinstance(obs, list):
+            continue
+
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            obs_kf = int(ob.get("kf", -1))
+            if int(obs_kf) not in local_kf_set or int(obs_kf) not in pose_by_kf:
+                continue
+
+            xy = np.asarray(ob.get("xy", np.zeros((2,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+            if xy.size != 2 or not np.isfinite(xy).all():
+                continue
+
+            R, t = pose_by_kf[int(obs_kf)]
+            if _diag_projection_valid(K, R, t, X_w, eps=float(eps)):
+                valid_obs_kfs.add(int(obs_kf))
+
+        if len(valid_obs_kfs) >= 2:
+            ids.append(int(lm_id))
+
+    return sorted(ids)
+
+
+# Index landmarks by id without mutating the seed
+def _landmark_index_for_diag(seed: dict) -> dict[int, dict]:
+    out: dict[int, dict] = {}
+    landmarks = seed.get("landmarks", []) if isinstance(seed, dict) else []
+    if not isinstance(landmarks, list):
+        return out
+
+    for lm in landmarks:
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+        out[int(lm["id"])] = lm
+
+    return out
+
+
+# Build the active keyframe feature-to-landmark lookup from observations
+def _active_landmark_lookup_from_observations(seed: dict) -> dict[int, int]:
+    lookup: dict[int, int] = {}
+    if not isinstance(seed, dict):
+        return lookup
+
+    active_kf = int(seed.get("active_keyframe_kf", -1))
+    if active_kf < 0:
+        return lookup
+
+    for lm in seed.get("landmarks", []):
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+        lm_id = int(lm["id"])
+        obs = lm.get("obs", [])
+        if not isinstance(obs, list):
+            continue
+
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            if int(ob.get("kf", -1)) != int(active_kf):
+                continue
+            feat = int(ob.get("feat", -1))
+            if feat < 0:
+                continue
+            if feat not in lookup:
+                lookup[int(feat)] = int(lm_id)
+
+    return lookup
+
+
+# Count BA landmarks seen in current tracked active-keyframe matches
+def _tracked_landmark_ids_from_active_lookup(seed: dict, track_out: dict) -> set[int]:
+    if not isinstance(track_out, dict):
+        return set()
+
+    lookup = _active_landmark_lookup_from_observations(seed)
+    kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    N = min(int(kf_feat_idx.size), int(cur_feat_idx.size))
+
+    ids: set[int] = set()
+    for j in range(N):
+        feat = int(kf_feat_idx[j])
+        cur_feat = int(cur_feat_idx[j])
+        if feat < 0 or cur_feat < 0:
+            continue
+        lm_id = lookup.get(int(feat), -1)
+        if int(lm_id) >= 0:
+            ids.add(int(lm_id))
+
+    return ids
+
+
+# Count raw mapped support before pose-eligibility observation gates
+def _raw_mapped_support_landmark_ids(seed: dict, track_out: dict) -> set[int]:
+    if not isinstance(track_out, dict):
+        return set()
+
+    lookup = _active_landmark_lookup_from_observations(seed)
+    lm_by_id = _landmark_index_for_diag(seed)
+    kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
+    N = min(int(kf_feat_idx.size), int(cur_feat_idx.size), int(xy_cur.shape[0]) if xy_cur.ndim == 2 else 0)
+
+    ids: set[int] = set()
+    for j in range(N):
+        feat = int(kf_feat_idx[j])
+        cur_feat = int(cur_feat_idx[j])
+        if feat < 0 or cur_feat < 0:
+            continue
+
+        lm_id = int(lookup.get(int(feat), -1))
+        if lm_id < 0:
+            continue
+
+        lm = lm_by_id.get(int(lm_id), None)
+        if lm is None:
+            continue
+
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            continue
+        if not np.isfinite(xy_cur[j, :2]).all():
+            continue
+
+        ids.add(int(lm_id))
+
+    return ids
+
+
+# Read pose-eligible and accepted PnP inlier landmark ids
+def _pose_support_landmark_id_sets(pose_out: dict) -> tuple[set[int], set[int]]:
+    if not isinstance(pose_out, dict):
+        return set(), set()
+
+    corrs = pose_out.get("corrs", None)
+    if corrs is None or not hasattr(corrs, "landmark_ids"):
+        return set(), set()
+
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    N = int(landmark_ids.size)
+    if N == 0:
+        return set(), set()
+
+    inlier_mask = align_bool_mask_1d(
+        pose_out.get("pnp_inlier_mask", np.zeros((N,), dtype=bool)),
+        N,
+        name="diagnostic pnp_inlier_mask",
+    )
+    if inlier_mask is None:
+        inlier_mask = np.zeros((N,), dtype=bool)
+
+    pose_ids = set(int(v) for v in landmark_ids)
+    inlier_ids = set(int(v) for v in landmark_ids[inlier_mask])
+
+    return pose_ids, inlier_ids
+
+
+# Build one downstream propagation row for a prior successful BA step
+def _local_ba_propagation_row(
+    ba_record: dict,
+    seed_before: dict,
+    frontend_out: dict,
+    frame_context: dict,
+    *,
+    seen_ids: set[int] | None = None,
+    mapped_ids: set[int] | None = None,
+) -> dict:
+    ba_ids = set(int(v) for v in ba_record.get("landmark_ids", []))
+    track_out = frontend_out.get("track_out", {}) if isinstance(frontend_out, dict) else {}
+    pose_out = frontend_out.get("pose_out", {}) if isinstance(frontend_out, dict) else {}
+
+    if seen_ids is None:
+        seen_ids = _tracked_landmark_ids_from_active_lookup(seed_before, track_out)
+    if mapped_ids is None:
+        mapped_ids = _raw_mapped_support_landmark_ids(seed_before, track_out)
+    pose_ids, inlier_ids = _pose_support_landmark_id_sets(pose_out)
+
+    ba_seen = ba_ids & seen_ids
+    ba_mapped = ba_ids & mapped_ids
+    ba_pose = ba_ids & pose_ids
+    ba_inlier = ba_ids & inlier_ids
+
+    pose_total = int(len(pose_ids))
+    pose_inside = int(len(ba_pose))
+    pose_outside = int(max(0, pose_total - pose_inside))
+    failure_support_location = None
+    if not bool(frame_context.get("pipeline_ok", False)):
+        if pose_total <= 0:
+            failure_support_location = "no_pose_eligible_support"
+        elif pose_inside > pose_outside:
+            failure_support_location = "mostly_inside_recent_ba"
+        else:
+            failure_support_location = "mostly_outside_recent_ba"
+
+    return {
+        "event": "local_ba_propagation",
+        "ba_frame_index": int(ba_record["frame_index"]),
+        "frame_index": int(frame_context["frame_index"]),
+        "frame_offset": int(frame_context["frame_index"]) - int(ba_record["frame_index"]),
+        "ba_active_keyframe": int(ba_record.get("active_keyframe", -1)),
+        "ba_n_optimised_landmarks": int(len(ba_ids)),
+        "n_seen_again": int(len(ba_seen)),
+        "n_mapped_support": int(len(ba_mapped)),
+        "n_pose_eligible_support": int(len(ba_pose)),
+        "n_pnp_inlier_support": int(len(ba_inlier)),
+        "n_seen_again_total": int(len(seen_ids)),
+        "n_mapped_support_total": int(len(mapped_ids)),
+        "n_pose_eligible_total": int(len(pose_ids)),
+        "n_pnp_inlier_total": int(len(inlier_ids)),
+        "pipeline_ok": bool(frame_context.get("pipeline_ok", False)),
+        "pipeline_reason": frame_context.get("pipeline_reason", None),
+        "n_track_inliers": int(frame_context.get("n_track_inliers", 0)),
+        "n_pnp_corr": int(frame_context.get("pipeline_n_pnp_corr", frame_context.get("n_pnp_corr", 0))),
+        "n_pnp_inliers": int(frame_context.get("pipeline_n_pnp_inliers", frame_context.get("n_pnp_inliers", 0))),
+        "rescue_attempted": bool(frame_context.get("rescue_attempted", False)),
+        "rescue_succeeded": bool(frame_context.get("rescue_succeeded", False)),
+        "failure_pose_support_inside_recent_ba": int(pose_inside),
+        "failure_pose_support_outside_recent_ba": int(pose_outside),
+        "failure_support_location": failure_support_location,
+    }
+
+
 # Compare threshold-pair PnP poses at 8 px and 12 px
 def _compare_threshold_pair_poses(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: dict, pose_pair: dict | None = None) -> dict:
     N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
@@ -2119,6 +2424,7 @@ def main() -> None:
     start_track = keyframe_index + 1
     stop_track = min(n_effective, start_track + num_track)
     scorecard_rows: list[dict] = []
+    successful_ba_records: list[dict] = []
 
     for i in range(start_track, stop_track):
         # Keep the current reference keyframe for this diagnostic step
@@ -2178,6 +2484,8 @@ def main() -> None:
         track_stats = track_out.get("stats", {})
         base_pose_stats = base_pose_out.get("stats", {})
         base_pose_unfiltered_stats = base_pose_unfiltered_out.get("stats", {})
+        propagation_seen_ids = _tracked_landmark_ids_from_active_lookup(seed, track_out)
+        propagation_mapped_ids = _raw_mapped_support_landmark_ids(seed, track_out)
 
         # Run the detailed threshold-pair diagnostics on the configured frame
         non_pnp_reprojection_diagnostic = None
@@ -2295,6 +2603,23 @@ def main() -> None:
             if int(append_stats.get("current_kf", -1)) != int(i):
                 append_stats = {}
 
+        local_ba_stats_full = frontend_stats.get("local_ba_stats", {})
+        if not isinstance(local_ba_stats_full, dict):
+            local_ba_stats_full = {}
+        local_ba_local_keyframes = [int(kf) for kf in local_ba_stats_full.get("local_keyframes", [])]
+        local_ba_optimised_keyframes = [int(kf) for kf in local_ba_stats_full.get("optimised_keyframes", [])]
+        local_ba_anchor_kf = local_ba_stats_full.get("anchor_kf", None)
+        local_ba_seed_after = frontend_out.get("seed", {}) if isinstance(frontend_out, dict) else {}
+        local_ba_active_keyframe = None
+        if isinstance(local_ba_seed_after, dict) and "active_keyframe_kf" in local_ba_seed_after:
+            local_ba_active_keyframe = int(local_ba_seed_after.get("active_keyframe_kf", -1))
+        local_ba_optimised_landmark_ids = _local_ba_optimised_landmark_ids(
+            K,
+            local_ba_seed_after,
+            local_ba_stats_full,
+            eps=float(pnp_cfg["eps"]),
+        )
+
         standard_stats = _standard_frame_stats(
             frame_index=i,
             reference_keyframe_index=ref_keyframe_index,
@@ -2313,6 +2638,15 @@ def main() -> None:
             "threshold_pair_frame_index": int(threshold_pair_frame_index),
             "seed_landmarks_before": int(seed_landmarks_before),
             "seed_landmarks_after": int(seed_landmarks_after),
+            "local_ba_active_keyframe": local_ba_active_keyframe,
+            "local_ba_local_keyframes": local_ba_local_keyframes,
+            "local_ba_anchor_kf": local_ba_anchor_kf,
+            "local_ba_optimised_keyframes": local_ba_optimised_keyframes,
+            "local_ba_optimised_landmark_ids": local_ba_optimised_landmark_ids,
+            "local_ba_n_optimised_landmark_ids": int(len(local_ba_optimised_landmark_ids)),
+            "local_ba_landmark_id_count_matches_stats": int(len(local_ba_optimised_landmark_ids)) == int(
+                frontend_stats.get("local_ba_n_local_landmarks", 0)
+            ),
             "track_ok": int(track_stats.get("n_inliers", 0)) > 0,
             "n_track_matches": int(track_stats.get("n_matches", 0)),
             "n_track_inliers": int(track_stats.get("n_inliers", 0)),
@@ -2485,7 +2819,7 @@ def main() -> None:
                 "event": "frame_scorecard",
                 **scorecard_row,
             },
-        )
+            )
 
         # Write the threshold-pair non-PnP reprojection diagnostic
         if non_pnp_reprojection_diagnostic is not None:
@@ -2575,6 +2909,23 @@ def main() -> None:
                 },
             )
 
+        # Write downstream reuse of recently BA-optimised landmarks
+        for ba_record in successful_ba_records:
+            frame_offset = int(i) - int(ba_record["frame_index"])
+            if (frame_offset < 1 or frame_offset > 3) and bool(frame_context.get("pipeline_ok", False)):
+                continue
+            _append_jsonl(
+                log_path,
+                _local_ba_propagation_row(
+                    ba_record,
+                    seed,
+                    frontend_out,
+                    frame_context,
+                    seen_ids=propagation_seen_ids,
+                    mapped_ids=propagation_mapped_ids,
+                ),
+            )
+
         if scorecard_mode != "off":
             print(_format_frame_scorecard(scorecard_row, mode=scorecard_mode))
             if scorecard_mode == "short":
@@ -2612,6 +2963,15 @@ def main() -> None:
                     print("  threshold_pair_spatial_after_filters:")
                 for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_diagnostic):
                     print(line)
+
+        if bool(frontend_stats.get("local_ba_succeeded", False)):
+            successful_ba_records.append(
+                {
+                    "frame_index": int(i),
+                    "active_keyframe": -1 if local_ba_active_keyframe is None else int(local_ba_active_keyframe),
+                    "landmark_ids": [int(v) for v in local_ba_optimised_landmark_ids],
+                }
+            )
 
         # Update the live frontend state for the next frame
         seed = frontend_out["seed"]
