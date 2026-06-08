@@ -7,8 +7,9 @@ from typing import Any
 import numpy as np
 
 from core.checks import check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_positive
+from slam.bundle_adjustment import local_bundle_adjustment_not_run_stats, run_local_bundle_adjustment
 from slam.keyframe import consider_promote_keyframe
-from slam.keyframe_state import get_active_keyframe_features, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
+from slam.keyframe_state import get_active_keyframe_features, get_pose_for_kf, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
 from slam.map_update import append_tracked_observations_to_seed, grow_map_from_tracking_result
 from slam.map_mutation import merge_map_mutation_reports
 from slam.pnp_frontend import estimate_pose_from_seed
@@ -32,6 +33,35 @@ def _copy_seed_for_active_record(seed: dict[str, Any]) -> dict[str, Any]:
     if "keyframes" in seed and isinstance(seed["keyframes"], dict):
         seed_out["keyframes"] = dict(seed["keyframes"])
     return seed_out
+
+
+# Flatten local BA diagnostics into frame stats
+def _local_ba_summary_stats(local_ba_stats: dict[str, Any]) -> dict[str, Any]:
+    stats = local_ba_stats if isinstance(local_ba_stats, dict) else local_bundle_adjustment_not_run_stats("stats_unavailable")
+    return {
+        "local_ba_attempted": bool(stats.get("attempted", False)),
+        "local_ba_skipped": bool(stats.get("skipped", False)),
+        "local_ba_succeeded": bool(stats.get("succeeded", False)),
+        "local_ba_skip_reason": stats.get("skip_reason", None),
+        "local_ba_reason": stats.get("reason", None),
+        "local_ba_acceptance_reason": stats.get("acceptance_reason", None),
+        "local_ba_rejection_reason": stats.get("rejection_reason", None),
+        "local_ba_n_local_keyframes": int(stats.get("n_local_keyframes", 0)),
+        "local_ba_local_keyframes": list(stats.get("local_keyframes", [])),
+        "local_ba_anchor_kf": stats.get("anchor_kf", None),
+        "local_ba_optimised_keyframes": list(stats.get("optimised_keyframes", [])),
+        "local_ba_n_local_landmarks": int(stats.get("n_local_landmarks", 0)),
+        "local_ba_n_observations": int(stats.get("n_observations", 0)),
+        "local_ba_initial_mean_reproj_error_px": stats.get("initial_mean_reproj_error_px", None),
+        "local_ba_initial_median_reproj_error_px": stats.get("initial_median_reproj_error_px", None),
+        "local_ba_final_mean_reproj_error_px": stats.get("final_mean_reproj_error_px", None),
+        "local_ba_final_median_reproj_error_px": stats.get("final_median_reproj_error_px", None),
+        "local_ba_iterations": int(stats.get("iterations", 0)),
+        "local_ba_accepted_iterations": int(stats.get("accepted_iterations", 0)),
+        "local_ba_initial_damping": stats.get("initial_damping", None),
+        "local_ba_final_damping": stats.get("final_damping", None),
+        "local_ba_stats": stats,
+    }
 
 
 def _support_basis_from_rescued_pose(
@@ -381,6 +411,16 @@ def process_frame_against_seed(
     keyframe_min_translation_m: float = 0.10,
     keyframe_min_rotation_deg: float = 5.0,
     keyframe_require_pose: bool = True,
+    enable_local_ba: bool = True,
+    local_ba_max_keyframes: int = 3,
+    local_ba_min_keyframes: int = 2,
+    local_ba_min_landmarks: int = 6,
+    local_ba_min_observations: int = 12,
+    local_ba_max_iters: int = 5,
+    local_ba_initial_damping: float = 1e-3,
+    local_ba_max_damping: float = 1e9,
+    local_ba_step_tol: float = 1e-7,
+    local_ba_improvement_tol: float = 1e-6,
 ) -> dict[str, Any]:
     # Validate inputs
     check_matrix_3x3(K, name="K", dtype=float, finite=False)
@@ -466,6 +506,7 @@ def process_frame_against_seed(
             "n_new_candidates": 0,
             "n_new_triangulated": 0,
             "n_new_added": 0,
+            **_local_ba_summary_stats(local_bundle_adjustment_not_run_stats("tracking_failed")),
             "keyframe_make": False,
             "keyframe_promoted": False,
             "keyframe_reason": None,
@@ -634,6 +675,7 @@ def process_frame_against_seed(
             "n_new_candidates": 0,
             "n_new_triangulated": 0,
             "n_new_added": 0,
+            **_local_ba_summary_stats(local_bundle_adjustment_not_run_stats("pnp_failed")),
             "keyframe_make": False,
             "keyframe_promoted": False,
             "keyframe_reason": None,
@@ -812,6 +854,40 @@ def process_frame_against_seed(
     if int(current_kf) >= 0:
         store_current_pose(seed_out, int(current_kf), pose_out["R"], pose_out["t"])
 
+    if not bool(enable_local_ba):
+        local_ba_stats = local_bundle_adjustment_not_run_stats("disabled")
+    elif bool(localisation_only_rescue_frame):
+        local_ba_stats = local_bundle_adjustment_not_run_stats("localisation_only_rescue_frame")
+    elif not bool(keyframe_stats.get("promoted", False)):
+        local_ba_stats = local_bundle_adjustment_not_run_stats("no_new_keyframe")
+    else:
+        local_ba_stats = run_local_bundle_adjustment(
+            K,
+            seed_out,
+            max_keyframes=local_ba_max_keyframes,
+            min_keyframes=local_ba_min_keyframes,
+            min_landmarks=local_ba_min_landmarks,
+            min_observations=local_ba_min_observations,
+            max_iters=local_ba_max_iters,
+            initial_damping=local_ba_initial_damping,
+            max_damping=local_ba_max_damping,
+            step_tol=local_ba_step_tol,
+            improvement_tol=local_ba_improvement_tol,
+            eps=eps,
+        )
+
+        if bool(local_ba_stats.get("succeeded", False)) and int(current_kf) in set(
+            int(kf) for kf in local_ba_stats.get("optimised_keyframes", [])
+        ):
+            current_pose = get_pose_for_kf(seed_out, int(current_kf), context="local BA accepted current pose")
+            accepted_R, accepted_t = _copy_pose_blocks(current_pose[0], current_pose[1])
+            seed_out["last_accepted_pose"] = {
+                "kf": int(current_kf),
+                "R": accepted_R.copy(),
+                "t": accepted_t.copy(),
+                "localisation_only": False,
+            }
+
     # Pack a single frontend result
     stats = {
         "ok": True,
@@ -836,6 +912,7 @@ def process_frame_against_seed(
         "n_new_added": int(map_stats.get("n_added", 0)),
         "seed_landmarks_after": int(len(seed_out.get("landmarks", []))),
         "localisation_only_rescue_frame": bool(localisation_only_rescue_frame),
+        **_local_ba_summary_stats(local_ba_stats),
         "guarded_support_refresh_triggered": bool(guarded_support_refresh_stats.get("triggered", False)),
         "guarded_support_refresh_reason": guarded_support_refresh_stats.get("reason", None),
         "guarded_support_refresh_n_lookup_mapped": int(guarded_support_refresh_stats.get("n_lookup_mapped", 0)),
