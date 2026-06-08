@@ -93,6 +93,23 @@ def _poses_agree(pose_a, pose_b, *, name_a: str, name_b: str) -> bool:
     return bool(np.allclose(T_a, T_b))
 
 
+# Ensure a keyframe pose mirror still matches canonical storage
+def _check_keyframe_pose_matches_store(seed, kf: int, record: dict, *, context: str) -> None:
+    if "pose" not in record:
+        return
+    if "poses" not in seed:
+        return
+
+    poses = get_pose_store(seed)
+    if int(kf) not in poses:
+        raise ValueError(f"{context}: seed['poses'] is missing keyframe {int(kf)} for seed['keyframes'][{int(kf)}]['pose']")
+
+    record_pose_name = f"seed['keyframes'][{int(kf)}]['pose']"
+    store_pose_name = f"seed['poses'][{int(kf)}]"
+    if not _poses_agree(record["pose"], poses[int(kf)], name_a=record_pose_name, name_b=store_pose_name):
+        raise ValueError(f"{context}: {record_pose_name} must match {store_pose_name}")
+
+
 # Copy an active landmark lookup for canonical storage
 def _copy_landmark_lookup(landmark_id_by_feat, *, name: str):
     if isinstance(landmark_id_by_feat, dict):
@@ -231,6 +248,7 @@ def get_keyframe_record(seed, kf, *, context: str = "keyframe") -> dict:
         record_kf = check_int_ge0_no_bool(record["kf"], name=f"{context}['kf']")
         if int(record_kf) != int(kf):
             raise ValueError(f"{context}: seed['keyframes'][{int(kf)}]['kf'] must match keyframe {int(kf)}")
+    _check_keyframe_pose_matches_store(seed, int(kf), record, context=str(context))
 
     return record
 

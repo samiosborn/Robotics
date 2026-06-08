@@ -110,6 +110,15 @@ def test_set_pose_for_kf_updates_pose_store_and_keyframe_record():
     assert audit_seed_invariants(seed)["errors"] == []
 
 
+# Reject stale mirrored keyframe poses
+def test_get_keyframe_record_rejects_pose_store_drift():
+    seed = _canonical_seed()
+    seed["poses"][1] = _pose(9.0)
+
+    with pytest.raises(ValueError, match="must match seed\\['poses'\\]\\[1\\]"):
+        get_keyframe_record(seed, 1)
+
+
 # Reject missing active keyframes with a clear error
 def test_missing_active_keyframe_fails_clearly():
     seed = _canonical_seed()
