@@ -1682,6 +1682,210 @@ def _raw_mapped_support_landmark_ids(seed: dict, track_out: dict) -> set[int]:
     return ids
 
 
+# Count ids whose landmark is in the latest local BA set
+def _count_ids_inside_set(ids: list[int], id_set: set[int]) -> int:
+    return int(sum(1 for lm_id in ids if int(lm_id) in id_set))
+
+
+# Check landmark birth source without importing private production helpers
+def _diag_landmark_bootstrap_born(lm: dict) -> bool:
+    return bool(isinstance(lm, dict) and lm.get("birth_source", None) == "bootstrap")
+
+
+# Read pose-support landmark ids as correspondence lists
+def _pose_support_landmark_id_lists(pose_out: dict) -> tuple[list[int], list[int]]:
+    pose_ids: list[int] = []
+    inlier_ids: list[int] = []
+    if not isinstance(pose_out, dict):
+        return pose_ids, inlier_ids
+
+    corrs = pose_out.get("corrs", None)
+    if corrs is None or not hasattr(corrs, "landmark_ids"):
+        return pose_ids, inlier_ids
+
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    pose_ids = [int(v) for v in landmark_ids]
+    pnp_inlier_mask = align_bool_mask_1d(
+        pose_out.get("pnp_inlier_mask", np.zeros((int(landmark_ids.size),), dtype=bool)),
+        int(landmark_ids.size),
+        name="support funnel pnp_inlier_mask",
+    )
+    inlier_ids = [int(v) for v in landmark_ids[pnp_inlier_mask]]
+    return pose_ids, inlier_ids
+
+
+# Build a detailed support funnel for one tracked frame
+def _support_funnel_diagnostic(
+    seed: dict,
+    track_out: dict,
+    pose_out: dict,
+    *,
+    frame_index: int,
+    reference_keyframe_index: int,
+    min_landmark_observations: int,
+    allow_bootstrap_landmarks_for_pose: bool,
+    min_post_bootstrap_observations_for_pose: int,
+    latest_ba_record: dict | None,
+) -> dict:
+    lookup = _active_landmark_lookup_from_observations(seed)
+    lm_by_id = _landmark_index_for_diag(seed)
+    ba_ids = set()
+    latest_ba_frame_index = None
+    latest_ba_active_keyframe = None
+    if isinstance(latest_ba_record, dict):
+        latest_ba_frame_index = int(latest_ba_record.get("frame_index", -1))
+        latest_ba_active_keyframe = int(latest_ba_record.get("active_keyframe", -1))
+        ba_ids = set(int(v) for v in latest_ba_record.get("landmark_ids", []))
+
+    stats = track_out.get("stats", {}) if isinstance(track_out, dict) else {}
+    kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
+    xy_kf = np.asarray(track_out.get("xy_kf", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
+    N = min(
+        int(kf_feat_idx.size),
+        int(cur_feat_idx.size),
+        int(xy_cur.shape[0]) if xy_cur.ndim == 2 else 0,
+        int(xy_kf.shape[0]) if xy_kf.ndim == 2 else 0,
+    )
+
+    mapped_ids: list[int] = []
+    valid_ids: list[int] = []
+    obs_pass_ids: list[int] = []
+    n_invalid_kf_feature = 0
+    n_unmapped_by_lookup = 0
+    n_missing_landmark = 0
+    n_invalid_x_w = 0
+    n_invalid_image_points = 0
+    n_observation_gated_out = 0
+    n_observation_gated_out_bootstrap = 0
+    n_observation_gated_out_post_bootstrap = 0
+    n_obs_pass_bootstrap = 0
+    n_obs_pass_post_bootstrap = 0
+
+    for j in range(N):
+        feat = int(kf_feat_idx[j])
+        if feat < 0:
+            n_invalid_kf_feature += 1
+            continue
+
+        lm_id = int(lookup.get(int(feat), -1))
+        if lm_id < 0:
+            n_unmapped_by_lookup += 1
+            continue
+
+        mapped_ids.append(int(lm_id))
+        lm = lm_by_id.get(int(lm_id), None)
+        if lm is None:
+            n_missing_landmark += 1
+            continue
+
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            n_invalid_x_w += 1
+            continue
+
+        if not np.isfinite(xy_cur[j, :2]).all() or not np.isfinite(xy_kf[j, :2]).all():
+            n_invalid_image_points += 1
+            continue
+
+        valid_ids.append(int(lm_id))
+        bootstrap_born = _diag_landmark_bootstrap_born(lm)
+        n_obs = 0
+        obs = lm.get("obs", [])
+        if isinstance(obs, list):
+            for ob in obs:
+                if not isinstance(ob, dict):
+                    continue
+                if int(ob.get("kf", -1)) < 0:
+                    continue
+                if int(ob.get("feat", -1)) < 0:
+                    continue
+                xy = np.asarray(ob.get("xy", np.zeros((2,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+                if xy.size == 2 and np.isfinite(xy).all():
+                    n_obs += 1
+
+        if bootstrap_born:
+            if not bool(allow_bootstrap_landmarks_for_pose):
+                n_observation_gated_out += 1
+                n_observation_gated_out_bootstrap += 1
+                continue
+            min_obs_required = int(min_landmark_observations)
+        else:
+            min_obs_required = max(
+                int(min_landmark_observations),
+                int(min_post_bootstrap_observations_for_pose),
+            )
+
+        if int(n_obs) < int(min_obs_required):
+            n_observation_gated_out += 1
+            if bootstrap_born:
+                n_observation_gated_out_bootstrap += 1
+            else:
+                n_observation_gated_out_post_bootstrap += 1
+            continue
+
+        obs_pass_ids.append(int(lm_id))
+        if bootstrap_born:
+            n_obs_pass_bootstrap += 1
+        else:
+            n_obs_pass_post_bootstrap += 1
+
+    pose_ids_list, inlier_ids_list = _pose_support_landmark_id_lists(pose_out)
+    mapped_inside = _count_ids_inside_set(mapped_ids, ba_ids)
+    valid_inside = _count_ids_inside_set(valid_ids, ba_ids)
+    obs_inside = _count_ids_inside_set(obs_pass_ids, ba_ids)
+    pose_inside = _count_ids_inside_set(pose_ids_list, ba_ids)
+    inlier_inside = _count_ids_inside_set(inlier_ids_list, ba_ids)
+
+    return {
+        "event": "support_funnel",
+        "frame_index": int(frame_index),
+        "reference_keyframe_index": int(reference_keyframe_index),
+        "active_keyframe_index": int(seed.get("active_keyframe_kf", -1)) if isinstance(seed, dict) else -1,
+        "raw_tracked_pairs": int(stats.get("n_matches", N)),
+        "track_inliers": int(stats.get("n_inliers", N)),
+        "tracked_inlier_pairs": int(N),
+        "invalid_keyframe_feature_indices": int(n_invalid_kf_feature),
+        "unmapped_by_active_lookup": int(n_unmapped_by_lookup),
+        "mapped_by_active_lookup": int(len(mapped_ids)),
+        "missing_landmark_records": int(n_missing_landmark),
+        "invalid_X_w": int(n_invalid_x_w),
+        "invalid_image_points": int(n_invalid_image_points),
+        "valid_landmarks_X_w": int(len(valid_ids)),
+        "observation_gated_out": int(n_observation_gated_out),
+        "observation_gated_out_bootstrap_born": int(n_observation_gated_out_bootstrap),
+        "observation_gated_out_post_bootstrap_born": int(n_observation_gated_out_post_bootstrap),
+        "observation_gated_pass": int(len(obs_pass_ids)),
+        "observation_gated_pass_bootstrap_born": int(n_obs_pass_bootstrap),
+        "observation_gated_pass_post_bootstrap_born": int(n_obs_pass_post_bootstrap),
+        "final_pnp_correspondences": int(len(pose_ids_list)),
+        "pnp_inliers": int(len(inlier_ids_list)),
+        "latest_ba_frame_index": latest_ba_frame_index,
+        "latest_ba_active_keyframe": latest_ba_active_keyframe,
+        "latest_ba_optimised_landmarks": int(len(ba_ids)),
+        "mapped_inside_latest_ba": int(mapped_inside),
+        "mapped_outside_latest_ba": int(len(mapped_ids) - mapped_inside),
+        "valid_inside_latest_ba": int(valid_inside),
+        "valid_outside_latest_ba": int(len(valid_ids) - valid_inside),
+        "observation_pass_inside_latest_ba": int(obs_inside),
+        "observation_pass_outside_latest_ba": int(len(obs_pass_ids) - obs_inside),
+        "final_pnp_inside_latest_ba": int(pose_inside),
+        "final_pnp_outside_latest_ba": int(len(pose_ids_list) - pose_inside),
+        "pnp_inliers_inside_latest_ba": int(inlier_inside),
+        "pnp_inliers_outside_latest_ba": int(len(inlier_ids_list) - inlier_inside),
+        "lost_valid_to_observation": int(len(valid_ids) - len(obs_pass_ids)),
+        "lost_valid_to_observation_inside_latest_ba": int(valid_inside - obs_inside),
+        "lost_valid_to_observation_outside_latest_ba": int((len(valid_ids) - valid_inside) - (len(obs_pass_ids) - obs_inside)),
+        "lost_observation_to_final_pnp": int(len(obs_pass_ids) - len(pose_ids_list)),
+        "lost_observation_to_final_pnp_inside_latest_ba": int(obs_inside - pose_inside),
+        "lost_observation_to_final_pnp_outside_latest_ba": int((len(obs_pass_ids) - obs_inside) - (len(pose_ids_list) - pose_inside)),
+        "lost_final_pnp_to_inliers": int(len(pose_ids_list) - len(inlier_ids_list)),
+        "lost_final_pnp_to_inliers_inside_latest_ba": int(pose_inside - inlier_inside),
+        "lost_final_pnp_to_inliers_outside_latest_ba": int((len(pose_ids_list) - pose_inside) - (len(inlier_ids_list) - inlier_inside)),
+    }
+
+
 # Read pose-eligible and accepted PnP inlier landmark ids
 def _pose_support_landmark_id_sets(pose_out: dict) -> tuple[set[int], set[int]]:
     if not isinstance(pose_out, dict):
@@ -2486,6 +2690,18 @@ def main() -> None:
         base_pose_unfiltered_stats = base_pose_unfiltered_out.get("stats", {})
         propagation_seen_ids = _tracked_landmark_ids_from_active_lookup(seed, track_out)
         propagation_mapped_ids = _raw_mapped_support_landmark_ids(seed, track_out)
+        latest_ba_record = successful_ba_records[-1] if len(successful_ba_records) > 0 else None
+        support_funnel_diagnostic = _support_funnel_diagnostic(
+            seed,
+            track_out,
+            base_pose_out,
+            frame_index=i,
+            reference_keyframe_index=ref_keyframe_index,
+            min_landmark_observations=int(min_landmark_observations),
+            allow_bootstrap_landmarks_for_pose=bool(pnp_cfg["allow_bootstrap_landmarks_for_pose"]),
+            min_post_bootstrap_observations_for_pose=int(pnp_cfg["min_post_bootstrap_observations_for_pose"]),
+            latest_ba_record=latest_ba_record,
+        )
 
         # Run the detailed threshold-pair diagnostics on the configured frame
         non_pnp_reprojection_diagnostic = None
@@ -2788,6 +3004,41 @@ def main() -> None:
             "pipeline_keyframe_promoted": bool(frontend_stats.get("keyframe_promoted", False)),
             "pipeline_keyframe_reason": frontend_stats.get("keyframe_reason", None),
         }
+        latest_ba_ids_for_pipeline = set()
+        if isinstance(latest_ba_record, dict):
+            latest_ba_ids_for_pipeline = set(int(v) for v in latest_ba_record.get("landmark_ids", []))
+        pipeline_pose_ids, pipeline_inlier_ids = _pose_support_landmark_id_lists(
+            frontend_out.get("pose_out", {}) if isinstance(frontend_out, dict) else {}
+        )
+        pipeline_pose_inside = _count_ids_inside_set(pipeline_pose_ids, latest_ba_ids_for_pipeline)
+        pipeline_inlier_inside = _count_ids_inside_set(pipeline_inlier_ids, latest_ba_ids_for_pipeline)
+        support_funnel_row = dict(support_funnel_diagnostic)
+        support_funnel_row.update(
+            {
+                "seed_landmarks_before": int(seed_landmarks_before),
+                "seed_landmarks_after": int(seed_landmarks_after),
+                "pipeline_ok": bool(frame_context.get("pipeline_ok", False)),
+                "pipeline_reason": frame_context.get("pipeline_reason", None),
+                "pipeline_n_pnp_corr": int(frame_context.get("pipeline_n_pnp_corr", 0)),
+                "pipeline_n_pnp_inliers": int(frame_context.get("pipeline_n_pnp_inliers", 0)),
+                "pipeline_final_pnp_inside_latest_ba": int(pipeline_pose_inside),
+                "pipeline_final_pnp_outside_latest_ba": int(len(pipeline_pose_ids) - pipeline_pose_inside),
+                "pipeline_pnp_inliers_inside_latest_ba": int(pipeline_inlier_inside),
+                "pipeline_pnp_inliers_outside_latest_ba": int(len(pipeline_inlier_ids) - pipeline_inlier_inside),
+                "pipeline_lost_final_pnp_to_inliers_inside_latest_ba": int(pipeline_pose_inside - pipeline_inlier_inside),
+                "pipeline_lost_final_pnp_to_inliers_outside_latest_ba": int(
+                    (len(pipeline_pose_ids) - pipeline_pose_inside) - (len(pipeline_inlier_ids) - pipeline_inlier_inside)
+                ),
+                "rescue_attempted": bool(frame_context.get("rescue_attempted", False)),
+                "rescue_succeeded": bool(frame_context.get("rescue_succeeded", False)),
+                "localisation_only_rescue_frame": bool(frontend_stats.get("localisation_only_rescue_frame", False)),
+                "support_refresh_triggered": bool(frame_context.get("support_refresh_triggered", False)),
+                "pipeline_keyframe_promoted": bool(frame_context.get("pipeline_keyframe_promoted", False)),
+                "pipeline_keyframe_reason": frame_context.get("pipeline_keyframe_reason", None),
+                "local_ba_succeeded": bool(frontend_stats.get("local_ba_succeeded", False)),
+                "local_ba_n_optimised_landmark_ids": int(len(local_ba_optimised_landmark_ids)),
+            }
+        )
 
         threshold_scorecard = _threshold_scorecard_rows(threshold_rows)
         scorecard_row = _frame_scorecard_row(frame_context)
@@ -2810,6 +3061,12 @@ def main() -> None:
                 "event": "frame_summary",
                 **frame_context,
             },
+        )
+
+        # Write the support-funnel row
+        _append_jsonl(
+            log_path,
+            support_funnel_row,
         )
 
         # Write a compact parseable scorecard row

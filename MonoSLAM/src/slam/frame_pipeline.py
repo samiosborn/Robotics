@@ -824,6 +824,9 @@ def process_frame_against_seed(
             min_pnp_inliers=keyframe_min_pnp_inliers,
             min_landmark_growth=keyframe_min_landmark_growth,
             min_linked_landmarks_for_promotion=keyframe_min_linked_landmarks_for_promotion,
+            min_landmark_observations=min_landmark_observations,
+            allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
+            min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
             min_translation_m=keyframe_min_translation_m,
             min_rotation_deg=keyframe_min_rotation_deg,
             require_pose=keyframe_require_pose,
@@ -920,6 +923,9 @@ def process_frame_against_seed(
         "guarded_support_refresh_n_conflicts": int(guarded_support_refresh_stats.get("n_conflicts", 0)),
         "guarded_support_refresh_n_out_of_range": int(guarded_support_refresh_stats.get("n_out_of_range", 0)),
         "n_linked_landmarks_candidate": int(keyframe_stats.get("n_linked_landmarks_candidate", 0)),
+        "n_pose_eligible_linked_landmarks_candidate": int(
+            keyframe_stats.get("n_pose_eligible_linked_landmarks_candidate", 0)
+        ),
         "keyframe_make": bool(keyframe_stats.get("make_keyframe", False)),
         "keyframe_promoted": bool(keyframe_stats.get("promoted", False)),
         "keyframe_reason": keyframe_stats.get("reason", None),

@@ -6,11 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.checks import check_int_ge0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
+from core.checks import check_int_ge0, check_int_gt0, check_matrix_3x3, check_points_xy_N2plus, check_positive, check_required_keys, check_vector_3
 from geometry.camera import camera_centre
 from geometry.rotation import angle_between_rotmats
 from slam.keyframe_state import build_landmark_lookup_for_kf, set_active_keyframe_record
-from slam.landmark_state import iter_landmark_observations
+from slam.landmark_state import build_landmark_id_index, count_valid_landmark_observations, iter_landmark_observations
 from slam.map_update import MapGrowthResult
 from slam.seed import seed_keyframe_pose
 
@@ -66,6 +66,84 @@ def count_linked_landmarks_for_kf(seed: dict, kf_index: int) -> int:
     }
 
     return int(len(linked_ids))
+
+
+# Check whether a landmark can use the bootstrap pose-support rule
+def _landmark_is_bootstrap_born(landmark: dict) -> bool:
+    return landmark.get("birth_source", None) == "bootstrap"
+
+
+# Count candidate-frame links that can support pose estimation
+def count_pose_eligible_linked_landmarks_for_kf(
+    seed: dict,
+    kf_index: int,
+    *,
+    min_landmark_observations: int = 2,
+    allow_bootstrap_landmarks_for_pose: bool = True,
+    min_post_bootstrap_observations_for_pose: int = 3,
+) -> int:
+    # Check seed contains landmarks
+    seed = check_required_keys(seed, {"landmarks"}, name="seed")
+
+    # Check keyframe index
+    kf_index = check_int_ge0(kf_index, name="kf_index")
+
+    # Check pose-eligibility controls
+    min_landmark_observations = check_int_gt0(
+        min_landmark_observations,
+        name="min_landmark_observations",
+    )
+    allow_bootstrap_landmarks_for_pose = bool(allow_bootstrap_landmarks_for_pose)
+    min_post_bootstrap_observations_for_pose = check_int_gt0(
+        min_post_bootstrap_observations_for_pose,
+        name="min_post_bootstrap_observations_for_pose",
+    )
+
+    # Collect landmarks linked to the candidate keyframe basis
+    linked_ids = {
+        int(landmark_id)
+        for landmark_id, obs_kf, _, _ in iter_landmark_observations(seed, context="seed['landmarks']")
+        if int(obs_kf) == int(kf_index)
+    }
+
+    if len(linked_ids) == 0:
+        return 0
+
+    # Count links that pass the same observation gate as PnP support
+    lm_by_id = build_landmark_id_index(seed, context="seed['landmarks']")
+    n_pose_eligible = 0
+    for landmark_id in linked_ids:
+        lm = lm_by_id.get(int(landmark_id), None)
+        if lm is None:
+            continue
+
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3:
+            continue
+        if not np.isfinite(X_w).all():
+            continue
+
+        bootstrap_born = _landmark_is_bootstrap_born(lm)
+        if bool(bootstrap_born):
+            if not bool(allow_bootstrap_landmarks_for_pose):
+                continue
+            min_obs_required = int(min_landmark_observations)
+        else:
+            min_obs_required = max(
+                int(min_landmark_observations),
+                int(min_post_bootstrap_observations_for_pose),
+            )
+
+        n_obs = count_valid_landmark_observations(
+            lm,
+            context=f"seed['landmarks'][id={int(landmark_id)}]",
+        )
+        if int(n_obs) < int(min_obs_required):
+            continue
+
+        n_pose_eligible += 1
+
+    return int(n_pose_eligible)
 
 
 # Summarise spatial coverage of landmark observations in one frame
@@ -167,6 +245,9 @@ def should_make_keyframe(
     min_pnp_inliers: int = 40,
     min_landmark_growth: int = 20,
     min_linked_landmarks_for_promotion: int = 100,
+    min_landmark_observations: int = 2,
+    allow_bootstrap_landmarks_for_pose: bool = True,
+    min_post_bootstrap_observations_for_pose: int = 3,
     min_translation_m: float = 0.10,
     min_rotation_deg: float = 5.0,
     require_pose: bool = True,
@@ -193,6 +274,15 @@ def should_make_keyframe(
         min_linked_landmarks_for_promotion,
         name="min_linked_landmarks_for_promotion",
     )
+    min_landmark_observations = check_int_gt0(
+        min_landmark_observations,
+        name="min_landmark_observations",
+    )
+    allow_bootstrap_landmarks_for_pose = bool(allow_bootstrap_landmarks_for_pose)
+    min_post_bootstrap_observations_for_pose = check_int_gt0(
+        min_post_bootstrap_observations_for_pose,
+        name="min_post_bootstrap_observations_for_pose",
+    )
     min_translation_m = check_positive(min_translation_m, name="min_translation_m", eps=0.0)
     min_rotation_deg = check_positive(min_rotation_deg, name="min_rotation_deg", eps=0.0)
 
@@ -207,6 +297,13 @@ def should_make_keyframe(
     n_added = int(map_stats.get("n_added", 0))
     n_landmarks = int(len(seed.get("landmarks", [])))
     n_linked_landmarks_candidate = count_linked_landmarks_for_kf(seed, current_kf)
+    n_pose_eligible_linked_landmarks_candidate = count_pose_eligible_linked_landmarks_for_kf(
+        seed,
+        current_kf,
+        min_landmark_observations=int(min_landmark_observations),
+        allow_bootstrap_landmarks_for_pose=bool(allow_bootstrap_landmarks_for_pose),
+        min_post_bootstrap_observations_for_pose=int(min_post_bootstrap_observations_for_pose),
+    )
     linked_coverage = _linked_landmark_observation_coverage(seed, current_kf, image_shape)
 
     # Read pose status
@@ -220,6 +317,7 @@ def should_make_keyframe(
         "n_added": int(n_added),
         "n_landmarks": int(n_landmarks),
         "n_linked_landmarks_candidate": int(n_linked_landmarks_candidate),
+        "n_pose_eligible_linked_landmarks_candidate": int(n_pose_eligible_linked_landmarks_candidate),
         "promotion_vetoed_for_low_links": False,
         "promotion_vetoed_for_low_coverage": False,
         "promotion_linked_coverage_evaluated": bool(linked_coverage.get("evaluated", False)),
@@ -241,6 +339,12 @@ def should_make_keyframe(
             return KeyframeDecision(
                 make_keyframe=False,
                 reason="linked_landmarks_low",
+                stats=stats_out,
+            )
+        if bool(make_keyframe) and int(n_pose_eligible_linked_landmarks_candidate) < int(min_linked_landmarks_for_promotion):
+            return KeyframeDecision(
+                make_keyframe=False,
+                reason="pose_eligible_linked_landmarks_low",
                 stats=stats_out,
             )
         if bool(make_keyframe) and bool(linked_coverage.get("evaluated", False)):
@@ -383,6 +487,9 @@ def consider_promote_keyframe(
     min_pnp_inliers: int = 40,
     min_landmark_growth: int = 20,
     min_linked_landmarks_for_promotion: int = 100,
+    min_landmark_observations: int = 2,
+    allow_bootstrap_landmarks_for_pose: bool = True,
+    min_post_bootstrap_observations_for_pose: int = 3,
     min_translation_m: float = 0.10,
     min_rotation_deg: float = 5.0,
     require_pose: bool = True,
@@ -413,6 +520,9 @@ def consider_promote_keyframe(
         min_pnp_inliers=min_pnp_inliers,
         min_landmark_growth=min_landmark_growth,
         min_linked_landmarks_for_promotion=min_linked_landmarks_for_promotion,
+        min_landmark_observations=min_landmark_observations,
+        allow_bootstrap_landmarks_for_pose=allow_bootstrap_landmarks_for_pose,
+        min_post_bootstrap_observations_for_pose=min_post_bootstrap_observations_for_pose,
         min_translation_m=min_translation_m,
         min_rotation_deg=min_rotation_deg,
         require_pose=require_pose,
@@ -450,6 +560,9 @@ def consider_promote_keyframe(
         "current_kf": int(current_kf),
         "n_landmarks": int(len(seed_out.get("landmarks", []))),
         "n_linked_landmarks_candidate": int(decision.stats.get("n_linked_landmarks_candidate", 0)),
+        "n_pose_eligible_linked_landmarks_candidate": int(
+            decision.stats.get("n_pose_eligible_linked_landmarks_candidate", 0)
+        ),
         "promotion_vetoed_for_low_links": bool(decision.stats.get("promotion_vetoed_for_low_links", False)),
         "promotion_vetoed_for_low_coverage": bool(decision.stats.get("promotion_vetoed_for_low_coverage", False)),
         "promotion_linked_coverage_bbox_area_fraction": decision.stats.get(
