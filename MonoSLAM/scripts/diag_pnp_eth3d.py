@@ -2634,6 +2634,8 @@ def main() -> None:
         # Keep the current reference keyframe for this diagnostic step
         ref_keyframe_index = int(keyframe_index)
         ref_keyframe_feats = keyframe_feats
+        live_pipeline_ref_keyframe_index = int(seed.get("active_keyframe_kf", ref_keyframe_index))
+        live_pipeline_ref_keyframe_feats = get_active_keyframe_features(seed)
 
         # Read the current frame image
         cur_im, cur_ts, cur_id = seq.get(i)
@@ -2711,6 +2713,9 @@ def main() -> None:
         pnp_pose_comparison_diagnostic = None
         pnp_spatial_before_diagnostic = None
         pnp_spatial_diagnostic = None
+        live_pipeline_threshold_rows = None
+        live_pipeline_pose_comparison_diagnostic = None
+        live_pipeline_spatial_diagnostic = None
         if int(i) == int(threshold_pair_frame_index):
             pnp_pose_pair_before = _threshold_pair_pose_pair(
                 corrs_before_filters,
@@ -2811,6 +2816,48 @@ def main() -> None:
         )
         frontend_stats = frontend_out.get("stats", {}) if isinstance(frontend_out, dict) else {}
         seed_landmarks_after = int(len(frontend_out.get("seed", {}).get("landmarks", []))) if isinstance(frontend_out, dict) else seed_landmarks_before
+
+        # Replay fixed-set diagnostics on the live pipeline bundle
+        if int(i) == int(threshold_pair_frame_index):
+            live_pipeline_pose_out = frontend_out.get("pose_out", None) if isinstance(frontend_out, dict) else None
+            live_pipeline_track_out = frontend_out.get("track_out", None) if isinstance(frontend_out, dict) else None
+            if isinstance(live_pipeline_pose_out, dict) and live_pipeline_pose_out.get("corrs", None) is not None:
+                live_pipeline_corrs = live_pipeline_pose_out["corrs"]
+                live_pipeline_pose_pair = _threshold_pair_pose_pair(
+                    live_pipeline_corrs,
+                    K,
+                    pnp_cfg=pnp_cfg,
+                    image_shape=cur_image_shape,
+                )
+                live_pipeline_threshold_rows = [
+                    _run_threshold_diagnostic(
+                        live_pipeline_corrs,
+                        K,
+                        threshold_px=float(threshold_px),
+                        pnp_cfg=pnp_cfg,
+                        image_shape=cur_image_shape,
+                    )
+                    for threshold_px in thresholds
+                ]
+                live_pipeline_pose_comparison_diagnostic = _compare_threshold_pair_poses(
+                    seed,
+                    live_pipeline_corrs,
+                    K,
+                    pnp_cfg=pnp_cfg,
+                    pose_pair=live_pipeline_pose_pair,
+                )
+                live_pipeline_spatial_diagnostic = _build_threshold_pair_spatial_diagnostic(
+                    seq,
+                    live_pipeline_ref_keyframe_index,
+                    i,
+                    live_pipeline_ref_keyframe_feats,
+                    live_pipeline_track_out,
+                    live_pipeline_corrs,
+                    out_dir,
+                    pose_pair=live_pipeline_pose_pair,
+                    name_suffix="live_pipeline",
+                )
+
         append_stats = {}
         if isinstance(frontend_out, dict) and isinstance(frontend_out.get("seed", None), dict):
             append_stats = frontend_out["seed"].get("last_tracked_observation_append_stats", {})
@@ -2851,6 +2898,7 @@ def main() -> None:
             "frame_id": str(cur_id),
             "timestamp": float(cur_ts),
             "reference_keyframe_index": int(ref_keyframe_index),
+            "live_pipeline_reference_keyframe_index": int(live_pipeline_ref_keyframe_index),
             "threshold_pair_frame_index": int(threshold_pair_frame_index),
             "seed_landmarks_before": int(seed_landmarks_before),
             "seed_landmarks_after": int(seed_landmarks_after),
@@ -3155,6 +3203,47 @@ def main() -> None:
                 },
             )
 
+        live_pipeline_event_context = {
+            **frame_context,
+            "bundle_source": "live_pipeline",
+            "diagnostic_reference_keyframe_index": int(ref_keyframe_index),
+            "reference_keyframe_index": int(live_pipeline_ref_keyframe_index),
+        }
+
+        # Write the live-pipeline threshold-pair pose comparison
+        if live_pipeline_pose_comparison_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_8px_12px_comparison_live_pipeline",
+                    **live_pipeline_event_context,
+                    "pnp_threshold_pair_comparison": live_pipeline_pose_comparison_diagnostic,
+                },
+            )
+
+        # Write the live-pipeline threshold-pair spatial diagnostic
+        if live_pipeline_spatial_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_spatial_summary_live_pipeline",
+                    **live_pipeline_event_context,
+                    "pnp_spatial": live_pipeline_spatial_diagnostic,
+                },
+            )
+
+        # Write one live-pipeline diagnostic row per threshold
+        if live_pipeline_threshold_rows is not None:
+            for row in live_pipeline_threshold_rows:
+                _append_jsonl(
+                    log_path,
+                    {
+                        "event": "pnp_threshold_live_pipeline",
+                        **live_pipeline_event_context,
+                        **row,
+                    },
+                )
+
         # Write one diagnostic row per threshold
         for row in threshold_rows:
             _append_jsonl(
@@ -3219,6 +3308,20 @@ def main() -> None:
                 if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
                     print("  threshold_pair_spatial_after_filters:")
                 for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_diagnostic):
+                    print(line)
+            if live_pipeline_threshold_rows is not None:
+                print(
+                    f"  live_pipeline_thresholds: "
+                    f"ref={int(live_pipeline_ref_keyframe_index)} "
+                    f"{_format_threshold_summary(live_pipeline_threshold_rows)}"
+                )
+            if live_pipeline_pose_comparison_diagnostic is not None:
+                print("  threshold_pair_live_pipeline:")
+                for line in _format_threshold_pair_pose_comparison(live_pipeline_pose_comparison_diagnostic):
+                    print(line)
+            if live_pipeline_spatial_diagnostic is not None:
+                print("  threshold_pair_spatial_live_pipeline:")
+                for line in _format_threshold_pair_spatial_diagnostic(live_pipeline_spatial_diagnostic):
                     print(line)
 
         if bool(frontend_stats.get("local_ba_succeeded", False)):
