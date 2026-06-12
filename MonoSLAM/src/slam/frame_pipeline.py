@@ -772,8 +772,6 @@ def process_frame_against_seed(
 
         if bool(incoherent_recovery_frame):
             guarded_support_refresh_stats["reason"] = "incoherent_recovery_localisation_only"
-        elif int(current_kf) < 14:
-            guarded_support_refresh_stats["reason"] = "current_kf_before_late_trigger"
         elif not bool(support_strong_enough):
             guarded_support_refresh_stats["reason"] = "rescued_support_too_weak"
         else:
@@ -786,7 +784,7 @@ def process_frame_against_seed(
             guarded_support_refresh_stats.update(
                 {
                     "triggered": True,
-                    "reason": "late_rescued_support_refresh",
+                    "reason": "rescued_support_refresh",
                     "n_lookup_mapped": int(refresh_stats.get("n_lookup_mapped", 0)),
                     "n_accepted_support": int(refresh_stats.get("n_accepted_support", 0)),
                     "n_conflicts": int(refresh_stats.get("n_conflicts", 0)),
