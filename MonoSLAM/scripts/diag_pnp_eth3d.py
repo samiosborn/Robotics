@@ -17,7 +17,8 @@ from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thi
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-from slam.keyframe_state import get_active_keyframe_features, get_pose_for_kf
+from slam.keyframe_state import get_active_keyframe_features, get_active_landmark_lookup, get_pose_for_kf
+from slam.landmark_state import count_valid_landmark_observations
 from slam.pnp_config import pnp_frontend_kwargs_from_cfg
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
@@ -1589,6 +1590,311 @@ def _landmark_index_for_diag(seed: dict) -> dict[int, dict]:
     return out
 
 
+# Snapshot the installed support-only lookup before runtime rebuild
+def _refreshed_basis_assignment_snapshot(seed: dict, pose_out: dict, *, source_frame_index: int) -> dict:
+    active_kf = int(seed.get("active_keyframe_kf", -1))
+    lookup_raw = get_active_landmark_lookup(seed)
+    lookup_arr = np.asarray(lookup_raw, dtype=np.int64).reshape(-1)
+    lookup_by_feat = {
+        int(feat_idx): int(lm_id)
+        for feat_idx, lm_id in enumerate(lookup_arr)
+        if int(lm_id) >= 0
+    }
+    installed_pairs = set((int(feat_idx), int(lm_id)) for feat_idx, lm_id in lookup_by_feat.items())
+    installed_landmark_counts: dict[int, int] = {}
+    for lm_id in lookup_by_feat.values():
+        installed_landmark_counts[int(lm_id)] = int(installed_landmark_counts.get(int(lm_id), 0) + 1)
+
+    accepted_pairs: set[tuple[int, int]] = set()
+    corrs = pose_out.get("corrs", None) if isinstance(pose_out, dict) else None
+    if corrs is not None and hasattr(corrs, "landmark_ids") and hasattr(corrs, "cur_feat_idx"):
+        landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+        cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+        N = min(int(landmark_ids.size), int(cur_feat_idx.size))
+        support_mask = align_bool_mask_1d(
+            pose_out.get("pnp_inlier_mask", np.zeros((N,), dtype=bool)),
+            N,
+            name="refreshed basis support mask",
+        )
+        for i in np.flatnonzero(support_mask):
+            accepted_pairs.add((int(cur_feat_idx[int(i)]), int(landmark_ids[int(i)])))
+
+    assignment_by_feature: dict[tuple[int, int], int] = {}
+    assignment_conflicts: list[dict] = []
+    for lm in seed.get("landmarks", []):
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+        lm_id = int(lm["id"])
+        obs = lm.get("obs", [])
+        if not isinstance(obs, list):
+            continue
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            obs_kf = int(ob.get("kf", -1))
+            feat_idx = int(ob.get("feat", -1))
+            if obs_kf < 0 or feat_idx < 0:
+                continue
+            key = (int(obs_kf), int(feat_idx))
+            previous = assignment_by_feature.get(key, None)
+            if previous is not None and int(previous) != int(lm_id):
+                assignment_conflicts.append(
+                    {
+                        "kf": int(obs_kf),
+                        "feat": int(feat_idx),
+                        "landmark_ids": [int(previous), int(lm_id)],
+                    }
+                )
+                continue
+            assignment_by_feature[key] = int(lm_id)
+
+    lm_by_id = _landmark_index_for_diag(seed)
+    installed_missing_landmark_ids = sorted(
+        int(lm_id)
+        for lm_id in set(lookup_by_feat.values())
+        if int(lm_id) not in lm_by_id
+    )
+    installed_observation_mismatches = []
+    for feat_idx, lm_id in sorted(installed_pairs):
+        observed_lm_id = assignment_by_feature.get((int(active_kf), int(feat_idx)), None)
+        if observed_lm_id is None or int(observed_lm_id) != int(lm_id):
+            installed_observation_mismatches.append(
+                {
+                    "feat": int(feat_idx),
+                    "lookup_landmark_id": int(lm_id),
+                    "observation_landmark_id": None if observed_lm_id is None else int(observed_lm_id),
+                }
+            )
+
+    return {
+        "source_frame_index": int(source_frame_index),
+        "active_keyframe_index": int(active_kf),
+        "lookup_size": int(lookup_arr.size),
+        "lookup_by_feat": lookup_by_feat,
+        "installed_pairs": installed_pairs,
+        "installed_landmark_ids": set(int(v) for v in lookup_by_feat.values()),
+        "accepted_pairs": accepted_pairs,
+        "installed_pairs_not_in_accepted_support": sorted(installed_pairs - accepted_pairs),
+        "accepted_pairs_missing_from_lookup": sorted(accepted_pairs - installed_pairs),
+        "duplicate_installed_landmark_ids": {
+            int(lm_id): int(count)
+            for lm_id, count in installed_landmark_counts.items()
+            if int(count) > 1
+        },
+        "installed_missing_landmark_ids": installed_missing_landmark_ids,
+        "installed_observation_mismatches": installed_observation_mismatches,
+        "observation_assignment_conflicts": assignment_conflicts,
+    }
+
+
+# Audit live correspondences against the preserved refreshed basis
+def _frame_assignment_audit(
+    seed: dict,
+    basis_snapshot: dict,
+    pose_out: dict,
+    K: np.ndarray,
+    *,
+    frame_index: int,
+) -> dict:
+    corrs = pose_out.get("corrs", None) if isinstance(pose_out, dict) else None
+    if corrs is None:
+        return {
+            "ok": False,
+            "reason": "missing_live_correspondences",
+            "frame_index": int(frame_index),
+        }
+
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+    N = int(landmark_ids.size)
+    if int(kf_feat_idx.size) != N or int(cur_feat_idx.size) != N:
+        return {
+            "ok": False,
+            "reason": "live_correspondence_length_mismatch",
+            "frame_index": int(frame_index),
+        }
+
+    active_kf = int(basis_snapshot["active_keyframe_index"])
+    lookup_by_feat = dict(basis_snapshot["lookup_by_feat"])
+    installed_landmark_ids = set(int(v) for v in basis_snapshot["installed_landmark_ids"])
+    lm_by_id = _landmark_index_for_diag(seed)
+    feats = get_active_keyframe_features(seed)
+    kps_xy = np.asarray(feats.kps_xy, dtype=np.float64)
+    R_basis, t_basis = get_pose_for_kf(seed, active_kf, context="assignment audit basis pose")
+
+    live_landmark_counts: dict[int, int] = {}
+    live_kf_feature_counts: dict[int, int] = {}
+    live_cur_feature_counts: dict[int, int] = {}
+    birth_source_counts: dict[str, int] = {}
+    birth_kf_counts: dict[int, int] = {}
+    rows: list[dict] = []
+    reprojection_errors_px: list[float] = []
+    feature_observation_deltas_px: list[float] = []
+
+    for i in range(N):
+        lm_id = int(landmark_ids[i])
+        feat_idx = int(kf_feat_idx[i])
+        current_feat_idx = int(cur_feat_idx[i])
+        live_landmark_counts[lm_id] = int(live_landmark_counts.get(lm_id, 0) + 1)
+        live_kf_feature_counts[feat_idx] = int(live_kf_feature_counts.get(feat_idx, 0) + 1)
+        live_cur_feature_counts[current_feat_idx] = int(live_cur_feature_counts.get(current_feat_idx, 0) + 1)
+
+        basis_lm_id = lookup_by_feat.get(int(feat_idx), None)
+        feature_mapped = basis_lm_id is not None
+        exact_basis_assignment = feature_mapped and int(basis_lm_id) == int(lm_id)
+        lm = lm_by_id.get(int(lm_id), None)
+        birth_source = "missing"
+        birth_kf = None
+        observation_count = 0
+        has_exact_basis_observation = False
+        basis_observation_xy = None
+        feature_observation_delta_px = None
+        basis_reprojection_error_px = None
+
+        if isinstance(lm, dict):
+            birth_source = str(lm.get("birth_source", "unknown"))
+            birth_kf_raw = lm.get("birth_kf", None)
+            birth_kf = None if birth_kf_raw is None else int(birth_kf_raw)
+            observation_count = count_valid_landmark_observations(
+                lm,
+                context=f"assignment audit landmark {int(lm_id)}",
+            )
+            obs = lm.get("obs", [])
+            if isinstance(obs, list):
+                for ob in obs:
+                    if not isinstance(ob, dict):
+                        continue
+                    if int(ob.get("kf", -1)) != int(active_kf):
+                        continue
+                    if int(ob.get("feat", -1)) != int(feat_idx):
+                        continue
+                    basis_observation_xy = np.asarray(ob.get("xy", None), dtype=np.float64).reshape(2)
+                    has_exact_basis_observation = True
+                    break
+
+            if 0 <= int(feat_idx) < int(kps_xy.shape[0]):
+                feature_xy = np.asarray(kps_xy[int(feat_idx), :2], dtype=np.float64).reshape(2)
+                if basis_observation_xy is not None:
+                    feature_observation_delta_px = float(np.linalg.norm(feature_xy - basis_observation_xy))
+                    feature_observation_deltas_px.append(float(feature_observation_delta_px))
+
+                X_w = np.asarray(lm.get("X_w", None), dtype=np.float64).reshape(-1)
+                if X_w.size == 3 and np.isfinite(X_w).all():
+                    err_sq = np.asarray(
+                        reprojection_errors_sq(
+                            K,
+                            R_basis,
+                            t_basis,
+                            X_w.reshape(3, 1),
+                            feature_xy.reshape(2, 1),
+                        ),
+                        dtype=np.float64,
+                    ).reshape(-1)
+                    if err_sq.size == 1 and np.isfinite(err_sq[0]) and float(err_sq[0]) >= 0.0:
+                        basis_reprojection_error_px = float(np.sqrt(err_sq[0]))
+                        reprojection_errors_px.append(float(basis_reprojection_error_px))
+
+        birth_source_counts[birth_source] = int(birth_source_counts.get(birth_source, 0) + 1)
+        if birth_kf is not None:
+            birth_kf_counts[int(birth_kf)] = int(birth_kf_counts.get(int(birth_kf), 0) + 1)
+
+        rows.append(
+            {
+                "correspondence_index": int(i),
+                "keyframe_feature_index": int(feat_idx),
+                "current_feature_index": int(current_feat_idx),
+                "linked_landmark_id": int(lm_id),
+                "birth_source": birth_source,
+                "birth_kf": birth_kf,
+                "observation_count": int(observation_count),
+                "landmark_in_refreshed_support_basis": bool(int(lm_id) in installed_landmark_ids),
+                "feature_mapped_in_refreshed_basis": bool(feature_mapped),
+                "refreshed_basis_landmark_id": None if basis_lm_id is None else int(basis_lm_id),
+                "exact_refreshed_basis_assignment": bool(exact_basis_assignment),
+                "has_exact_frame18_observation": bool(has_exact_basis_observation),
+                "feature_observation_delta_px": feature_observation_delta_px,
+                "frame18_basis_reprojection_error_px": basis_reprojection_error_px,
+            }
+        )
+
+    live_pairs = set((int(kf_feat_idx[i]), int(landmark_ids[i])) for i in range(N))
+    exact_rows = int(sum(1 for row in rows if bool(row["exact_refreshed_basis_assignment"])))
+    mapped_rows = int(sum(1 for row in rows if bool(row["feature_mapped_in_refreshed_basis"])))
+    basis_landmark_rows = int(sum(1 for row in rows if bool(row["landmark_in_refreshed_support_basis"])))
+    exact_observation_rows = int(sum(1 for row in rows if bool(row["has_exact_frame18_observation"])))
+
+    return {
+        "ok": True,
+        "reason": None,
+        "frame_index": int(frame_index),
+        "basis_source_frame_index": int(basis_snapshot["source_frame_index"]),
+        "active_keyframe_index": int(active_kf),
+        "n_live_correspondences": int(N),
+        "n_unique_live_landmarks": int(len(live_landmark_counts)),
+        "n_unique_live_keyframe_features": int(len(live_kf_feature_counts)),
+        "n_unique_live_current_features": int(len(live_cur_feature_counts)),
+        "n_live_features_mapped_in_refreshed_basis": int(mapped_rows),
+        "n_live_landmarks_in_refreshed_support_basis": int(basis_landmark_rows),
+        "n_exact_refreshed_basis_assignments": int(exact_rows),
+        "n_exact_frame18_observations": int(exact_observation_rows),
+        "live_pairs_not_in_refreshed_basis": [
+            [int(feat_idx), int(lm_id)]
+            for feat_idx, lm_id in sorted(live_pairs - basis_snapshot["installed_pairs"])
+        ],
+        "duplicate_live_landmark_ids": {
+            str(lm_id): int(count)
+            for lm_id, count in live_landmark_counts.items()
+            if int(count) > 1
+        },
+        "duplicate_live_keyframe_features": {
+            str(feat_idx): int(count)
+            for feat_idx, count in live_kf_feature_counts.items()
+            if int(count) > 1
+        },
+        "duplicate_live_current_features": {
+            str(feat_idx): int(count)
+            for feat_idx, count in live_cur_feature_counts.items()
+            if int(count) > 1
+        },
+        "birth_source_counts": birth_source_counts,
+        "birth_kf_counts": {
+            str(kf): int(count)
+            for kf, count in sorted(birth_kf_counts.items())
+        },
+        "frame18_basis_reprojection_error_px": _reprojection_error_summary(
+            np.asarray(reprojection_errors_px, dtype=np.float64)
+        ),
+        "frame18_feature_observation_delta_px": _reprojection_error_summary(
+            np.asarray(feature_observation_deltas_px, dtype=np.float64)
+        ),
+        "refreshed_basis": {
+            "lookup_size": int(basis_snapshot["lookup_size"]),
+            "n_installed_pairs": int(len(basis_snapshot["installed_pairs"])),
+            "n_accepted_support_pairs": int(len(basis_snapshot["accepted_pairs"])),
+            "installed_pairs_not_in_accepted_support": [
+                [int(feat_idx), int(lm_id)]
+                for feat_idx, lm_id in basis_snapshot["installed_pairs_not_in_accepted_support"]
+            ],
+            "accepted_pairs_missing_from_lookup": [
+                [int(feat_idx), int(lm_id)]
+                for feat_idx, lm_id in basis_snapshot["accepted_pairs_missing_from_lookup"]
+            ],
+            "duplicate_installed_landmark_ids": {
+                str(lm_id): int(count)
+                for lm_id, count in basis_snapshot["duplicate_installed_landmark_ids"].items()
+            },
+            "installed_missing_landmark_ids": [
+                int(lm_id)
+                for lm_id in basis_snapshot["installed_missing_landmark_ids"]
+            ],
+            "installed_observation_mismatches": basis_snapshot["installed_observation_mismatches"],
+            "observation_assignment_conflicts": basis_snapshot["observation_assignment_conflicts"],
+        },
+        "rows": rows,
+    }
+
+
 # Build the active keyframe feature-to-landmark lookup from observations
 def _active_landmark_lookup_from_observations(seed: dict) -> dict[int, int]:
     lookup: dict[int, int] = {}
@@ -2629,6 +2935,7 @@ def main() -> None:
     stop_track = min(n_effective, start_track + num_track)
     scorecard_rows: list[dict] = []
     successful_ba_records: list[dict] = []
+    latest_refreshed_basis_snapshot = None
 
     for i in range(start_track, stop_track):
         # Keep the current reference keyframe for this diagnostic step
@@ -2636,6 +2943,7 @@ def main() -> None:
         ref_keyframe_feats = keyframe_feats
         live_pipeline_ref_keyframe_index = int(seed.get("active_keyframe_kf", ref_keyframe_index))
         live_pipeline_ref_keyframe_feats = get_active_keyframe_features(seed)
+        refreshed_basis_for_frame = latest_refreshed_basis_snapshot
 
         # Read the current frame image
         cur_im, cur_ts, cur_id = seq.get(i)
@@ -2717,6 +3025,7 @@ def main() -> None:
         live_pipeline_pose_comparison_diagnostic = None
         live_pipeline_spatial_diagnostic = None
         live_pipeline_local_consistency_diagnostic = None
+        live_pipeline_assignment_audit = None
         if int(i) == int(threshold_pair_frame_index):
             pnp_pose_pair_before = _threshold_pair_pose_pair(
                 corrs_before_filters,
@@ -2867,6 +3176,25 @@ def main() -> None:
                     pose_pair=live_pipeline_pose_pair,
                     name_suffix="live_pipeline",
                 )
+                if (
+                    isinstance(refreshed_basis_for_frame, dict)
+                    and int(refreshed_basis_for_frame.get("active_keyframe_index", -1))
+                    == int(live_pipeline_ref_keyframe_index)
+                ):
+                    live_pipeline_assignment_audit = _frame_assignment_audit(
+                        seed,
+                        refreshed_basis_for_frame,
+                        live_pipeline_pose_out,
+                        K,
+                        frame_index=int(i),
+                    )
+
+        if bool(frontend_stats.get("guarded_support_refresh_triggered", False)):
+            latest_refreshed_basis_snapshot = _refreshed_basis_assignment_snapshot(
+                frontend_out["seed"],
+                frontend_out["pose_out"],
+                source_frame_index=int(i),
+            )
 
         append_stats = {}
         if isinstance(frontend_out, dict) and isinstance(frontend_out.get("seed", None), dict):
@@ -3250,6 +3578,17 @@ def main() -> None:
                     "event": "threshold_pair_local_consistency_live_pipeline",
                     **live_pipeline_event_context,
                     "local_consistency": live_pipeline_local_consistency_diagnostic,
+                },
+            )
+
+        # Write the live-pipeline refreshed-basis assignment audit
+        if live_pipeline_assignment_audit is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "frame_assignment_audit_live_pipeline",
+                    **live_pipeline_event_context,
+                    "assignment_audit": live_pipeline_assignment_audit,
                 },
             )
 

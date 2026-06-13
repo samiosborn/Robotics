@@ -12,6 +12,7 @@
 - canonical pose agreement enforced in keyframe reads
 - live-pipeline threshold diagnostics in `scripts/diag_pnp_eth3d.py`
 - live-pipeline local displacement-consistency diagnostics
+- live-pipeline refreshed-basis assignment diagnostics
 
 ## Reverted or failed experiments
 - proactive rescued-basis retracking before late support collapse
@@ -56,10 +57,24 @@
 - each fixed-threshold replay produces 902 valid PnP models from 1000 trials, but no model exceeds one inlier
 - current bottleneck is no longer lookup starvation or stale diagnostic bundle selection
 - current bottleneck is not low-cardinality search failure or incoherent 2D tracking
-- the failure is now classified as coherent 2D tracks attached to a geometrically incompatible 3D support set
+- frame-19 refreshed-basis assignment audit confirms:
+  - frame 18 installed 23 feature-to-landmark pairs from exactly 23 accepted support pairs
+  - no installed pair was outside accepted support
+  - no accepted pair was missing from the installed lookup
+  - no duplicate landmark reuse, missing landmark ids, observation mismatches, or assignment conflicts
+  - all 22 frame-19 live correspondences are unique feature and landmark assignments
+  - all 22 exactly match the preserved refreshed lookup and exact frame-18 observations
+  - the live set is a 22-pair subset of the 23-pair refreshed basis
+  - birth sources are 15 bootstrap landmarks and 7 map-growth landmarks
+- frame-18 reprojection of the 22 live linked landmarks is already loose:
+  - median: 6.19 px
+  - p90: 11.25 px
+  - maximum: 17.35 px
+  - 14 / 22 are within 8 px
+- the failure is now classified as coherent 2D tracks with internally consistent assignments attached to a geometrically incompatible 3D support set
 
 ## Current open question
-Are the frame-19 2D-3D links wrong because the refreshed frame-18 feature-to-landmark assignments are incorrect, or because the linked landmark geometry has drifted away from the refreshed basis?
+Where and when did the linked landmark geometry drift far enough from the tracked image structure to make frame-19 PnP unsolvable?
 
 ## Best next step
-Replay the 22 live links against the accepted frame-18 pose and stored frame-18 observations, then separate feature-to-landmark assignment error from landmark-geometry drift.
+Audit the 22 linked landmark positions against their full observation histories and canonical poses, then identify whether the geometry degradation is concentrated by birth source, birth frame, or last BA participation.
