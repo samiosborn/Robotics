@@ -2716,6 +2716,7 @@ def main() -> None:
         live_pipeline_threshold_rows = None
         live_pipeline_pose_comparison_diagnostic = None
         live_pipeline_spatial_diagnostic = None
+        live_pipeline_local_consistency_diagnostic = None
         if int(i) == int(threshold_pair_frame_index):
             pnp_pose_pair_before = _threshold_pair_pose_pair(
                 corrs_before_filters,
@@ -2839,6 +2840,15 @@ def main() -> None:
                     )
                     for threshold_px in thresholds
                 ]
+                live_pipeline_local_consistency_diagnostic = _build_threshold_pair_local_consistency_diagnostic(
+                    seq,
+                    live_pipeline_ref_keyframe_index,
+                    i,
+                    live_pipeline_ref_keyframe_feats,
+                    live_pipeline_corrs,
+                    pose_pair=live_pipeline_pose_pair,
+                    pnp_cfg=pnp_cfg,
+                )
                 live_pipeline_pose_comparison_diagnostic = _compare_threshold_pair_poses(
                     seed,
                     live_pipeline_corrs,
@@ -3232,6 +3242,17 @@ def main() -> None:
                 },
             )
 
+        # Write the live-pipeline local consistency diagnostic
+        if live_pipeline_local_consistency_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_local_consistency_live_pipeline",
+                    **live_pipeline_event_context,
+                    "local_consistency": live_pipeline_local_consistency_diagnostic,
+                },
+            )
+
         # Write one live-pipeline diagnostic row per threshold
         if live_pipeline_threshold_rows is not None:
             for row in live_pipeline_threshold_rows:
@@ -3318,6 +3339,10 @@ def main() -> None:
             if live_pipeline_pose_comparison_diagnostic is not None:
                 print("  threshold_pair_live_pipeline:")
                 for line in _format_threshold_pair_pose_comparison(live_pipeline_pose_comparison_diagnostic):
+                    print(line)
+            if live_pipeline_local_consistency_diagnostic is not None:
+                print("  threshold_pair_local_consistency_live_pipeline:")
+                for line in _format_threshold_pair_local_consistency_diagnostic(live_pipeline_local_consistency_diagnostic):
                     print(line)
             if live_pipeline_spatial_diagnostic is not None:
                 print("  threshold_pair_spatial_live_pipeline:")

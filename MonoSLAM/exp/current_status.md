@@ -11,6 +11,7 @@
 - minimal local bundle adjustment on promoted non-rescue keyframes
 - canonical pose agreement enforced in keyframe reads
 - live-pipeline threshold diagnostics in `scripts/diag_pnp_eth3d.py`
+- live-pipeline local displacement-consistency diagnostics
 
 ## Reverted or failed experiments
 - proactive rescued-basis retracking before late support collapse
@@ -49,15 +50,16 @@
   - 8 px: 1 / fail
   - 12 px: 1 / fail
 - live 8/12 threshold-pair replay rejects all 22 correspondences
+- all 22 live correspondences pass the frame-18-to-19 local displacement-consistency check
+  - median residual: 2.34 px
+  - p90 residual: 4.72 px
+- each fixed-threshold replay produces 902 valid PnP models from 1000 trials, but no model exceeds one inlier
 - current bottleneck is no longer lookup starvation or stale diagnostic bundle selection
-- current bottleneck is a frame-19 live PnP failure on a low-cardinality refreshed active basis
+- current bottleneck is not low-cardinality search failure or incoherent 2D tracking
+- the failure is now classified as coherent 2D tracks attached to a geometrically incompatible 3D support set
 
 ## Current open question
-Why does the refreshed frame-18 active basis produce 22 coherent tracked 2D-3D correspondences at frame 19, yet fail to produce usable PnP consensus in the live pipeline?
+Are the frame-19 2D-3D links wrong because the refreshed frame-18 feature-to-landmark assignments are incorrect, or because the linked landmark geometry has drifted away from the refreshed basis?
 
 ## Best next step
-Use the now-trustworthy live-bundle diagnostics to classify frame-19 more precisely:
-- low-cardinality PnP search failure
-- geometry incoherence
-- refreshed-basis mismatch
-- or mixed
+Replay the 22 live links against the accepted frame-18 pose and stored frame-18 observations, then separate feature-to-landmark assignment error from landmark-geometry drift.

@@ -253,3 +253,40 @@ Result
 Decision
 - diagnostic improvement kept
 - notes updated to rely on live pipeline bundle, not stale diagnostic bundle
+
+---
+
+## 2026-06-13 — Live frame-19 displacement consistency
+
+Base state
+- trusted BA-enabled baseline with refreshed frame-18 active basis
+- frame 19 fails pipeline and fixed 3/5/8/12 px PnP on 22 live correspondences
+
+Hypothesis
+- the 22 spatially coherent links may still contain an inconsistent frame-18-to-19 displacement field
+
+Diagnostic step
+- added live-pipeline local displacement-consistency reporting to `scripts/diag_pnp_eth3d.py`
+- replayed frame 19 without applying the filter to pipeline state
+
+Validation
+- `uv run python -m py_compile scripts/diag_pnp_eth3d.py`
+- `PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 19 --scorecard long --threshold_pair_frame_index 19 --out_dir /tmp/diag_pnp_eth3d_frame19_live_consistency`
+- parsed live threshold and local-consistency events from `pnp_diag.jsonl`
+
+Result
+- all 22 live correspondences passed local displacement consistency
+- median residual was 2.34 px and p90 residual was 4.72 px
+- each fixed threshold produced 902 valid models from 1000 trials
+- best support remained one point at 3/5/8/12 px
+- failure is not low-cardinality search failure or incoherent 2D tracking
+- the live 2D tracks are attached to a geometrically incompatible 3D support set
+
+Decision
+- diagnosis only
+- kept the narrow live diagnostic
+- production baseline unchanged
+
+Next step
+- compare the 22 links against the accepted frame-18 pose and stored frame-18 observations
+- distinguish feature-to-landmark assignment error from landmark-geometry drift
