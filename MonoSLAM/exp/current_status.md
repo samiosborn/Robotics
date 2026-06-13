@@ -85,12 +85,43 @@
   - frame 18: median 6.19 px, p90 11.25 px, 14 / 22 within 8 px
   - frame-12 bootstrap vs map-growth medians are 14.94 px vs 15.16 px
   - frame-16 bootstrap vs map-growth medians are 10.58 px vs 11.88 px
+- canonical rescue-pose audit confirms two sharp pose-history outliers:
+  - frames 10 and 12–18 are localisation-only rescues; frame 11 is normal
+  - every rescue in this corridor refreshes the active support basis
+  - every accepted frame 10–18 is stored as a canonical pose
+  - no local BA runs in the corridor
+  - frame 12 vs frames 11 / 13:
+    - rotation deltas: 4.88 / 7.43 deg
+    - translation-direction deltas: 37.48 / 20.11 deg
+    - camera-centre direction deltas: 32.87 / 12.71 deg
+    - camera-motion turn: 118.99 deg
+    - adjacent camera-centre step ratio: 3.01
+    - rotation-path excess: 8.97 deg
+  - frame 16 vs frames 15 / 17:
+    - rotation deltas: 6.42 / 6.46 deg
+    - translation-direction deltas: 8.07 / 10.80 deg
+    - camera-centre direction deltas: 5.84 / 6.52 deg
+    - camera-motion turn: 135.68 deg
+    - frame 16 lies behind the frame-15-to-17 camera-centre chord
+    - rotation-path excess: 9.94 deg
+  - every other evaluable frame 10–17 has rotation-path excess at or below 4.25 deg
+- frames 12 and 16 disproportionately dominate the exact 22-landmark history:
+  - 44 / 340 observations, or 12.94 per cent
+  - 62.25 per cent of pooled squared reprojection error
+  - 73.08 per cent of residuals above 8 px
+  - excluding both frames reduces pooled median / p90 from 2.87 / 10.87 px to 2.31 / 6.19 px
+  - excluding both changes the landmark classification from 22 / 22 drifting to 8 / 22 drifting
+  - frame 13 immediately returns to median / p90 1.95 / 5.76 px
+  - frame 17 returns to median / p90 4.13 / 9.28 px
+- the broad history inconsistency is therefore mainly driven by bad canonical rescue poses at frames 12 and 16, not by smooth distributed drift
+- a smaller later tail remains at frames 17 and 18, so the two bad poses do not explain every part of the frame-19 failure
+- rescue poses do not directly update landmark positions because rescue frames skip map growth and local BA
+- the remaining causal question is whether refreshing the active support basis from those bad poses propagates the later frame-19 support failure
 - the failure is now classified as coherent 2D tracks with internally consistent assignments attached to a geometrically incompatible 3D support set
 - frame-19 geometry drift is broad rather than concentrated in a landmark subgroup
-- the common frame-level spikes point next to canonical rescue-pose drift, especially at frames 12 and 16
 
 ## Current open question
-Why do the canonical rescue-frame poses at frames 12 and 16 become broadly incompatible with otherwise well-observed landmark histories?
+Does suppressing support-basis refresh at the two bad canonical rescue poses prevent the frame-19 failure?
 
 ## Best next step
-Audit canonical rescue-pose drift at frames 12 and 16 against neighbouring accepted poses and the same 22 landmark histories, starting at frame 12.
+Run one diagnostic counterfactual that keeps rescue localisation at frames 12 and 16 but retains the preceding active support basis at those two frames.
