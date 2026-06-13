@@ -71,10 +71,26 @@
   - p90: 11.25 px
   - maximum: 17.35 px
   - 14 / 22 are within 8 px
+- full-history audit of the exact 22 live landmarks confirms broad geometry drift:
+  - 340 valid observations across the 22 landmarks
+  - every landmark has at least 10 valid observations
+  - pooled full-history median / p90 / maximum: 2.87 / 10.87 / 19.16 px
+  - all 22 landmarks have either p90 above 8 px or maximum above 12 px
+  - bootstrap vs map-growth median / p90: 3.04 / 10.50 px vs 2.41 / 12.03 px
+  - latest-BA vs outside-latest-BA median / p90: 2.99 / 10.59 px vs 2.32 / 11.85 px
+  - no birth-source, birth-frame, or BA-participation subgroup explains the failure
+- residual growth is synchronised by canonical observation frame:
+  - frame 12: median 15.05 px, p90 17.40 px, 0 / 22 within 8 px
+  - frame 16: median 10.97 px, p90 17.51 px, 6 / 22 within 8 px
+  - frame 18: median 6.19 px, p90 11.25 px, 14 / 22 within 8 px
+  - frame-12 bootstrap vs map-growth medians are 14.94 px vs 15.16 px
+  - frame-16 bootstrap vs map-growth medians are 10.58 px vs 11.88 px
 - the failure is now classified as coherent 2D tracks with internally consistent assignments attached to a geometrically incompatible 3D support set
+- frame-19 geometry drift is broad rather than concentrated in a landmark subgroup
+- the common frame-level spikes point next to canonical rescue-pose drift, especially at frames 12 and 16
 
 ## Current open question
-Where and when did the linked landmark geometry drift far enough from the tracked image structure to make frame-19 PnP unsolvable?
+Why do the canonical rescue-frame poses at frames 12 and 16 become broadly incompatible with otherwise well-observed landmark histories?
 
 ## Best next step
-Audit the 22 linked landmark positions against their full observation histories and canonical poses, then identify whether the geometry degradation is concentrated by birth source, birth frame, or last BA participation.
+Audit canonical rescue-pose drift at frames 12 and 16 against neighbouring accepted poses and the same 22 landmark histories, starting at frame 12.

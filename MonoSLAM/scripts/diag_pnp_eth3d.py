@@ -1687,6 +1687,156 @@ def _refreshed_basis_assignment_snapshot(seed: dict, pose_out: dict, *, source_f
     }
 
 
+# Audit one landmark against canonical poses
+def _landmark_geometry_history(seed: dict, lm: dict, K: np.ndarray, *, eps: float = 1e-12) -> dict:
+    X_w = np.asarray(lm.get("X_w", None), dtype=np.float64).reshape(-1)
+    observations = lm.get("obs", [])
+    observation_rows: list[dict] = []
+    valid_errors_px: list[float] = []
+    valid_keyframes: list[int] = []
+
+    if not isinstance(observations, list):
+        observations = []
+
+    for observation_index, ob in enumerate(observations):
+        row = {
+            "observation_index": int(observation_index),
+            "kf": None,
+            "feat": None,
+            "xy": None,
+            "valid": False,
+            "reason": None,
+            "depth": None,
+            "reprojection_error_px": None,
+        }
+        if not isinstance(ob, dict):
+            row["reason"] = "invalid_observation_record"
+            observation_rows.append(row)
+            continue
+
+        obs_kf = int(ob.get("kf", -1))
+        obs_feat = int(ob.get("feat", -1))
+        xy = np.asarray(ob.get("xy", None), dtype=np.float64).reshape(-1)
+        row["kf"] = int(obs_kf)
+        row["feat"] = int(obs_feat)
+        row["xy"] = None if xy.size != 2 else [float(v) for v in xy]
+
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            row["reason"] = "invalid_landmark_position"
+            observation_rows.append(row)
+            continue
+        if obs_kf < 0 or obs_feat < 0 or xy.size != 2 or not np.isfinite(xy).all():
+            row["reason"] = "invalid_observation_values"
+            observation_rows.append(row)
+            continue
+
+        try:
+            pose = get_pose_for_kf(seed, int(obs_kf), context="landmark geometry history pose")
+            pose_blocks = _diag_pose_to_rt(pose)
+        except Exception:
+            pose_blocks = None
+        if pose_blocks is None:
+            row["reason"] = "canonical_pose_unavailable"
+            observation_rows.append(row)
+            continue
+
+        R, t = pose_blocks
+        X_c = np.asarray(R, dtype=np.float64) @ X_w.reshape(3) + np.asarray(t, dtype=np.float64).reshape(3)
+        if not np.isfinite(X_c).all():
+            row["reason"] = "nonfinite_camera_point"
+            observation_rows.append(row)
+            continue
+
+        depth = float(X_c[2])
+        row["depth"] = float(depth)
+        if depth <= float(eps):
+            row["reason"] = "non_positive_depth"
+            observation_rows.append(row)
+            continue
+
+        err_sq = np.asarray(
+            reprojection_errors_sq(
+                K,
+                R,
+                t,
+                X_w.reshape(3, 1),
+                xy.reshape(2, 1),
+            ),
+            dtype=np.float64,
+        ).reshape(-1)
+        if err_sq.size != 1 or not np.isfinite(err_sq[0]) or float(err_sq[0]) < 0.0:
+            row["reason"] = "invalid_reprojection"
+            observation_rows.append(row)
+            continue
+
+        error_px = float(np.sqrt(err_sq[0]))
+        row.update(
+            {
+                "valid": True,
+                "reason": None,
+                "reprojection_error_px": float(error_px),
+            }
+        )
+        observation_rows.append(row)
+        valid_errors_px.append(float(error_px))
+        valid_keyframes.append(int(obs_kf))
+
+    summary = _reprojection_error_summary(np.asarray(valid_errors_px, dtype=np.float64))
+    median_px = summary.get("median", None)
+    p90_px = summary.get("p90", None)
+    max_px = summary.get("max", None)
+    consistent = (
+        int(summary["count"]) >= 2
+        and median_px is not None
+        and p90_px is not None
+        and max_px is not None
+        and float(median_px) <= 3.0
+        and float(p90_px) <= 8.0
+        and float(max_px) <= 12.0
+    )
+
+    return {
+        "X_w": None if X_w.size != 3 else [float(v) for v in X_w],
+        "observation_count_total": int(len(observation_rows)),
+        "valid_observation_count": int(len(valid_errors_px)),
+        "invalid_observation_count": int(len(observation_rows) - len(valid_errors_px)),
+        "first_valid_observation_kf": None if len(valid_keyframes) == 0 else int(min(valid_keyframes)),
+        "last_valid_observation_kf": None if len(valid_keyframes) == 0 else int(max(valid_keyframes)),
+        "valid_observation_residuals_px": [float(v) for v in valid_errors_px],
+        "reprojection_error_px": summary,
+        "geometry_status": "consistent" if bool(consistent) else "drifting",
+        "observations": observation_rows,
+    }
+
+
+# Summarise pooled observation residuals by landmark metadata
+def _geometry_history_group_summary(rows: list[dict], group_key: str) -> dict:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        group_value = row.get(group_key, None)
+        group_name = "None" if group_value is None else str(group_value)
+        groups.setdefault(group_name, []).append(row)
+
+    out: dict[str, dict] = {}
+    for group_name, group_rows in sorted(groups.items()):
+        errors_px: list[float] = []
+        for row in group_rows:
+            errors_px.extend(float(v) for v in row.get("valid_observation_residuals_px", []))
+
+        out[str(group_name)] = {
+            "count": int(len(group_rows)),
+            "landmark_ids": [int(row["linked_landmark_id"]) for row in group_rows],
+            "valid_observation_count": int(len(errors_px)),
+            "consistent_count": int(sum(1 for row in group_rows if row.get("geometry_status") == "consistent")),
+            "drifting_count": int(sum(1 for row in group_rows if row.get("geometry_status") == "drifting")),
+            "reprojection_error_px": _reprojection_error_summary(
+                np.asarray(errors_px, dtype=np.float64)
+            ),
+        }
+
+    return out
+
+
 # Audit live correspondences against the preserved refreshed basis
 def _frame_assignment_audit(
     seed: dict,
@@ -1695,6 +1845,7 @@ def _frame_assignment_audit(
     K: np.ndarray,
     *,
     frame_index: int,
+    latest_ba_record: dict | None,
 ) -> dict:
     corrs = pose_out.get("corrs", None) if isinstance(pose_out, dict) else None
     if corrs is None:
@@ -1731,6 +1882,13 @@ def _frame_assignment_audit(
     rows: list[dict] = []
     reprojection_errors_px: list[float] = []
     feature_observation_deltas_px: list[float] = []
+    latest_ba_ids = set()
+    latest_ba_frame_index = None
+    latest_ba_active_keyframe = None
+    if isinstance(latest_ba_record, dict):
+        latest_ba_ids = set(int(v) for v in latest_ba_record.get("landmark_ids", []))
+        latest_ba_frame_index = int(latest_ba_record.get("frame_index", -1))
+        latest_ba_active_keyframe = int(latest_ba_record.get("active_keyframe", -1))
 
     for i in range(N):
         lm_id = int(landmark_ids[i])
@@ -1751,6 +1909,18 @@ def _frame_assignment_audit(
         basis_observation_xy = None
         feature_observation_delta_px = None
         basis_reprojection_error_px = None
+        history = {
+            "X_w": None,
+            "observation_count_total": 0,
+            "valid_observation_count": 0,
+            "invalid_observation_count": 0,
+            "first_valid_observation_kf": None,
+            "last_valid_observation_kf": None,
+            "valid_observation_residuals_px": [],
+            "reprojection_error_px": _reprojection_error_summary(np.zeros((0,), dtype=np.float64)),
+            "geometry_status": "drifting",
+            "observations": [],
+        }
 
         if isinstance(lm, dict):
             birth_source = str(lm.get("birth_source", "unknown"))
@@ -1795,9 +1965,17 @@ def _frame_assignment_audit(
                         basis_reprojection_error_px = float(np.sqrt(err_sq[0]))
                         reprojection_errors_px.append(float(basis_reprojection_error_px))
 
+            history = _landmark_geometry_history(seed, lm, K)
+
         birth_source_counts[birth_source] = int(birth_source_counts.get(birth_source, 0) + 1)
         if birth_kf is not None:
             birth_kf_counts[int(birth_kf)] = int(birth_kf_counts.get(int(birth_kf), 0) + 1)
+
+        observation_count_bin = "0-3"
+        if int(history["valid_observation_count"]) >= 8:
+            observation_count_bin = "8+"
+        elif int(history["valid_observation_count"]) >= 4:
+            observation_count_bin = "4-7"
 
         rows.append(
             {
@@ -1815,6 +1993,9 @@ def _frame_assignment_audit(
                 "has_exact_frame18_observation": bool(has_exact_basis_observation),
                 "feature_observation_delta_px": feature_observation_delta_px,
                 "frame18_basis_reprojection_error_px": basis_reprojection_error_px,
+                "in_latest_ba": bool(int(lm_id) in latest_ba_ids),
+                "observation_count_bin": observation_count_bin,
+                **history,
             }
         )
 
@@ -1823,6 +2004,11 @@ def _frame_assignment_audit(
     mapped_rows = int(sum(1 for row in rows if bool(row["feature_mapped_in_refreshed_basis"])))
     basis_landmark_rows = int(sum(1 for row in rows if bool(row["landmark_in_refreshed_support_basis"])))
     exact_observation_rows = int(sum(1 for row in rows if bool(row["has_exact_frame18_observation"])))
+    all_history_errors_px = [
+        float(error_px)
+        for row in rows
+        for error_px in row.get("valid_observation_residuals_px", [])
+    ]
 
     return {
         "ok": True,
@@ -1868,6 +2054,26 @@ def _frame_assignment_audit(
         "frame18_feature_observation_delta_px": _reprojection_error_summary(
             np.asarray(feature_observation_deltas_px, dtype=np.float64)
         ),
+        "geometry_history": {
+            "status_rule": "consistent when median <= 3 px, p90 <= 8 px, and max <= 12 px over at least two valid observations",
+            "latest_ba_frame_index": latest_ba_frame_index,
+            "latest_ba_active_keyframe": latest_ba_active_keyframe,
+            "latest_ba_landmark_count": int(len(latest_ba_ids)),
+            "live_landmarks_inside_latest_ba": int(sum(1 for row in rows if bool(row["in_latest_ba"]))),
+            "live_landmarks_outside_latest_ba": int(sum(1 for row in rows if not bool(row["in_latest_ba"]))),
+            "consistent_landmark_count": int(sum(1 for row in rows if row["geometry_status"] == "consistent")),
+            "drifting_landmark_count": int(sum(1 for row in rows if row["geometry_status"] == "drifting")),
+            "all_valid_observations": {
+                "count": int(len(all_history_errors_px)),
+                "reprojection_error_px": _reprojection_error_summary(
+                    np.asarray(all_history_errors_px, dtype=np.float64)
+                ),
+            },
+            "by_birth_source": _geometry_history_group_summary(rows, "birth_source"),
+            "by_birth_kf": _geometry_history_group_summary(rows, "birth_kf"),
+            "by_latest_ba_participation": _geometry_history_group_summary(rows, "in_latest_ba"),
+            "by_observation_count_bin": _geometry_history_group_summary(rows, "observation_count_bin"),
+        },
         "refreshed_basis": {
             "lookup_size": int(basis_snapshot["lookup_size"]),
             "n_installed_pairs": int(len(basis_snapshot["installed_pairs"])),
@@ -3187,6 +3393,7 @@ def main() -> None:
                         live_pipeline_pose_out,
                         K,
                         frame_index=int(i),
+                        latest_ba_record=latest_ba_record,
                     )
 
         if bool(frontend_stats.get("guarded_support_refresh_triggered", False)):
