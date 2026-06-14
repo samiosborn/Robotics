@@ -630,3 +630,50 @@ Decision
 
 Next step
 - audit the frame-16 rescued pose and support geometry before its active-basis refresh
+
+---
+
+## 2026-06-14 — KITTI frame-16 rescue and support audit
+
+Base state
+- KITTI sequence 00 first fails at frame 18 with 0 / 56 live PnP inliers from refreshed basis 16
+
+Diagnostic step
+- reproduced frames 13 to 18 with the generic KITTI diagnostic
+- used a temporary solver-call interceptor to inspect the exact frame-16 pre-refresh rescue path and support set
+- suppressed only the frame-16 support refresh while preserving its accepted pose and observations
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 15 --scorecard off --threshold_pair_frame_index 18 --out_dir /tmp/kitti_frame16_audit_baseline`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=.:scripts uv run python -m py_compile /tmp/diag_kitti_frame16_rescue.py`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=.:scripts uv run python /tmp/diag_kitti_frame16_rescue.py`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 15 --scorecard off --threshold_pair_frame_index 9999 --suppress_support_refresh_frames 16 --out_dir /tmp/kitti_frame16_no_refresh`
+
+Result
+- frame 16 strict 8 px failed with zero inliers
+- 12 px found 74 / 83 inliers and strict 8 px refit accepted 65 / 83
+- 20 px and seeded fallback stages were not reached
+- accepted-pose deltas to frames 15 / 17 were small:
+  - rotation: 1.68 / 2.04 deg
+  - translation direction: 2.78 / 10.04 deg
+  - camera-centre direction: 1.67 / 11.36 deg
+- accepted support residual median / p90 was 3.29 / 6.69 px
+- local 2D support was coherent:
+  - 63 / 65 retained
+  - residual median / p90: 1.41 / 3.87 px
+- refreshed support was spatially concentrated:
+  - two occupied coarse cells
+  - 96.9 per cent in one component and coarse cell
+- 50 / 65 support landmarks already classified as drifting before refresh
+- all 56 frame-18 live landmarks were an exact subset of frame-16 accepted support
+- suppressing only frame-16 refresh kept frame 16 accepted at 65 / 83 and changed:
+  - frame 17 from 43 / 62 without refresh to 64 / 73 with refresh
+  - frame 18 from 0 / 56 failed to 49 / 58 accepted
+
+Decision
+- diagnosis only
+- no production change
+- KITTI frame-16 problem is mainly weak support geometry before refresh
+
+Next step
+- test one narrow refresh-eligibility guard against spatially concentrated, history-inconsistent rescued support

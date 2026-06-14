@@ -218,3 +218,31 @@ Why does the frame-16 20 px localisation-only rescue accept a pose that is far w
 
 ## Best next step
 Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candidate poses and acceptance stages against the local temporal reference.
+
+## KITTI sequence-00 frame-16 diagnosis
+- trusted baseline still fails first at frame 18 with 0 / 56 live PnP inliers from refreshed basis 16
+- frame 16 is not a loose 20 px pose acceptance:
+  - strict 8 px failed with zero inliers
+  - 12 px found 74 / 83 inliers
+  - strict 8 px refit on that subset accepted 65 / 83
+  - 20 px and seeded fallback stages were not reached
+- the accepted frame-16 pose is locally credible:
+  - rotation delta to frames 15 / 17: 1.68 / 2.04 deg
+  - translation-direction delta: 2.78 / 10.04 deg
+  - camera-centre direction delta: 1.67 / 11.36 deg
+  - frame-16 support residual median / p90: 3.29 / 6.69 px
+  - frame-15-to-17 interpolation is substantially worse on the same support
+- the accepted support is 2D-coherent but geometrically weak as a refreshed basis:
+  - 63 / 65 pass local displacement consistency
+  - local residual median / p90: 1.41 / 3.87 px
+  - 96.9 per cent lies in one image component and coarse cell
+  - only two coarse cells are occupied
+  - 50 / 65 landmarks already classify as drifting before refresh
+- all 56 frame-18 live landmarks are an exact subset of the 65 frame-16 refreshed-support landmarks
+- suppressing only frame-16 refresh keeps the same accepted frame-16 pose but removes the hard failure:
+  - frame 17 improves from 43 / 62 to 64 / 73 and refreshes basis 17
+  - frame 18 improves from 0 / 56 failed to 49 / 58 accepted and refreshes basis 18
+- classification: KITTI frame-16 problem is mainly weak support geometry before refresh
+
+## KITTI next step
+Keep rescue pose acceptance unchanged and test one narrow refresh-eligibility guard against spatially concentrated, history-inconsistent rescued support.

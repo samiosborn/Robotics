@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from core.checks import check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_positive
+from geometry.camera import reprojection_errors_sq
 from slam.bundle_adjustment import local_bundle_adjustment_not_run_stats, run_local_bundle_adjustment
 from slam.keyframe import consider_promote_keyframe
 from slam.keyframe_state import get_active_keyframe_features, get_pose_for_kf, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
@@ -160,6 +161,89 @@ def _refresh_active_lookup_basis_from_rescued_support(
     if basis is None:
         return seed_out, stats
     return _seed_with_support_basis(seed_out, basis), stats
+
+
+def _rescued_support_history_stats(
+    seed: dict[str, Any],
+    pose_out: dict[str, Any],
+    K: np.ndarray,
+    current_kf: int,
+) -> dict[str, Any]:
+    corrs = pose_out["corrs"]
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    support_mask = check_mask_bool_N(
+        pose_out.get("pnp_inlier_mask", np.zeros((landmark_ids.size,), dtype=bool)),
+        int(landmark_ids.size),
+        name="pose_out['pnp_inlier_mask']",
+    )
+    if support_mask is None:
+        support_mask = np.zeros((int(landmark_ids.size),), dtype=bool)
+
+    support_landmark_ids = sorted(set(int(v) for v in landmark_ids[support_mask]))
+    landmark_by_id = {
+        int(lm["id"]): lm
+        for lm in seed.get("landmarks", [])
+        if isinstance(lm, dict) and "id" in lm
+    }
+    n_evaluated = 0
+    n_inconsistent = 0
+
+    for lm_id in support_landmark_ids:
+        lm = landmark_by_id.get(int(lm_id), None)
+        if not isinstance(lm, dict):
+            continue
+        X_w = np.asarray(lm.get("X_w", None), dtype=np.float64).reshape(-1)
+        observations = lm.get("obs", [])
+        if X_w.size != 3 or not np.isfinite(X_w).all() or not isinstance(observations, list):
+            continue
+
+        errors_px: list[float] = []
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            obs_kf = int(observation.get("kf", -1))
+            xy = np.asarray(observation.get("xy", None), dtype=np.float64).reshape(-1)
+            if obs_kf < 0 or obs_kf >= int(current_kf) or xy.size != 2 or not np.isfinite(xy).all():
+                continue
+            try:
+                R_obs, t_obs = get_pose_for_kf(seed, obs_kf, context="rescued support history")
+            except ValueError:
+                continue
+            R_obs = np.asarray(R_obs, dtype=np.float64)
+            t_obs = np.asarray(t_obs, dtype=np.float64).reshape(3)
+            X_c = R_obs @ X_w + t_obs
+            if not np.isfinite(X_c).all() or float(X_c[2]) <= 0.0:
+                continue
+            err_sq = np.asarray(
+                reprojection_errors_sq(
+                    K,
+                    R_obs,
+                    t_obs,
+                    X_w.reshape(3, 1),
+                    xy.reshape(2, 1),
+                ),
+                dtype=np.float64,
+            ).reshape(-1)
+            if err_sq.size == 1 and np.isfinite(err_sq[0]) and float(err_sq[0]) >= 0.0:
+                errors_px.append(float(np.sqrt(err_sq[0])))
+
+        if len(errors_px) < 2:
+            continue
+        errors = np.asarray(errors_px, dtype=np.float64)
+        n_evaluated += 1
+        if bool(
+            float(np.median(errors)) > 3.0
+            or float(np.percentile(errors, 90.0)) > 8.0
+            or float(np.max(errors)) > 12.0
+        ):
+            n_inconsistent += 1
+
+    return {
+        "n_support": int(len(support_landmark_ids)),
+        "n_evaluated": int(n_evaluated),
+        "n_inconsistent": int(n_inconsistent),
+        "inconsistent_fraction": float(n_inconsistent / max(len(support_landmark_ids), 1)),
+    }
 
 
 def _attempt_incoherent_support_recovery(
@@ -705,6 +789,9 @@ def process_frame_against_seed(
         "reason": None,
         "n_lookup_mapped": 0,
         "n_accepted_support": 0,
+        "history_evaluated": 0,
+        "history_inconsistent": 0,
+        "history_inconsistent_fraction": 0.0,
     }
 
     if not localisation_only_rescue_frame:
@@ -769,11 +856,36 @@ def process_frame_against_seed(
         support_strong_enough = n_pnp_inliers >= max(int(min_inliers) + 4, 20) and (
             pnp_occupied_cells >= 2 or pnp_bbox_area_fraction >= 0.05
         )
+        max_cell_fraction = pose_stats.get("pnp_inlier_max_cell_fraction", None)
+        largest_component_fraction = pose_stats.get("pnp_inlier_largest_component_fraction", None)
+        spatially_concentrated = bool(
+            max_cell_fraction is not None
+            and largest_component_fraction is not None
+            and float(max_cell_fraction) >= 0.90
+            and float(largest_component_fraction) >= 0.90
+        )
+        history_stats = {
+            "n_evaluated": 0,
+            "n_inconsistent": 0,
+            "inconsistent_fraction": 0.0,
+        }
+        if bool(support_strong_enough and spatially_concentrated):
+            history_stats = _rescued_support_history_stats(seed, pose_out, K, int(current_kf))
+        guarded_support_refresh_stats.update(
+            {
+                "history_evaluated": int(history_stats.get("n_evaluated", 0)),
+                "history_inconsistent": int(history_stats.get("n_inconsistent", 0)),
+                "history_inconsistent_fraction": float(history_stats.get("inconsistent_fraction", 0.0)),
+            }
+        )
+        history_inconsistent = float(history_stats.get("inconsistent_fraction", 0.0)) >= 0.50
 
         if bool(incoherent_recovery_frame):
             guarded_support_refresh_stats["reason"] = "incoherent_recovery_localisation_only"
         elif not bool(support_strong_enough):
             guarded_support_refresh_stats["reason"] = "rescued_support_too_weak"
+        elif bool(spatially_concentrated and history_inconsistent):
+            guarded_support_refresh_stats["reason"] = "rescued_support_concentrated_history_inconsistent"
         else:
             seed_out, refresh_stats = _refresh_active_lookup_basis_from_rescued_support(
                 seed_out,
@@ -920,6 +1032,11 @@ def process_frame_against_seed(
         "guarded_support_refresh_n_accepted_support": int(guarded_support_refresh_stats.get("n_accepted_support", 0)),
         "guarded_support_refresh_n_conflicts": int(guarded_support_refresh_stats.get("n_conflicts", 0)),
         "guarded_support_refresh_n_out_of_range": int(guarded_support_refresh_stats.get("n_out_of_range", 0)),
+        "guarded_support_refresh_history_evaluated": int(guarded_support_refresh_stats.get("history_evaluated", 0)),
+        "guarded_support_refresh_history_inconsistent": int(guarded_support_refresh_stats.get("history_inconsistent", 0)),
+        "guarded_support_refresh_history_inconsistent_fraction": float(
+            guarded_support_refresh_stats.get("history_inconsistent_fraction", 0.0)
+        ),
         "n_linked_landmarks_candidate": int(keyframe_stats.get("n_linked_landmarks_candidate", 0)),
         "n_pose_eligible_linked_landmarks_candidate": int(
             keyframe_stats.get("n_pose_eligible_linked_landmarks_candidate", 0)
