@@ -568,3 +568,24 @@ Validation
 
 Decision
 - kept
+
+---
+
+## 2026-06-14 — Generic runner and dataset wrapper split
+
+Change
+- moved dataset-agnostic demo and PnP diagnostic orchestration into `scripts/demo_frontend.py` and `scripts/diag_pnp.py`
+- converted the ETH3D entrypoints into thin default-profile wrappers
+- added matching KITTI wrappers using the KITTI odometry profile and dataset-specific diagnostic output name
+- kept the historical shared helper filename and all SLAM and diagnostic logic unchanged
+
+Validation
+- runner compilation passed
+- `tests/slam` and `tests/datasets`: 81 passed
+- ETH3D demo completed normally
+- ETH3D diagnostic completed with 12 / 12 frames healthy
+- KITTI demo processed frame 4 successfully
+- KITTI diagnostic completed with 1 / 1 frames healthy
+
+Decision
+- kept
