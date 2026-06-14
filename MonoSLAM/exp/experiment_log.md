@@ -550,3 +550,21 @@ Validation
 Decision
 - kept the adapter and runner unchanged
 - use bootstrap frame 3 for the first KITTI sequence-00 run
+
+---
+
+## 2026-06-14 — KITTI bootstrap profile defaults
+
+Change
+- added KITTI run-profile bootstrap indices `0 -> 3`
+- made demo and PnP diagnostic CLI indices optional overrides of profile defaults
+- kept the ETH3D fallback at `0 -> 1`
+
+Validation
+- dataset and runner compilation passed
+- `tests/datasets`: 10 passed
+- default KITTI demo selected `0 -> 3` and processed frame 4 successfully
+- default KITTI diagnostic completed with 1 / 1 frames healthy
+
+Decision
+- kept

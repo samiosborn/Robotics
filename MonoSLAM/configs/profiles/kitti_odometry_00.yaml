@@ -17,4 +17,7 @@ dataset:
 run:
   out_dir: out
   run_id: kitti_odometry_00
+  bootstrap:
+    i0: 0
+    i1: 3
   deterministic: true

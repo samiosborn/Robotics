@@ -2558,9 +2558,9 @@ def main() -> None:
     parser.add_argument("--out_dir", type=str, default=None)
 
     # Bootstrap source frame index
-    parser.add_argument("--i0", type=int, default=0)
+    parser.add_argument("--i0", type=int, default=None)
     # Bootstrap target frame index
-    parser.add_argument("--i1", type=int, default=1)
+    parser.add_argument("--i1", type=int, default=None)
     # Number of subsequent frames to diagnose
     parser.add_argument("--num_track", type=int, default=5)
     # Threshold sweep in pixels
@@ -2670,8 +2670,15 @@ def main() -> None:
     log_path = out_dir / "pnp_diag.jsonl"
     _reset_jsonl(log_path)
 
-    i0 = check_int_ge0(args.i0, name="i0")
-    i1 = check_int_ge0(args.i1, name="i1")
+    run_bootstrap_cfg = run_cfg.get("bootstrap", {})
+    i0 = check_int_ge0(
+        run_bootstrap_cfg.get("i0", 0) if args.i0 is None else args.i0,
+        name="i0",
+    )
+    i1 = check_int_ge0(
+        run_bootstrap_cfg.get("i1", 1) if args.i1 is None else args.i1,
+        name="i1",
+    )
     num_track = check_int_gt0(args.num_track, name="num_track")
 
     if i1 <= i0:
