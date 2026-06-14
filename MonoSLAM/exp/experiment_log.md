@@ -497,3 +497,27 @@ Validation
 
 Decision
 - kept
+
+---
+
+## 2026-06-14 — Minimum KITTI odometry adapter
+
+Change
+- added `src/datasets/kitti.py` with `load_kitti_sequence`
+  - loads grayscale left images from `sequences/<seq>/image_0/*.png`
+  - sorts by numeric stem; uses frame index as timestamp
+  - returns `ImageSequence` with name `kitti:<seq>`
+- added `kitti` dispatch branch to `src/datasets/loader.py`
+- added `configs/cameras/kitti_odometry.yaml` with sequence-00 P0 intrinsics
+- added `configs/profiles/kitti_odometry_00.yaml` referencing the new camera config
+- added `tests/datasets/test_kitti.py` with 10 tests covering ordering, timestamps, frame ids, dispatch, and error paths
+- no pose parsing, stereo, distortion, or Velodyne support added
+
+Validation
+- `uv run python -m py_compile src/datasets/*.py scripts/demo_frontend_eth3d.py scripts/diag_pnp_eth3d.py` passed
+- `uv run python -m pytest tests/slam tests/datasets -q`: 81 passed, 0 failed
+- `PYTHONPATH=. uv run python scripts/demo_frontend_eth3d.py` completed normally
+- `PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 12 --scorecard short --threshold_pair_frame_index 9999 --out_dir /tmp/diag_pnp_eth3d_kitti_port_regression`: 12 ok, 0 failed
+
+Decision
+- kept

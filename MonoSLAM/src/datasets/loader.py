@@ -28,4 +28,13 @@ def load_sequence(
             require_timestamps=require_timestamps,
         )
 
+    if name == "kitti":
+        from datasets.kitti import load_kitti_sequence
+        return load_kitti_sequence(
+            dataset_root,
+            seq,
+            normalise_01=normalise_01,
+            dtype=dtype,
+        )
+
     raise ValueError(f"Unsupported dataset name: {dataset_name!r}")
