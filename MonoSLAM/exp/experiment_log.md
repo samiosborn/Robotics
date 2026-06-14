@@ -403,3 +403,41 @@ Decision
 - suppressing it worsens support survival
 - keep rescue refresh enabled
 - no production change
+
+---
+
+## 2026-06-14 — Frame-16 accepted rescue-pose quality
+
+Base state
+- trusted BA-enabled pipeline with first failure at frame 19
+- frame-16 refresh known to support downstream continuity
+
+Diagnostic step
+- added `scripts/diag_frame16_pose_quality.py`
+- replayed through frame 19 without changing production state
+- matched the exact 22 frame-19 live landmarks from the trusted assignment audit
+- compared canonical frames 15–18 and a time-weighted frame-15-to-17 pose interpolation
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python -m py_compile scripts/diag_frame16_pose_quality.py`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_frame16_pose_quality.py --out /tmp/frame16_pose_quality.json`
+- exact live-landmark id comparison against the baseline frame-19 JSONL audit
+
+Result
+- frame 16 was accepted as a 20 px localisation-only rescue with 24 / 28 inliers
+- frame 16 lies behind the frame-15-to-17 camera-centre chord
+- local camera-motion turn was 135.68 deg and rotation-path excess was 9.94 deg
+- frame-16 median / p90 residual was 10.97 / 17.51 px on the 22 live landmarks
+- frame 16 contributed 56.34 per cent of frames 15–18 squared error
+- time interpolation reduced frame-16 median / p90 to 5.95 / 8.16 px
+- interpolation reduced frame-16 squared error by 71.30 per cent
+- replacing only frame 16 reduced full-history p90 from 10.87 px to 8.48 px
+- full-history squared error fell by 18.13 per cent
+
+Decision
+- frame-16 accepted rescue pose is a main outlier
+- it materially amplifies later geometry-history error but is not the sole cause
+- no production change
+
+Next step
+- audit frame-16 rescue candidate generation and acceptance against the local temporal reference

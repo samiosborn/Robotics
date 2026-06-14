@@ -14,6 +14,7 @@
 - live-pipeline local displacement-consistency diagnostics
 - live-pipeline refreshed-basis assignment diagnostics
 - diagnostic-only selected rescue-refresh suppression replay
+- diagnostic-only frame-16 accepted-pose quality audit
 
 ## Reverted or failed experiments
 - proactive rescued-basis retracking before late support collapse
@@ -174,8 +175,46 @@
 - frame-16 refresh supports downstream continuity rather than causing the frame-19 collapse
 - frame-16 refresh is not the main problem
 
+## Frame-16 accepted rescue-pose quality audit
+- a fresh replay through frame 19 reproduced:
+  - 17 accepted frames and first failure at frame 19
+  - frame 16 accepted as a 20 px localisation-only rescue with 24 / 28 inliers
+  - the exact same 22 unique frame-19 live landmarks as the trusted live assignment audit
+- the active basis before frame 16 was canonical frame 15, so there was no distinct older active-basis pose to explain the jump
+- frame 16 remains a sharp neighbour-pose outlier:
+  - rotation delta to frames 15 / 17 / 18: 6.42 / 6.46 / 7.19 deg
+  - translation-direction delta: 8.07 / 10.80 / 13.00 deg
+  - camera-centre direction delta: 5.84 / 6.52 / 6.83 deg
+  - frame-15-to-16 and frame-16-to-17 camera-motion turn: 135.68 deg
+  - frame 16 lies behind the frame-15-to-17 camera-centre chord with projection alpha -0.179
+  - camera path ratio: 2.15
+  - rotation-path excess: 9.94 deg
+- all 22 live landmarks have one clean observation at each of frames 15–18
+- canonical residuals for the same 22 landmarks are:
+  - frame 15 median / p90: 3.09 / 6.10 px, 0 / 22 above 8 px
+  - frame 16 median / p90: 10.97 / 17.51 px, 16 / 22 above 8 px
+  - frame 17 median / p90: 4.13 / 9.28 px, 5 / 22 above 8 px
+  - frame 18 median / p90: 6.19 / 11.25 px, 8 / 22 above 8 px
+- within frames 15–18, frame 16 contributes:
+  - 56.34 per cent of squared reprojection error
+  - 55.17 per cent of residuals above 8 px
+- across the full 340-observation history, frame 16 alone contributes:
+  - 25.43 per cent of squared reprojection error
+  - 30.77 per cent of residuals above 8 px
+- a time-weighted frame-15-to-17 pose interpolation at frame 16 materially improves the same observations:
+  - median / p90: 5.95 / 8.16 px
+  - 4 / 22 above 8 px
+  - 71.30 per cent lower frame-16 squared error
+- replacing only frame 16 with that interpolated pose in the full history changes:
+  - pooled median / p90: 2.87 / 10.87 px to 2.70 / 8.48 px
+  - residuals above 8 px: 52 to 40
+  - pooled squared error: 18.13 per cent lower
+- frame 16 is therefore intrinsically a bad accepted rescue pose relative to its neighbours and the later live landmark set
+- correcting frame 16 would materially reduce the geometry-drift story, but would not remove the independent frame-12 outlier or the smaller frame-17/18 tail
+- classification: frame-16 accepted rescue pose is a main outlier
+
 ## Current open question
-Why do rescue localisation frames 12 and 16 become canonical pose-history outliers despite their refreshed support being useful downstream?
+Why does the frame-16 20 px localisation-only rescue accept a pose that is far worse than the local frame-15-to-17 temporal interpolation on the same later-live landmarks?
 
 ## Best next step
-Keep rescue refresh enabled and diagnose rescue-pose acceptance quality at frame 16 against neighbouring canonical poses.
+Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candidate poses and acceptance stages against the local temporal reference.
