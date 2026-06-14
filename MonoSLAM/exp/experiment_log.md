@@ -521,3 +521,32 @@ Validation
 
 Decision
 - kept
+
+---
+
+## 2026-06-14 — Real KITTI sequence 00 smoke test
+
+Base state
+- committed minimum KITTI odometry adapter
+
+Real-data check
+- selectively extracted all 4,541 sequence-00 `image_0` PNGs from the official KITTI grayscale odometry archive
+- confirmed the archive layout `dataset/sequences/00/image_0/*.png`
+- confirmed the adapter loaded IDs `000000` to `004540` as 1241 by 376 greyscale frames
+
+Smoke test
+- default bootstrap `0 -> 1` failed the existing parallax gate at 0.60 degrees median
+- bootstrap `0 -> 2` also failed at 0.90 degrees median
+- bootstrap `0 -> 3` passed at 1.46 degrees median with 427 initial landmarks
+- frame 4 completed through the unchanged runner with 334 / 348 PnP inliers and 155 new landmarks
+- the one-frame short diagnostic completed with 1 / 1 frames healthy
+
+Validation
+- `uv run python -m py_compile src/datasets/kitti.py src/datasets/loader.py scripts/demo_frontend_eth3d.py scripts/diag_pnp_eth3d.py`
+- `uv run python -m pytest tests/datasets -q`: 10 passed
+- `PYTHONPATH=. uv run python scripts/demo_frontend_eth3d.py --profile configs/profiles/kitti_odometry_00.yaml --i1 3 --num_track 1 --out_dir /tmp/kitti_odometry_00_demo_smoke_i1_3`
+- `PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --profile configs/profiles/kitti_odometry_00.yaml --i1 3 --num_track 1 --scorecard short --threshold_pair_frame_index 9999 --out_dir /tmp/kitti_odometry_00_diag_smoke_i1_3`
+
+Decision
+- kept the adapter and runner unchanged
+- use bootstrap frame 3 for the first KITTI sequence-00 run
