@@ -677,3 +677,136 @@ Decision
 
 Next step
 - test one narrow refresh-eligibility guard against spatially concentrated, history-inconsistent rescued support
+
+---
+
+## 2026-06-14 — KITTI frame-19 post-guard diagnosis
+
+Base state
+- refresh-only guard committed: blocks rescue refresh when support is concentrated and history-inconsistent, or when support is too weak (fewer than two occupied cells)
+- KITTI trusted baseline updated: frame 18 moved from 0 / 56 failed to 49 / 58 accepted, first hard failure moved from frame 18 to frame 19
+
+Diagnostic step
+- ran 17 tracked frames (4 through 20) with the KITTI PnP diagnostic
+- ran the deep threshold-pair live-pipeline diagnostic on frame 19
+- extracted corridor data for frames 16 through 20 from JSONL
+- extracted frame-19 support funnel, geometry history, local consistency, and spatial summary from the live pipeline events
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 17 --scorecard short --threshold_pair_frame_index 9999 --out_dir /tmp/kitti_frame19_corridor`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 17 --scorecard off --threshold_pair_frame_index 19 --out_dir /tmp/kitti_frame19_deep`
+- JSONL parsing for frames 16 through 20
+
+Result
+
+Corridor after the guard (frames 16 through 20):
+
+| frame | basis before → after | rescue | refresh triggered | n_inliers / n_corr |
+|-------|-----------------------|--------|-------------------|---------------------|
+| 16 | 14 → 14 | ok | no (concentrated + inconsistent) | 65 / 83 |
+| 17 | 14 → 17 | ok | yes (not concentrated) | 64 / 73 |
+| 18 | 17 → 17 | ok | no (support too weak, 1 cell) | 49 / 58 |
+| 19 | 17 → 17 | fail | — | 0 / 56 |
+| 20 | 17 → 17 | ok | no | 40 / 48 |
+
+Frame-19 support funnel (live pipeline, active basis 17):
+- raw tracked pairs: 328
+- mapped by active lookup: 56
+- observation-gated pass: 56
+- final PnP correspondences: 56
+- 3 / 5 / 8 / 12 px live replay: 0 / 0 / 0 / 0 inliers, `pnp_ransac_failed`
+- rescue attempted / succeeded: True / False
+- all 56 rescue stages also fail (0 inliers at all thresholds)
+
+Frame-19 support geometry:
+- all 56 live landmarks are bootstrap-born (birth_kf = 1, birth_source = bootstrap)
+- consistent / drifting: 4 / 52
+- full canonical history: 920 observations, median 4.15 px, p90 12.54 px, max 21.63 px
+- frame-17 active-basis reprojection of 56 live landmarks: median 5.03 px, p90 9.05 px, max 10.52 px
+- local 2D displacement consistency: 54 / 56 pass, median 1.41 px, p90 3.32 px
+
+Frame-19 spatial distribution:
+- 47 / 56 correspondences (83.9 %) in one 4 × 3 grid cell
+- occupied cells: 5 (current) / 3 (after removing 2 local-consistency outliers)
+- `heavily_concentrated: True`
+- basis 17 reference view also shows 47 / 56 in the same cell
+
+Frame-18 vs frame-19 comparison:
+- both use active basis 17
+- frame 18: 49 / 58 rescue succeeds (probably 12 px or 20 px threshold)
+- frame 19: 0 / 56 even at all rescue thresholds
+- all 56 frame-19 live landmarks exactly match the frame-18 accepted support assignments
+- the sharp 49 → 0 inlier drop between the two frames suggests the camera is at a pose where the drifting landmark positions are maximally inconsistent
+- frame 20 (same basis) rescues at 40 / 48, confirming the failure at frame 19 is pose-specific rather than a uniform basis blackout
+
+Guard decision analysis:
+- frame 16 blocked: concentrated (96.9 % in one cell) AND history-inconsistent → reason `rescued_support_concentrated_history_inconsistent`
+- frame 17 allowed: 64 inliers from basis 14 were NOT concentrated (multiple cells) → guard does not evaluate history → refresh to basis 17
+- frame 18 blocked: 49 inliers from basis 17 occupy only 1 cell → `support_strong_enough = False` → reason `rescued_support_too_weak`
+- frame 17 is the guard miss: its inliers passed the concentration check but the underlying 52 / 56 landmarks are already drifting
+
+Classification
+- primary: bad active basis quality — frame-17 rescue basis (64 bootstrap-born, drifting landmarks) was installed because the guard only checks history when support is concentrated; frame 17's spread support bypassed the history check
+- secondary: weak support geometry — 52 / 56 live landmarks are geometrically drifting, canonical history p90 12.54 px, basis reproj at 5.03 / 9.05 px before frame 19
+- verdict: KITTI frame-19 is mixed (bad active basis quality and weak support geometry)
+
+Decision
+- diagnosis only
+- no production change
+
+Next step
+- determine whether evaluating history-inconsistency for ALL strong rescue support, not only concentrated support, would catch frame-17's drifting basis and prevent the bad-basis installation
+
+---
+
+## 2026-06-14 — History-aware refresh guard extended to all strong support
+
+Base state
+- original refresh-only guard committed: blocks refresh when concentrated + history-inconsistent, or support too weak
+- KITTI first failure at frame 19 (basis 17 installed by frame 17 rescue; guard missed frame 17 because it was not concentrated)
+- ETH3D first failure at frame 19
+
+Hypothesis
+- evaluating history-inconsistency for all strong rescued support (not only concentrated) would catch frame-17's drifting basis before installation
+
+Change
+- removed the `spatially_concentrated` requirement from the history evaluation condition in `src/slam/frame_pipeline.py`
+- history check now runs whenever `support_strong_enough` is True, not only when `support_strong_enough AND spatially_concentrated`
+- added new reason string `rescued_support_history_inconsistent` for the spread (non-concentrated) block case
+- existing `rescued_support_concentrated_history_inconsistent` reason preserved for the concentrated block case
+
+Validation
+- `uv run python -m pytest tests/slam tests/datasets -q`: 81 passed
+- KITTI 30-frame diagnostic: ok=16 failed=14, first failure frame 18
+- ETH3D 20-frame diagnostic: ok=13 failed=7, first failure frame 15
+- KITTI demo (1 frame): completed normally
+
+Result
+
+KITTI corridor (frames 14–20) after patch:
+
+| frame | rescue | refresh | inliers | cells | mcf  | reason |
+|-------|--------|---------|---------|-------|------|--------|
+| 14    | ok     | BLOCKED | 109     | 5     | 0.74 | history_inconsistent (regression: was allowed) |
+| 16    | ok     | BLOCKED | 51      | 4     | 0.92 | concentrated_history_inconsistent (unchanged) |
+| 17    | ok     | ALLOWED | 29      | 3     | 0.83 | target case neutralised; 29 inliers < 50 % inconsistent |
+| 18    | fail   | —       | 0       | —     | —    | first failure (regression: was frame 19) |
+
+ETH3D corridor:
+
+| frame | rescue | refresh | cells | mcf  | result |
+|-------|--------|---------|-------|------|--------|
+| 13    | ok     | BLOCKED | 2     | 0.53 | regression: was allowed, caused earlier failure |
+| 14    | ok     | BLOCKED | 2     | 0.64 | regression: was allowed |
+| 15    | fail   | —       | —     | —    | first failure (regression: was frame 19) |
+
+Root cause of regression
+- the history check thresholds (median > 3 px, p90 > 8 px, max > 12 px) are sensitive enough to flag good non-concentrated refreshes as history-inconsistent at early frames
+- blocking frame 14 (KITTI) and frames 13–14 (ETH3D) changed the cascade so frame 17's refresh used a smaller, less inconsistent inlier set
+- the target guard miss (frame 17 with 64 drifting inliers from basis 14) never materialised because basis 14 was never installed
+- the concentration requirement was implicitly filtering out this class of early false-positive history triggers
+
+Decision
+- reverted
+- production code restored to original guard
+- history-inconsistency thresholds need to be calibrated differently for concentrated vs spread support before this extension can be useful

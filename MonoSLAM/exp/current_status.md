@@ -220,7 +220,7 @@ Why does the frame-16 20 px localisation-only rescue accept a pose that is far w
 Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candidate poses and acceptance stages against the local temporal reference.
 
 ## KITTI sequence-00 frame-16 diagnosis
-- trusted baseline still fails first at frame 18 with 0 / 56 live PnP inliers from refreshed basis 16
+- pre-guard baseline still fails first at frame 18 with 0 / 56 live PnP inliers from refreshed basis 16
 - frame 16 is not a loose 20 px pose acceptance:
   - strict 8 px failed with zero inliers
   - 12 px found 74 / 83 inliers
@@ -244,5 +244,49 @@ Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candida
   - frame 18 improves from 0 / 56 failed to 49 / 58 accepted and refreshes basis 18
 - classification: KITTI frame-16 problem is mainly weak support geometry before refresh
 
+## KITTI refresh-only guard result
+- narrow guard committed: blocks rescue refresh when support is spatially concentrated and history-inconsistent, or when occupied cells is below two
+- guard effect on the 17-frame corridor (frames 4 through 20):
+  - frame 16: rescue ok at 65 / 83, refresh BLOCKED (concentrated + history-inconsistent)
+  - frame 17: rescue ok at 64 / 73, refresh ALLOWED (not concentrated, basis → 17)
+  - frame 18: rescue ok at 49 / 58, refresh BLOCKED (only one occupied cell, too weak)
+  - frame 19: rescue FAILS at 0 / 56 from basis 17
+  - frame 20: rescue ok at 40 / 48 from basis 17
+
+## KITTI frame-19 post-guard diagnosis
+- new first hard failure: frame 19, active basis 17, 0 / 56 inliers, rescue also fails
+- frame-19 support funnel (live, from basis 17):
+  - raw tracked pairs: 328
+  - mapped by active lookup: 56
+  - observation-gated pass: 56
+  - final PnP correspondences: 56
+  - all four live replays (3 / 5 / 8 / 12 px) and all rescue stages: 0 inliers
+- frame-19 support geometry:
+  - all 56 live landmarks are bootstrap-born (birth_kf = 1)
+  - consistent / drifting: 4 / 52
+  - canonical history: 920 obs, median 4.15 px, p90 12.54 px, max 21.63 px
+  - frame-17 basis reprojection of 56 live landmarks: median 5.03 px, p90 9.05 px
+  - local 2D displacement consistency: 54 / 56 pass, median 1.41 px, p90 3.32 px
+- frame-19 spatial distribution:
+  - 47 / 56 (83.9 %) in one 4 × 3 grid cell
+  - `heavily_concentrated: True`
+  - basis-17 reference view shows the same concentration
+- frame-18 vs frame-19:
+  - both frames use active basis 17
+  - frame 18: 49 / 58 rescue succeeds; all 56 frame-19 live landmarks are exactly the frame-18 accepted support
+  - frame 19: 0 / 56 even at all rescue thresholds; frame 20 recovers at 40 / 48 from the same basis
+  - the 49 → 0 drop is pose-specific: the camera at frame 19 is at a position where the geometry error in the 52 drifting landmarks is worst-case for RANSAC
+
+## KITTI guard miss at frame 17
+- frame 17 passed the guard because its 64 inliers from basis 14 were not concentrated
+- the guard only evaluates history-inconsistency when the support is already spatially concentrated
+- frame 17's spread inliers bypassed the history check: the guard did not detect that 52 / 56 of those landmarks are geometry-drifting bootstrap points
+- the resulting basis-17 installation is the proximate cause of the frame-19 failure
+
+## KITTI frame-19 classification
+- primary: bad active basis quality — basis 17 (rescue, 64 drifting bootstrap landmarks) was installed because the guard's history check is concentration-gated
+- secondary: weak support geometry — 52 / 56 live landmarks geometrically drifting, canonical p90 12.54 px, basis reproj at 5.03 / 9.05 px before frame 19
+- verdict: KITTI frame-19 is mixed (bad active basis quality and weak support geometry)
+
 ## KITTI next step
-Keep rescue pose acceptance unchanged and test one narrow refresh-eligibility guard against spatially concentrated, history-inconsistent rescued support.
+Evaluate whether extending the history-inconsistency check from concentration-gated to ALL strong rescue support would catch frame-17's drifting basis before it is installed.
