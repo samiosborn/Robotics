@@ -459,3 +459,20 @@ Validation
 
 Decision
 - kept
+
+---
+
+## 2026-06-14 — Stage 2 diagnostics-boundary cleanup
+
+Change
+- moved pure PnP reprojection, threshold-mask, and spatial-summary calculations into `src/slam/pnp_diagnostics.py`
+- kept ETH3D orchestration, visualisation, replay, and experiment-specific diagnostics in `scripts/diag_pnp_eth3d.py`
+
+Validation
+- script compilation passed
+- `tests/slam`: 71 passed
+- frontend demo completed normally
+- 12-frame PnP diagnostic: 12 ok, 0 failed
+
+Decision
+- kept
