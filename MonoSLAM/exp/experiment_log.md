@@ -589,3 +589,44 @@ Validation
 
 Decision
 - kept
+
+---
+
+## 2026-06-14 — First longer KITTI sequence-00 diagnosis
+
+Base state
+- committed KITTI loader, profile bootstrap `0 -> 3`, and thin KITTI wrappers
+
+Diagnostic step
+- ran 30 tracked frames through the KITTI PnP wrapper
+- replayed through frame 18 with the existing live-pipeline deep diagnostic
+
+Validation
+- `PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 30 --scorecard short --threshold_pair_frame_index 9999 --out_dir /tmp/diag_pnp_kitti_00_longer_30`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 15 --scorecard off --threshold_pair_frame_index 18 --out_dir /tmp/diag_pnp_kitti_00_frame18_deep`
+
+Result
+- bootstrap succeeded with 427 landmarks
+- frames 4 to 33: 15 accepted and 15 failed
+- promotions and local BA succeeded on every frame from 4 to 13
+- last clearly healthy frame was 13 with 813 track inliers and 115 / 116 PnP inliers
+- first degraded frame was 14
+  - strict 8 px PnP failed with 4 inliers
+  - 12 px PnP found 52 inliers
+  - live rescue accepted 109 / 110 and refreshed the active basis
+- first failed frame was 18 from active basis 16
+  - 313 track inliers and 56 live PnP correspondences
+  - fixed 3 / 5 / 8 / 12 px PnP all failed with zero inliers
+  - rescue attempted and failed
+  - 53 / 56 live correspondences passed local displacement consistency
+  - all 56 live assignments exactly matched the refreshed basis
+  - 52 / 56 live landmarks were geometrically drifting over canonical history
+- frame 19 rescued once, then frames 20 to 33 failed
+- classification: keyframe support-basis geometry quality, not bootstrap weakness, lookup starvation, observation gating, or incoherent 2D tracking
+
+Decision
+- kept as diagnosis
+- no production change
+
+Next step
+- audit the frame-16 rescued pose and support geometry before its active-basis refresh
