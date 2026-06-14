@@ -1,0 +1,17 @@
+# configs/cameras/kitti_odometry.yaml
+# KITTI odometry sequence 00 grayscale left camera (P0)
+
+camera:
+  model: pinhole
+
+  width: 1241
+  height: 376
+
+  K:
+    fx: 718.856
+    fy: 718.856
+    cx: 607.193
+    cy: 185.216
+
+  distortion:
+    model: none

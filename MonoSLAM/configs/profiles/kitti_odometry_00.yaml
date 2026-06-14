@@ -1,0 +1,20 @@
+# configs/profiles/kitti_odometry_00.yaml
+
+profile:
+  name: kitti_odometry_00
+
+includes:
+  camera: configs/cameras/kitti_odometry.yaml
+  features: configs/features.yaml
+  bootstrap: configs/bootstrap.yaml
+
+dataset:
+  name: kitti
+  root: data/kitti_odometry
+  seq: "00"
+  max_frames: 10
+
+run:
+  out_dir: out
+  run_id: kitti_odometry_00
+  deterministic: true
