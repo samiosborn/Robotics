@@ -441,3 +441,21 @@ Decision
 
 Next step
 - audit frame-16 rescue candidate generation and acceptance against the local temporal reference
+
+---
+
+## 2026-06-14 — Stage 1 dataset-boundary cleanup
+
+Change
+- moved generic frontend reporting and JSONL helpers out of `frontend_eth3d_common.py`
+- replaced the duplicated diagnostic landmark index with `build_landmark_id_index`
+- kept ETH3D loading and runner behaviour unchanged
+
+Validation
+- script compilation passed
+- `tests/slam`: 66 passed
+- frontend demo completed normally
+- 12-frame PnP diagnostic: 12 ok, 0 failed
+
+Decision
+- kept

@@ -7,7 +7,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, append_jsonl as _append_jsonl, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, format_frame_scorecard as _format_frame_scorecard, frame_scorecard_row as _frame_scorecard_row, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg, reset_jsonl as _reset_jsonl, standard_frame_stats as _standard_frame_stats
+from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
+from frontend_reporting import format_frame_scorecard as _format_frame_scorecard, frame_scorecard_row as _frame_scorecard_row, standard_frame_stats as _standard_frame_stats
+from jsonl_io import append_jsonl as _append_jsonl, reset_jsonl as _reset_jsonl
 
 from core.checks import align_bool_mask_1d, check_dir, check_int_ge0, check_int_gt0, check_positive
 from datasets.eth3d import load_eth3d_sequence
@@ -18,7 +20,7 @@ from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
 from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, get_active_landmark_lookup, get_pose_for_kf, set_active_keyframe_record
-from slam.landmark_state import count_valid_landmark_observations
+from slam.landmark_state import build_landmark_id_index, count_valid_landmark_observations
 from slam.pnp_config import pnp_frontend_kwargs_from_cfg
 from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
@@ -1635,21 +1637,6 @@ def _local_ba_optimised_landmark_ids(K: np.ndarray, seed: dict, local_ba_stats: 
     return sorted(ids)
 
 
-# Index landmarks by id without mutating the seed
-def _landmark_index_for_diag(seed: dict) -> dict[int, dict]:
-    out: dict[int, dict] = {}
-    landmarks = seed.get("landmarks", []) if isinstance(seed, dict) else []
-    if not isinstance(landmarks, list):
-        return out
-
-    for lm in landmarks:
-        if not isinstance(lm, dict) or "id" not in lm:
-            continue
-        out[int(lm["id"])] = lm
-
-    return out
-
-
 # Snapshot the installed support-only lookup before runtime rebuild
 def _refreshed_basis_assignment_snapshot(seed: dict, pose_out: dict, *, source_frame_index: int) -> dict:
     active_kf = int(seed.get("active_keyframe_kf", -1))
@@ -1708,7 +1695,7 @@ def _refreshed_basis_assignment_snapshot(seed: dict, pose_out: dict, *, source_f
                 continue
             assignment_by_feature[key] = int(lm_id)
 
-    lm_by_id = _landmark_index_for_diag(seed)
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic refreshed basis landmarks")
     installed_missing_landmark_ids = sorted(
         int(lm_id)
         for lm_id in set(lookup_by_feat.values())
@@ -1929,7 +1916,7 @@ def _frame_assignment_audit(
     active_kf = int(basis_snapshot["active_keyframe_index"])
     lookup_by_feat = dict(basis_snapshot["lookup_by_feat"])
     installed_landmark_ids = set(int(v) for v in basis_snapshot["installed_landmark_ids"])
-    lm_by_id = _landmark_index_for_diag(seed)
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic frame assignment landmarks")
     feats = get_active_keyframe_features(seed)
     kps_xy = np.asarray(feats.kps_xy, dtype=np.float64)
     R_basis, t_basis = get_pose_for_kf(seed, active_kf, context="assignment audit basis pose")
@@ -2222,7 +2209,7 @@ def _raw_mapped_support_landmark_ids(seed: dict, track_out: dict) -> set[int]:
         return set()
 
     lookup = _active_landmark_lookup_from_observations(seed)
-    lm_by_id = _landmark_index_for_diag(seed)
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic raw mapped support landmarks")
     kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
     xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
@@ -2300,7 +2287,7 @@ def _support_funnel_diagnostic(
     latest_ba_record: dict | None,
 ) -> dict:
     lookup = _active_landmark_lookup_from_observations(seed)
-    lm_by_id = _landmark_index_for_diag(seed)
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic support funnel landmarks")
     ba_ids = set()
     latest_ba_frame_index = None
     latest_ba_active_keyframe = None

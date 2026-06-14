@@ -10,11 +10,11 @@ import numpy as np
 from frontend_eth3d_common import (
     ROOT,
     add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args,
-    append_jsonl as _append_jsonl,
     apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides,
     frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg,
     load_runtime_cfg as _load_runtime_cfg,
 )
+from jsonl_io import append_jsonl as _append_jsonl
 from core.checks import check_dir, check_int_ge0
 from datasets.eth3d import load_eth3d_sequence
 from slam.frame_pipeline import process_frame_against_seed

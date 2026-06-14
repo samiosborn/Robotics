@@ -7,7 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
-from frontend_eth3d_common import ROOT, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_runtime_cfg as _load_runtime_cfg, seed_landmark_count as _seed_landmark_count, standard_frame_stats as _standard_frame_stats
+from frontend_eth3d_common import ROOT, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_runtime_cfg as _load_runtime_cfg
+from frontend_reporting import seed_landmark_count as _seed_landmark_count, standard_frame_stats as _standard_frame_stats
 
 from datasets.eth3d import load_eth3d_sequence
 from geometry.camera import camera_centre, reprojection_errors_sq, world_to_camera_points
