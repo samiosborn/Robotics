@@ -1,0 +1,3649 @@
+# scripts/diag_pnp.py
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
+from frontend_reporting import format_frame_scorecard as _format_frame_scorecard, frame_scorecard_row as _frame_scorecard_row, standard_frame_stats as _standard_frame_stats
+from jsonl_io import append_jsonl as _append_jsonl, reset_jsonl as _reset_jsonl
+
+from core.checks import align_bool_mask_1d, check_dir, check_int_ge0, check_int_gt0, check_positive
+from datasets.loader import load_sequence
+from geometry.camera import camera_centre, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
+from geometry.pose import angle_between_translations
+from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thinning_mask, pnp_local_displacement_consistency_mask, pnp_threshold_stability_flags
+from geometry.rotation import angle_between_rotmats
+from slam.frame_pipeline import process_frame_against_seed
+from slam.frontend import bootstrap_from_two_frames
+from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, get_active_landmark_lookup, get_pose_for_kf, set_active_keyframe_record
+from slam.landmark_state import build_landmark_id_index, count_valid_landmark_observations
+from slam.pnp_config import pnp_frontend_kwargs_from_cfg
+from slam.pnp_diagnostics import classify_spatial_relationship as _classify_spatial_relationship, non_pnp_reprojection_block as _non_pnp_reprojection_block, point_spatial_summary as _point_spatial_summary, pose_reprojection_block as _pose_reprojection_block, reprojection_error_summary as _reprojection_error_summary, score_summary as _score_summary, spatial_relationship_side as _spatial_relationship_side, threshold_pair_group_masks as _threshold_pair_group_masks
+from slam.pnp_frontend import estimate_pose_from_seed
+from slam.pnp_stats import pnp_support_diagnostic_stats, pnp_support_gate_stats
+from slam.tracking import track_against_keyframe
+
+
+# Colours for threshold-pair spatial diagnostic groups
+_THRESHOLD_PAIR_SPATIAL_GROUPS = {
+    "pnp_8px_inliers": {
+        "label": "8 px PnP inliers",
+        "colour": (30, 220, 80),
+        "alpha": 235,
+        "width": 2,
+    },
+    "pnp_12px_only_inliers": {
+        "label": "12 px-only PnP inliers",
+        "colour": (255, 50, 190),
+        "alpha": 235,
+        "width": 2,
+    },
+    "rejected_by_both": {
+        "label": "Rejected by both",
+        "colour": (0, 170, 255),
+        "alpha": 105,
+        "width": 1,
+    },
+}
+
+
+# Build the diagnostic PnP solver settings from the shared frontend config parser
+def _pnp_solver_cfg(profile_pnp_cfg: dict | None = None) -> dict:
+    source = {
+        "pnp_threshold_stability_compare_px": 12.0,
+    }
+    if isinstance(profile_pnp_cfg, dict):
+        source.update(profile_pnp_cfg)
+
+    out = pnp_frontend_kwargs_from_cfg(source)
+    out["apply_pnp_local_consistency_filter_to_pipeline"] = False
+    out["apply_pnp_spatial_thinning_filter_to_pipeline"] = False
+    if isinstance(profile_pnp_cfg, dict):
+        out["apply_pnp_local_consistency_filter_to_pipeline"] = bool(
+            profile_pnp_cfg.get("apply_pnp_local_consistency_filter_to_pipeline", False)
+        )
+        out["apply_pnp_spatial_thinning_filter_to_pipeline"] = bool(
+            profile_pnp_cfg.get("apply_pnp_spatial_thinning_filter_to_pipeline", False)
+        )
+
+    return out
+
+
+# Validate the threshold sweep list
+def _parse_thresholds(values: list[float]) -> list[float]:
+    if len(values) == 0:
+        raise ValueError("Expected at least one threshold")
+    return [check_positive(v, name="threshold_px", eps=0.0) for v in values]
+
+
+# Apply diagnostic PnP command-line overrides through the canonical config parser
+def _apply_diagnostic_pnp_cli_overrides(pnp_cfg: dict, args: argparse.Namespace) -> dict:
+    raw = dict(pnp_cfg)
+    raw.update(
+        {
+            "enable_pnp_spatial_gate": bool(args.enable_pnp_spatial_gate),
+            "pnp_spatial_grid_cols": args.pnp_spatial_grid_cols,
+            "pnp_spatial_grid_rows": args.pnp_spatial_grid_rows,
+            "min_pnp_inlier_cells": args.min_pnp_inlier_cells,
+            "max_pnp_single_cell_fraction": args.max_pnp_single_cell_fraction,
+            "min_pnp_bbox_area_fraction": args.min_pnp_bbox_area_fraction,
+            "enable_pnp_component_gate": bool(args.enable_pnp_component_gate),
+            "pnp_component_radius_px": args.pnp_component_radius_px,
+            "max_pnp_largest_component_fraction": args.max_pnp_largest_component_fraction,
+            "min_pnp_component_count": args.min_pnp_component_count,
+            "min_pnp_largest_component_bbox_area_fraction": args.min_pnp_largest_component_bbox_area_fraction,
+            "enable_pnp_local_consistency_filter": bool(args.enable_pnp_local_consistency_filter),
+            "pnp_local_consistency_radius_px": args.pnp_local_consistency_radius_px,
+            "pnp_local_consistency_min_neighbours": args.pnp_local_consistency_min_neighbours,
+            "pnp_local_consistency_max_median_residual_px": args.pnp_local_consistency_max_median_residual_px,
+            "pnp_local_consistency_min_keep": args.pnp_local_consistency_min_keep,
+            "enable_pnp_spatial_thinning_filter": bool(args.enable_pnp_spatial_thinning_filter),
+            "pnp_spatial_thinning_radius_px": args.pnp_spatial_thinning_radius_px,
+            "pnp_spatial_thinning_max_points_per_radius": args.pnp_spatial_thinning_max_points_per_radius,
+            "pnp_spatial_thinning_min_keep": args.pnp_spatial_thinning_min_keep,
+        }
+    )
+
+    apply_local_consistency_filter_to_pipeline = bool(args.apply_pnp_local_consistency_filter_to_pipeline)
+    apply_spatial_thinning_filter_to_pipeline = bool(args.apply_pnp_spatial_thinning_filter_to_pipeline)
+    out = pnp_frontend_kwargs_from_cfg(raw)
+    out["apply_pnp_local_consistency_filter_to_pipeline"] = apply_local_consistency_filter_to_pipeline
+    out["apply_pnp_spatial_thinning_filter_to_pipeline"] = apply_spatial_thinning_filter_to_pipeline
+
+    return _apply_pnp_threshold_stability_cli_overrides(out, args)
+
+
+# Measure final pose quality for logging
+def _pose_metrics(corrs, K: np.ndarray, R, t, *, eps: float) -> dict:
+    if R is None or t is None:
+        return {
+            "reprojection_rmse_px": None,
+            "cheirality_ratio": None,
+        }
+
+    rmse_px = None
+    try:
+        rmse_px = float(reprojection_rmse(K, R, t, corrs.X_w, corrs.x_cur))
+    except Exception:
+        rmse_px = None
+
+    cheirality_ratio = None
+    try:
+        X_c = world_to_camera_points(R, t, corrs.X_w)
+        if int(X_c.shape[1]) > 0:
+            cheirality_ratio = float(np.mean(np.asarray(X_c[2, :], dtype=np.float64) > float(eps)))
+    except Exception:
+        cheirality_ratio = None
+
+    return {
+        "reprojection_rmse_px": rmse_px,
+        "cheirality_ratio": cheirality_ratio,
+    }
+
+
+# Run one threshold sweep item on a fixed correspondence set
+def _run_threshold_diagnostic(corrs, K: np.ndarray, *, threshold_px: float, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
+    n_pnp_corr = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
+
+    row = {
+        "threshold_px": float(threshold_px),
+        "n_pnp_corr": int(n_pnp_corr),
+        "n_inliers": 0,
+        "n_pnp_inliers": 0,
+        "ok": False,
+        "reason": None,
+        "reprojection_rmse_px": None,
+        "cheirality_ratio": None,
+        "n_model_success": 0,
+        "refit_requested": bool(pnp_cfg["refit"]),
+        "refit_used": False,
+        "refine_nonlinear_requested": bool(pnp_cfg["refine_nonlinear"]),
+        "refine_converged": None,
+        "refine_reason": None,
+        "n_inliers_before_refit": 0,
+        "refit_changed_inlier_count": False,
+        "refit_inlier_delta": 0,
+        "pnp_spatial_gate_enabled": bool(pnp_cfg.get("enable_pnp_spatial_gate", True)),
+        "pnp_spatial_gate_evaluated": False,
+        "pnp_spatial_gate_rejected": False,
+        "pnp_spatial_gate_reason": None,
+        "pnp_inlier_occupied_cells": 0,
+        "pnp_inlier_max_cell_count": 0,
+        "pnp_inlier_max_cell_fraction": None,
+        "pnp_inlier_bbox_area_fraction": None,
+        "pnp_inlier_bbox": None,
+        "pnp_component_gate_enabled": bool(pnp_cfg.get("enable_pnp_component_gate", False)),
+        "pnp_component_gate_evaluated": False,
+        "pnp_component_gate_rejected": False,
+        "pnp_component_gate_reason": None,
+        "pnp_component_radius_px": float(pnp_cfg.get("pnp_component_radius_px", 80.0)),
+        "pnp_inlier_component_count": 0,
+        "pnp_inlier_largest_component_size": 0,
+        "pnp_inlier_largest_component_fraction": None,
+        "pnp_inlier_largest_component_bbox_area_fraction": None,
+        "pnp_inlier_largest_component_bbox": None,
+        "pnp_inlier_component_sizes": [],
+    }
+
+    # Stop early when no correspondence bundle is available
+    if n_pnp_corr == 0:
+        row["reason"] = "no_pnp_correspondences"
+        return row
+
+    # Stop early when RANSAC cannot draw a valid minimal sample
+    if n_pnp_corr < int(pnp_cfg["sample_size"]):
+        row["reason"] = "too_few_correspondences_for_ransac"
+        return row
+
+    try:
+        _, _, _, stats_raw = estimate_pose_pnp_ransac(
+            corrs,
+            K,
+            num_trials=int(pnp_cfg["num_trials"]),
+            sample_size=int(pnp_cfg["sample_size"]),
+            threshold_px=float(threshold_px),
+            min_inliers=int(pnp_cfg["min_inliers"]),
+            seed=int(pnp_cfg["ransac_seed"]),
+            min_points=int(pnp_cfg["min_points"]),
+            rank_tol=float(pnp_cfg["rank_tol"]),
+            min_cheirality_ratio=float(pnp_cfg["min_cheirality_ratio"]),
+            eps=float(pnp_cfg["eps"]),
+            refit=False,
+            refine_nonlinear=False,
+            refine_max_iters=int(pnp_cfg["refine_max_iters"]),
+            refine_damping=float(pnp_cfg["refine_damping"]),
+            refine_step_tol=float(pnp_cfg["refine_step_tol"]),
+            refine_improvement_tol=float(pnp_cfg["refine_improvement_tol"]),
+        )
+        row["n_inliers_before_refit"] = int(stats_raw.get("n_inliers", 0))
+    except Exception as exc:
+        row["reason"] = "pnp_ransac_error"
+        row["error"] = str(exc)
+        return row
+
+    try:
+        R, t, pnp_inlier_mask, stats = estimate_pose_pnp_ransac(
+            corrs,
+            K,
+            num_trials=int(pnp_cfg["num_trials"]),
+            sample_size=int(pnp_cfg["sample_size"]),
+            threshold_px=float(threshold_px),
+            min_inliers=int(pnp_cfg["min_inliers"]),
+            seed=int(pnp_cfg["ransac_seed"]),
+            min_points=int(pnp_cfg["min_points"]),
+            rank_tol=float(pnp_cfg["rank_tol"]),
+            min_cheirality_ratio=float(pnp_cfg["min_cheirality_ratio"]),
+            eps=float(pnp_cfg["eps"]),
+            refit=bool(pnp_cfg["refit"]),
+            refine_nonlinear=bool(pnp_cfg["refine_nonlinear"]),
+            refine_max_iters=int(pnp_cfg["refine_max_iters"]),
+            refine_damping=float(pnp_cfg["refine_damping"]),
+            refine_step_tol=float(pnp_cfg["refine_step_tol"]),
+            refine_improvement_tol=float(pnp_cfg["refine_improvement_tol"]),
+        )
+    except Exception as exc:
+        row["reason"] = "pnp_ransac_error"
+        row["error"] = str(exc)
+        return row
+
+    refine_stats = stats.get("refine_stats", {}) if isinstance(stats, dict) else {}
+    metrics = _pose_metrics(corrs, K, R, t, eps=float(pnp_cfg["eps"]))
+    n_inliers = int(stats.get("n_inliers", 0)) if isinstance(stats, dict) else 0
+    ok = (R is not None) and (t is not None)
+    pnp_inlier_mask = align_bool_mask_1d(pnp_inlier_mask, n_pnp_corr, name="pnp_inlier_mask")
+
+    row.update(
+        {
+            "n_inliers": int(n_inliers),
+            "n_pnp_inliers": int(n_inliers),
+            "ok": bool(ok),
+            "reason": stats.get("reason", None) if isinstance(stats, dict) else None,
+            "reprojection_rmse_px": metrics["reprojection_rmse_px"],
+            "cheirality_ratio": metrics["cheirality_ratio"],
+            "n_model_success": int(stats.get("n_model_success", 0)) if isinstance(stats, dict) else 0,
+            "refit_used": bool(stats.get("refit", False)) if isinstance(stats, dict) else False,
+            "refine_converged": None if not isinstance(refine_stats, dict) else refine_stats.get("converged", None),
+            "refine_reason": None if not isinstance(refine_stats, dict) else refine_stats.get("reason", None),
+            "refit_changed_inlier_count": int(n_inliers) != int(row["n_inliers_before_refit"]),
+            "refit_inlier_delta": int(n_inliers) - int(row["n_inliers_before_refit"]),
+        }
+    )
+
+    # Apply the same post-solver support gates used by the frontend
+    if image_shape is not None:
+        support_stats = pnp_support_diagnostic_stats(
+            corrs,
+            pnp_inlier_mask,
+            image_shape,
+            pnp_spatial_grid_cols=int(pnp_cfg["pnp_spatial_grid_cols"]),
+            pnp_spatial_grid_rows=int(pnp_cfg["pnp_spatial_grid_rows"]),
+            pnp_component_radius_px=float(pnp_cfg["pnp_component_radius_px"]),
+        )
+        row.update(support_stats)
+        gate_stats = pnp_support_gate_stats(
+            bool(ok),
+            row,
+            enable_pnp_spatial_gate=bool(pnp_cfg.get("enable_pnp_spatial_gate", True)),
+            min_pnp_inlier_cells=int(pnp_cfg["min_pnp_inlier_cells"]),
+            max_pnp_single_cell_fraction=float(pnp_cfg["max_pnp_single_cell_fraction"]),
+            min_pnp_bbox_area_fraction=float(pnp_cfg["min_pnp_bbox_area_fraction"]),
+            enable_pnp_component_gate=bool(pnp_cfg.get("enable_pnp_component_gate", False)),
+            min_pnp_component_count=int(pnp_cfg["min_pnp_component_count"]),
+            max_pnp_largest_component_fraction=float(pnp_cfg["max_pnp_largest_component_fraction"]),
+            min_pnp_largest_component_bbox_area_fraction=float(pnp_cfg["min_pnp_largest_component_bbox_area_fraction"]),
+        )
+        row.update(gate_stats)
+
+        if bool(ok) and bool(row["pnp_component_gate_rejected"]):
+            row["ok"] = False
+            row["reason"] = "pnp_component_support_failed"
+        elif bool(ok) and bool(row["pnp_spatial_gate_rejected"]):
+            row["ok"] = False
+            row["reason"] = "pnp_spatial_coverage_failed"
+
+    if not bool(ok) and row["reason"] is None:
+        row["reason"] = "pnp_pose_missing"
+
+    return row
+
+
+# Format one concise threshold summary line
+def _format_threshold_summary(rows: list[dict]) -> str:
+    parts: list[str] = []
+    for row in rows:
+        status = "ok" if bool(row["ok"]) else "fail"
+        parts.append(f"{row['threshold_px']:.0f}px:{int(row['n_pnp_inliers'])}/{status}")
+    return " ".join(parts)
+
+
+# Build compact parseable threshold scorecard rows
+def _threshold_scorecard_rows(rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for row in rows:
+        out.append(
+            {
+                "threshold_px": float(row["threshold_px"]),
+                "ok": bool(row["ok"]),
+                "reason": row.get("reason", None),
+                "n_pnp_corr": int(row.get("n_pnp_corr", 0)),
+                "n_pnp_inliers": int(row.get("n_pnp_inliers", row.get("n_inliers", 0))),
+            }
+        )
+
+    return out
+
+
+# Summarise one diagnostic run from scorecard rows
+def _run_summary_from_scorecards(rows: list[dict]) -> dict:
+    return {
+        "frames_processed": int(len(rows)),
+        "pipeline_ok_frames": int(sum(1 for row in rows if bool(row.get("pipeline_ok", False)))),
+        "pipeline_failed_frames": int(sum(1 for row in rows if not bool(row.get("pipeline_ok", False)))),
+        "keyframes_promoted": int(sum(1 for row in rows if bool(row.get("pipeline_keyframe_promoted", False)))),
+        "rescue_attempted_frames": int(sum(1 for row in rows if bool(row.get("rescue_attempted", False)))),
+        "rescue_succeeded_frames": int(sum(1 for row in rows if bool(row.get("rescue_succeeded", False)))),
+        "support_refresh_triggered_frames": int(sum(1 for row in rows if bool(row.get("support_refresh_triggered", False)))),
+    }
+
+
+# Snapshot the active support basis for diagnostic restoration
+def _active_support_basis_snapshot(seed: dict) -> dict:
+    active_kf = int(get_active_keyframe_kf(seed))
+    R, t = get_pose_for_kf(seed, active_kf, context="diagnostic active basis snapshot")
+    return {
+        "kf": int(active_kf),
+        "R": np.asarray(R, dtype=np.float64).copy(),
+        "t": np.asarray(t, dtype=np.float64).reshape(3).copy(),
+        "feats": get_active_keyframe_features(seed),
+        "landmark_id_by_feat": np.asarray(get_active_landmark_lookup(seed), dtype=np.int64).reshape(-1).copy(),
+    }
+
+
+# Restore one snapshotted basis without changing other frame results
+def _restore_active_support_basis(seed: dict, basis: dict) -> dict:
+    seed_out = dict(seed)
+    seed_out["poses"] = dict(seed.get("poses", {}))
+    seed_out["keyframes"] = dict(seed.get("keyframes", {}))
+    pose = (
+        np.asarray(basis["R"], dtype=np.float64).copy(),
+        np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
+    )
+    lookup = np.asarray(basis["landmark_id_by_feat"], dtype=np.int64).reshape(-1).copy()
+    set_active_keyframe_record(seed_out, int(basis["kf"]), pose, basis["feats"], lookup)
+    return seed_out
+
+
+# Suppress a selected refresh after normal rescue processing
+def _suppress_selected_support_refresh(
+    frontend_out: dict,
+    basis_before: dict,
+    *,
+    frame_index: int,
+    suppress_frames: set[int],
+) -> tuple[dict, bool, bool]:
+    if not isinstance(frontend_out, dict):
+        return frontend_out, False, False
+
+    stats = frontend_out.get("stats", {})
+    stats = stats if isinstance(stats, dict) else {}
+    would_refresh = bool(stats.get("guarded_support_refresh_triggered", False))
+    should_suppress = int(frame_index) in suppress_frames and bool(would_refresh)
+    if not bool(should_suppress):
+        return frontend_out, bool(would_refresh), False
+
+    frontend_out = dict(frontend_out)
+    frontend_out["seed"] = _restore_active_support_basis(frontend_out["seed"], basis_before)
+    stats = dict(stats)
+    stats.update(
+        {
+            "guarded_support_refresh_triggered": False,
+            "guarded_support_refresh_reason": "diagnostic_refresh_suppressed",
+            "diagnostic_support_refresh_would_have_triggered": True,
+            "diagnostic_support_refresh_suppressed": True,
+        }
+    )
+    frontend_out["stats"] = stats
+    return frontend_out, True, True
+
+
+# Format an optional pixel error for concise terminal output
+def _format_optional_px(value) -> str:
+    if value is None:
+        return "None"
+
+    return f"{float(value):.2f}"
+
+
+# Run PnP once for the threshold-pair pose comparison
+def _run_pnp_pose_for_comparison(corrs, K: np.ndarray, *, threshold_px: float, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
+    N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
+    out = {
+        "threshold_px": float(threshold_px),
+        "ok": False,
+        "reason": None,
+        "R": None,
+        "t": None,
+        "inlier_mask": np.zeros((N,), dtype=bool),
+        "n_inliers": 0,
+        "stats": {},
+        "pnp_component_gate_enabled": bool(pnp_cfg.get("enable_pnp_component_gate", False)),
+        "pnp_component_gate_evaluated": False,
+        "pnp_component_gate_rejected": False,
+        "pnp_component_gate_reason": None,
+        "pnp_component_support": None,
+        "pnp_inlier_component_count": 0,
+        "pnp_inlier_largest_component_size": 0,
+        "pnp_inlier_largest_component_fraction": None,
+        "pnp_inlier_largest_component_bbox_area_fraction": None,
+        "pnp_inlier_largest_component_bbox": None,
+        "pnp_inlier_component_sizes": [],
+    }
+
+    # Stop when RANSAC cannot draw a minimal sample
+    if N < int(pnp_cfg["sample_size"]):
+        out["reason"] = "too_few_correspondences_for_ransac"
+        return out
+
+    try:
+        R, t, inlier_mask, stats = estimate_pose_pnp_ransac(
+            corrs,
+            K,
+            num_trials=int(pnp_cfg["num_trials"]),
+            sample_size=int(pnp_cfg["sample_size"]),
+            threshold_px=float(threshold_px),
+            min_inliers=int(pnp_cfg["min_inliers"]),
+            seed=int(pnp_cfg["ransac_seed"]),
+            min_points=int(pnp_cfg["min_points"]),
+            rank_tol=float(pnp_cfg["rank_tol"]),
+            min_cheirality_ratio=float(pnp_cfg["min_cheirality_ratio"]),
+            eps=float(pnp_cfg["eps"]),
+            refit=bool(pnp_cfg["refit"]),
+            refine_nonlinear=bool(pnp_cfg["refine_nonlinear"]),
+            refine_max_iters=int(pnp_cfg["refine_max_iters"]),
+            refine_damping=float(pnp_cfg["refine_damping"]),
+            refine_step_tol=float(pnp_cfg["refine_step_tol"]),
+            refine_improvement_tol=float(pnp_cfg["refine_improvement_tol"]),
+        )
+    except Exception as exc:
+        out["reason"] = "pnp_ransac_error"
+        out["error"] = str(exc)
+        return out
+
+    # Record the fitted pose and inlier mask
+    stats = stats if isinstance(stats, dict) else {}
+    inlier_mask = align_bool_mask_1d(inlier_mask, N, name="pnp_inlier_mask")
+    ok = (R is not None) and (t is not None)
+
+    out.update(
+        {
+            "ok": bool(ok),
+            "reason": stats.get("reason", None),
+            "R": None if R is None else np.asarray(R, dtype=np.float64),
+            "t": None if t is None else np.asarray(t, dtype=np.float64).reshape(3),
+            "inlier_mask": inlier_mask,
+            "n_inliers": int(np.sum(inlier_mask)),
+            "stats": stats,
+        }
+    )
+
+    if not bool(ok) and out["reason"] is None:
+        out["reason"] = "pnp_pose_missing"
+
+    # Score support without changing the raw pose-comparison status
+    if image_shape is not None:
+        support_stats = pnp_support_diagnostic_stats(
+            corrs,
+            inlier_mask,
+            image_shape,
+            pnp_spatial_grid_cols=int(pnp_cfg["pnp_spatial_grid_cols"]),
+            pnp_spatial_grid_rows=int(pnp_cfg["pnp_spatial_grid_rows"]),
+            pnp_component_radius_px=float(pnp_cfg["pnp_component_radius_px"]),
+        )
+        out.update(support_stats)
+        gate_stats = pnp_support_gate_stats(
+            bool(ok),
+            out,
+            enable_pnp_spatial_gate=False,
+            enable_pnp_component_gate=bool(pnp_cfg.get("enable_pnp_component_gate", False)),
+            min_pnp_component_count=int(pnp_cfg["min_pnp_component_count"]),
+            max_pnp_largest_component_fraction=float(pnp_cfg["max_pnp_largest_component_fraction"]),
+            min_pnp_largest_component_bbox_area_fraction=float(pnp_cfg["min_pnp_largest_component_bbox_area_fraction"]),
+        )
+        out.update(gate_stats)
+
+    return out
+
+
+# Run the fixed 8 px and 12 px PnP pair once for threshold-pair diagnostics
+def _threshold_pair_pose_pair(corrs, K: np.ndarray, *, pnp_cfg: dict, image_shape: tuple[int, int] | None = None) -> dict:
+    return {
+        "pose_8px": _run_pnp_pose_for_comparison(corrs, K, threshold_px=8.0, pnp_cfg=pnp_cfg, image_shape=image_shape),
+        "pose_12px": _run_pnp_pose_for_comparison(corrs, K, threshold_px=12.0, pnp_cfg=pnp_cfg, image_shape=image_shape),
+    }
+
+
+# Recover the original tracking match score for each PnP correspondence
+def _match_scores_for_pnp_correspondences(track_out: dict, kf_feat_idx: np.ndarray, cur_feat_idx: np.ndarray) -> tuple[np.ndarray, str]:
+    kf_feat_idx = np.asarray(kf_feat_idx, dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(cur_feat_idx, dtype=np.int64).reshape(-1)
+    N = int(kf_feat_idx.size)
+    scores = np.full((N,), np.nan, dtype=np.float64)
+    semantics = "higher_is_better"
+
+    if kf_feat_idx.size != cur_feat_idx.size:
+        return scores, semantics
+
+    matches = track_out.get("matches", None) if isinstance(track_out, dict) else None
+    if matches is None:
+        return scores, semantics
+
+    ia = np.asarray(getattr(matches, "ia", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    ib = np.asarray(getattr(matches, "ib", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    score = np.asarray(getattr(matches, "score", np.zeros((0,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+    M = min(int(ia.size), int(ib.size), int(score.size))
+
+    if M == 0:
+        return scores, semantics
+
+    if np.nanmax(score[:M]) <= 0.0:
+        semantics = "higher_is_better_negative_hamming_distance"
+
+    score_by_pair: dict[tuple[int, int], float] = {}
+    for j in range(M):
+        score_by_pair[(int(ia[j]), int(ib[j]))] = float(score[j])
+
+    for j in range(N):
+        scores[j] = score_by_pair.get((int(kf_feat_idx[j]), int(cur_feat_idx[j])), np.nan)
+
+    return scores, semantics
+
+
+# Draw diagnostic correspondences in colour on the image pair
+def _draw_threshold_pair_spatial_groups(img_ref, img_cur, kps_ref: np.ndarray, kps_cur: np.ndarray, ia: np.ndarray, ib: np.ndarray, groups: list[tuple[str, np.ndarray]], out_path: Path) -> None:
+    out_path = Path(out_path)
+    A = img_ref.convert("RGB")
+    B = img_cur.convert("RGB")
+    WA, HA = A.size
+    WB, HB = B.size
+    canvas = Image.new("RGB", (WA + WB, max(HA, HB)))
+    canvas.paste(A, (0, 0))
+    canvas.paste(B, (WA, 0))
+
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    kps_ref = np.asarray(kps_ref, dtype=np.float64)
+    kps_cur = np.asarray(kps_cur, dtype=np.float64)
+    ia = np.asarray(ia, dtype=np.int64).reshape(-1)
+    ib = np.asarray(ib, dtype=np.int64).reshape(-1)
+    N = min(int(ia.size), int(ib.size))
+
+    for group_name, mask in groups:
+        spec = _THRESHOLD_PAIR_SPATIAL_GROUPS[group_name]
+        mask = align_bool_mask_1d(mask, N, name=f"{group_name}_mask")
+        colour = tuple(int(v) for v in spec["colour"])
+        alpha = int(spec["alpha"])
+        line_colour = (colour[0], colour[1], colour[2], alpha)
+        point_colour = (colour[0], colour[1], colour[2], min(255, alpha + 20))
+        width = int(spec["width"])
+        rr = 4 if width >= 2 else 3
+
+        for idx in np.nonzero(mask)[0]:
+            i = int(ia[idx])
+            j = int(ib[idx])
+            if i < 0 or i >= int(kps_ref.shape[0]) or j < 0 or j >= int(kps_cur.shape[0]):
+                continue
+
+            x0 = float(kps_ref[i, 0])
+            y0 = float(kps_ref[i, 1])
+            x1 = float(kps_cur[j, 0]) + float(WA)
+            y1 = float(kps_cur[j, 1])
+            draw.line((x0, y0, x1, y1), fill=line_colour, width=width)
+            draw.ellipse((x0 - rr, y0 - rr, x0 + rr, y0 + rr), fill=point_colour)
+            draw.ellipse((x1 - rr, y1 - rr, x1 + rr, y1 + rr), fill=point_colour)
+
+    composed = Image.alpha_composite(canvas.convert("RGBA"), overlay)
+    legend = ImageDraw.Draw(composed)
+    legend_h = 10 + 20 * len(groups)
+    legend.rectangle((6, 6, 360, legend_h), fill=(0, 0, 0, 155))
+
+    y = 12
+    for group_name, mask in groups:
+        spec = _THRESHOLD_PAIR_SPATIAL_GROUPS[group_name]
+        colour = tuple(int(v) for v in spec["colour"])
+        n_group = int(np.sum(align_bool_mask_1d(mask, N, name=f"{group_name}_legend_mask")))
+        legend.rectangle((12, y + 2, 24, y + 14), fill=(colour[0], colour[1], colour[2], 255))
+        legend.text((30, y), f"{spec['label']}  n={n_group}", fill=(255, 255, 255, 255))
+        y += 20
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    composed.convert("RGB").save(str(out_path))
+
+
+# Format a nullable floating-point value
+def _format_optional_float(value, *, digits: int = 2) -> str:
+    if value is None:
+        return "None"
+
+    return f"{float(value):.{int(digits)}f}"
+
+
+# Format a nullable image-space point list
+def _format_optional_point(value) -> str:
+    if value is None:
+        return "None"
+
+    return "[" + ",".join(f"{float(v):.1f}" for v in value) + "]"
+
+
+# Format the threshold-stability diagnostic line
+def _format_pnp_threshold_stability_diagnostic(stability: dict | None) -> str:
+    if not isinstance(stability, dict):
+        return "  pnp_threshold_stability: unavailable reason=missing_diagnostic"
+
+    reasons = stability.get("instability_reasons", [])
+    if isinstance(reasons, list):
+        reason_text = ",".join(str(v) for v in reasons)
+    else:
+        reason_text = str(reasons)
+    if reason_text == "":
+        reason_text = "None"
+
+    return (
+        f"  pnp_threshold_stability: classification={stability.get('classification', 'unavailable')} "
+        f"threshold_px={_format_optional_float(stability.get('ref_threshold_px', None), digits=0)}"
+        f"->{_format_optional_float(stability.get('compare_threshold_px', None), digits=0)} "
+        f"reference_ok={bool(stability.get('ref_pose_ok', False))} "
+        f"compare_ok={bool(stability.get('compare_pose_ok', False))} "
+        f"reference_inliers={int(stability.get('ref_inliers', 0))} "
+        f"compare_inliers={int(stability.get('compare_inliers', 0))} "
+        f"iou={_format_optional_float(stability.get('support_iou', None), digits=3)} "
+        f"rotation_delta_deg={_format_optional_float(stability.get('rotation_delta_deg', None), digits=2)} "
+        f"translation_direction_delta_deg={_format_optional_float(stability.get('translation_direction_delta_deg', None), digits=2)} "
+        f"camera_centre_direction_delta_deg={_format_optional_float(stability.get('camera_centre_direction_delta_deg', None), digits=2)} "
+        f"looser_only={bool(stability.get('one_solution_only_at_looser_threshold', False))} "
+        f"disjoint={bool(stability.get('supports_effectively_disjoint', False))} "
+        f"reasons={reason_text}"
+    )
+
+
+# Format one threshold-pair spatial diagnostic group line
+def _format_threshold_pair_spatial_group(group_name: str, group: dict) -> str:
+    current = group["current"]
+    reference = group["reference"]
+    score = group["match_score"]
+
+    return (
+        f"  threshold_pair_spatial_group: group={group_name} "
+        f"count={int(group['count'])} "
+        f"current_bbox={_format_optional_point(current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(current['bbox_area_fraction'], digits=3)} "
+        f"current_centroid={_format_optional_point(current['centroid'])} "
+        f"current_grid={current['occupancy_grid']} "
+        f"current_max_cell_fraction={_format_optional_float(current['max_cell_fraction'], digits=2)} "
+        f"current_concentrated={bool(current['heavily_concentrated'])} "
+        f"current_border_fraction={_format_optional_float(current['border_fraction'], digits=2)} "
+        f"reference_bbox={_format_optional_point(reference['bbox'])} "
+        f"reference_area_fraction={_format_optional_float(reference['bbox_area_fraction'], digits=3)} "
+        f"reference_centroid={_format_optional_point(reference['centroid'])} "
+        f"reference_grid={reference['occupancy_grid']} "
+        f"reference_max_cell_fraction={_format_optional_float(reference['max_cell_fraction'], digits=2)} "
+        f"reference_concentrated={bool(reference['heavily_concentrated'])} "
+        f"score_mean={_format_optional_float(score['mean'], digits=2)} "
+        f"score_median={_format_optional_float(score['median'], digits=2)}"
+    )
+
+
+# Format threshold-pair spatial diagnostic terminal lines
+def _format_threshold_pair_spatial_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_spatial: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
+
+    paths = diagnostic["visualisation_paths"]
+    relationship = diagnostic["relationship_8px_vs_12px_only"]
+    current = relationship["current"]
+    reference = relationship["reference"]
+
+    lines = [
+        (
+            f"  threshold_pair_spatial_paths: combined={paths['combined']} "
+            f"group8={paths['pnp_8px_inliers']} "
+            f"group12only={paths['pnp_12px_only_inliers']} "
+            f"rejected={paths['rejected_by_both']}"
+        )
+    ]
+
+    for group_name in ["pnp_8px_inliers", "pnp_12px_only_inliers", "rejected_by_both"]:
+        lines.append(_format_threshold_pair_spatial_group(group_name, diagnostic["groups"][group_name]))
+
+    lines.append(
+        f"  threshold_pair_spatial_relationship: classification={relationship['classification']} "
+        f"current_bbox_iou={_format_optional_float(current['bbox_iou'], digits=3)} "
+        f"current_centroid_distance_fraction={_format_optional_float(current['centroid_distance_fraction'], digits=3)} "
+        f"current_nearest_median_px={_format_optional_float(current['nearest_distance']['median_px'], digits=2)} "
+        f"current_grid_overlap={_format_optional_float(current['grid_overlap_fraction'], digits=2)} "
+        f"reference_bbox_iou={_format_optional_float(reference['bbox_iou'], digits=3)} "
+        f"reference_centroid_distance_fraction={_format_optional_float(reference['centroid_distance_fraction'], digits=3)} "
+        f"reference_nearest_median_px={_format_optional_float(reference['nearest_distance']['median_px'], digits=2)} "
+        f"reference_grid_overlap={_format_optional_float(reference['grid_overlap_fraction'], digits=2)} "
+        f"score_semantics={diagnostic['match_score_semantics']}"
+    )
+
+    return lines
+
+
+# Build and export the threshold-pair spatial diagnostic
+def _build_threshold_pair_spatial_diagnostic(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, track_out: dict, corrs, out_dir: Path, *, pose_pair: dict, name_suffix: str = "") -> dict:
+    N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
+
+    out = {
+        "ok": False,
+        "reason": None,
+        "frame_index": int(frame_index),
+        "reference_keyframe_index": int(ref_keyframe_index),
+        "n_pose_eligible": int(N),
+        "visualisation_paths": {},
+        "groups": {},
+        "relationship_8px_vs_12px_only": {},
+        "match_score_semantics": "higher_is_better",
+    }
+
+    if N == 0:
+        out["reason"] = "no_pnp_correspondences"
+        return out
+
+    img_ref = _load_pil_greyscale(seq.frame_info(ref_keyframe_index).path)
+    img_cur = _load_pil_greyscale(seq.frame_info(frame_index).path)
+
+    cur_feats = track_out.get("cur_feats", None) if isinstance(track_out, dict) else None
+    if cur_feats is None:
+        out["reason"] = "missing_current_features"
+        return out
+
+    kps_ref = np.asarray(ref_keyframe_feats.kps_xy, dtype=np.float64)
+    kps_cur = np.asarray(cur_feats.kps_xy, dtype=np.float64)
+    ia = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    ib = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+
+    if int(ia.size) != N or int(ib.size) != N:
+        out["reason"] = "correspondence_feature_index_length_mismatch"
+        return out
+
+    group_masks = _threshold_pair_group_masks(pose_pair, N)
+    mask_8 = group_masks["pnp_8px_inliers"]
+    mask_12_only = group_masks["pnp_12px_only_inliers"]
+
+    suffix = "" if str(name_suffix).strip() == "" else f"_{str(name_suffix).strip()}"
+    combined_path = out_dir / f"threshold_pair_pnp_spatial{suffix}_groups_combined.png"
+    group_paths = {
+        "combined": str(combined_path),
+        "pnp_8px_inliers": str(out_dir / f"threshold_pair_pnp_spatial{suffix}_8px_inliers.png"),
+        "pnp_12px_only_inliers": str(out_dir / f"threshold_pair_pnp_spatial{suffix}_12px_only_inliers.png"),
+        "rejected_by_both": str(out_dir / f"threshold_pair_pnp_spatial{suffix}_rejected_by_both.png"),
+    }
+
+    draw_order = [
+        ("rejected_by_both", group_masks["rejected_by_both"]),
+        ("pnp_12px_only_inliers", group_masks["pnp_12px_only_inliers"]),
+        ("pnp_8px_inliers", group_masks["pnp_8px_inliers"]),
+    ]
+    _draw_threshold_pair_spatial_groups(img_ref, img_cur, kps_ref, kps_cur, ia, ib, draw_order, combined_path)
+
+    for group_name in ["pnp_8px_inliers", "pnp_12px_only_inliers", "rejected_by_both"]:
+        _draw_threshold_pair_spatial_groups(
+            img_ref,
+            img_cur,
+            kps_ref,
+            kps_cur,
+            ia,
+            ib,
+            [(group_name, group_masks[group_name])],
+            Path(group_paths[group_name]),
+        )
+
+    xy_ref = np.full((N, 2), np.nan, dtype=np.float64)
+    xy_cur = np.full((N, 2), np.nan, dtype=np.float64)
+    valid = (ia >= 0) & (ia < int(kps_ref.shape[0])) & (ib >= 0) & (ib < int(kps_cur.shape[0]))
+    xy_ref[valid] = kps_ref[ia[valid], :2]
+    xy_cur[valid] = kps_cur[ib[valid], :2]
+
+    match_scores, score_semantics = _match_scores_for_pnp_correspondences(track_out, ia, ib)
+
+    groups_out = {}
+    for group_name, mask in group_masks.items():
+        mask = np.asarray(mask, dtype=bool).reshape(-1)
+        groups_out[group_name] = {
+            "label": str(_THRESHOLD_PAIR_SPATIAL_GROUPS[group_name]["label"]),
+            "count": int(np.sum(mask)),
+            "reference": _point_spatial_summary(xy_ref[mask], img_ref.size),
+            "current": _point_spatial_summary(xy_cur[mask], img_cur.size),
+            "match_score": _score_summary(match_scores[mask]),
+        }
+
+    ref_relationship = _spatial_relationship_side(
+        groups_out["pnp_8px_inliers"]["reference"],
+        groups_out["pnp_12px_only_inliers"]["reference"],
+        xy_ref[mask_8],
+        xy_ref[mask_12_only],
+        img_ref.size,
+    )
+    cur_relationship = _spatial_relationship_side(
+        groups_out["pnp_8px_inliers"]["current"],
+        groups_out["pnp_12px_only_inliers"]["current"],
+        xy_cur[mask_8],
+        xy_cur[mask_12_only],
+        img_cur.size,
+    )
+
+    relationship = {
+        "classification": _classify_spatial_relationship(ref_relationship, cur_relationship),
+        "reference": ref_relationship,
+        "current": cur_relationship,
+    }
+
+    out.update(
+        {
+            "ok": True,
+            "reason": None,
+            "visualisation_paths": group_paths,
+            "groups": groups_out,
+            "relationship_8px_vs_12px_only": relationship,
+            "match_score_semantics": score_semantics,
+        }
+    )
+
+    return out
+
+
+# Build a threshold-pair diagnostic for the local displacement-consistency filter
+def _build_threshold_pair_local_consistency_diagnostic(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, corrs, *, pose_pair: dict, pnp_cfg: dict) -> dict:
+    N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
+
+    out = {
+        "ok": False,
+        "reason": None,
+        "frame_index": int(frame_index),
+        "reference_keyframe_index": int(ref_keyframe_index),
+        "n_pose_eligible_before": int(N),
+        "n_pose_eligible_after": 0,
+        "n_removed": 0,
+        "filter_stats": {},
+        "removed_by_group": {},
+        "removed_spatial": {},
+        "kept_spatial": {},
+    }
+
+    if N == 0:
+        out["reason"] = "no_pnp_correspondences"
+        return out
+
+    img_ref = _load_pil_greyscale(seq.frame_info(ref_keyframe_index).path)
+    img_cur = _load_pil_greyscale(seq.frame_info(frame_index).path)
+
+    kps_ref = np.asarray(ref_keyframe_feats.kps_xy, dtype=np.float64)
+    ia = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    xy_cur = np.asarray(corrs.x_cur, dtype=np.float64).T
+
+    if int(ia.size) != N or int(xy_cur.shape[0]) != N:
+        out["reason"] = "correspondence_length_mismatch"
+        return out
+
+    valid = (ia >= 0) & (ia < int(kps_ref.shape[0]))
+    if not np.all(valid):
+        out["reason"] = "invalid_keyframe_feature_index"
+        return out
+
+    xy_ref = np.asarray(kps_ref[ia, :2], dtype=np.float64)
+
+    keep_mask, filter_stats = pnp_local_displacement_consistency_mask(
+        xy_ref,
+        xy_cur,
+        radius_px=float(pnp_cfg["pnp_local_consistency_radius_px"]),
+        min_neighbours=int(pnp_cfg["pnp_local_consistency_min_neighbours"]),
+        max_median_residual_px=float(pnp_cfg["pnp_local_consistency_max_median_residual_px"]),
+        min_keep=int(pnp_cfg["pnp_local_consistency_min_keep"]),
+    )
+    keep_mask = align_bool_mask_1d(keep_mask, N, name="local_consistency_keep_mask")
+    removed_mask = ~keep_mask
+
+    group_masks = _threshold_pair_group_masks(pose_pair, N)
+
+    removed_by_group = {}
+    for group_name, group_mask in group_masks.items():
+        group_count = int(np.sum(group_mask))
+        removed_count = int(np.sum(removed_mask & group_mask))
+        removed_by_group[group_name] = {
+            "count": int(group_count),
+            "removed": int(removed_count),
+            "removed_fraction": None if group_count == 0 else float(removed_count / group_count),
+        }
+
+    out.update(
+        {
+            "ok": True,
+            "reason": None,
+            "n_pose_eligible_after": int(np.sum(keep_mask)),
+            "n_removed": int(np.sum(removed_mask)),
+            "filter_stats": filter_stats,
+            "removed_by_group": removed_by_group,
+            "removed_spatial": {
+                "reference": _point_spatial_summary(xy_ref[removed_mask], img_ref.size),
+                "current": _point_spatial_summary(xy_cur[removed_mask], img_cur.size),
+            },
+            "kept_spatial": {
+                "reference": _point_spatial_summary(xy_ref[keep_mask], img_ref.size),
+                "current": _point_spatial_summary(xy_cur[keep_mask], img_cur.size),
+            },
+        }
+    )
+
+    return out
+
+
+# Format the threshold-pair local consistency diagnostic
+def _format_threshold_pair_local_consistency_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_local_consistency: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
+
+    stats = diagnostic["filter_stats"]
+    removed = diagnostic["removed_by_group"]
+    removed_current = diagnostic["removed_spatial"]["current"]
+
+    line_filter = (
+        f"  threshold_pair_local_consistency: before={int(diagnostic['n_pose_eligible_before'])} "
+        f"after={int(diagnostic['n_pose_eligible_after'])} "
+        f"removed={int(diagnostic['n_removed'])} "
+        f"too_few_neighbours={int(stats.get('n_too_few_neighbours', 0))} "
+        f"motion_inconsistent={int(stats.get('n_motion_inconsistent', 0))} "
+        f"residual_median_px={_format_optional_float(stats.get('residual_median_px', None), digits=2)} "
+        f"residual_p90_px={_format_optional_float(stats.get('residual_p90_px', None), digits=2)}"
+    )
+
+    line_groups = (
+        f"  threshold_pair_local_consistency_removed_groups: "
+        f"pnp_8px={int(removed['pnp_8px_inliers']['removed'])}/{int(removed['pnp_8px_inliers']['count'])} "
+        f"pnp_12px_only={int(removed['pnp_12px_only_inliers']['removed'])}/{int(removed['pnp_12px_only_inliers']['count'])} "
+        f"rejected={int(removed['rejected_by_both']['removed'])}/{int(removed['rejected_by_both']['count'])}"
+    )
+
+    line_spatial = (
+        f"  threshold_pair_local_consistency_removed_spatial: "
+        f"current_bbox={_format_optional_point(removed_current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(removed_current['bbox_area_fraction'], digits=3)} "
+        f"current_grid={removed_current['occupancy_grid']} "
+        f"current_max_cell_fraction={_format_optional_float(removed_current['max_cell_fraction'], digits=2)}"
+    )
+
+    return [line_filter, line_groups, line_spatial]
+
+
+# Build a threshold-pair diagnostic for current-image spatial thinning
+def _build_threshold_pair_spatial_thinning_diagnostic(seq, ref_keyframe_index: int, frame_index: int, ref_keyframe_feats, corrs, *, pose_pair: dict, pnp_cfg: dict) -> dict:
+    N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
+
+    out = {
+        "ok": False,
+        "reason": None,
+        "frame_index": int(frame_index),
+        "reference_keyframe_index": int(ref_keyframe_index),
+        "n_pose_eligible_before": int(N),
+        "n_pose_eligible_after": 0,
+        "n_removed": 0,
+        "filter_stats": {},
+        "removed_by_group": {},
+        "removed_spatial": {},
+        "kept_spatial": {},
+    }
+
+    if N == 0:
+        out["reason"] = "no_pnp_correspondences"
+        return out
+
+    img_ref = _load_pil_greyscale(seq.frame_info(ref_keyframe_index).path)
+    img_cur = _load_pil_greyscale(seq.frame_info(frame_index).path)
+
+    kps_ref = np.asarray(ref_keyframe_feats.kps_xy, dtype=np.float64)
+    ia = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    xy_cur = np.asarray(corrs.x_cur, dtype=np.float64).T
+
+    if int(ia.size) != N or int(xy_cur.shape[0]) != N:
+        out["reason"] = "correspondence_length_mismatch"
+        return out
+
+    valid = (ia >= 0) & (ia < int(kps_ref.shape[0]))
+    if not np.all(valid):
+        out["reason"] = "invalid_keyframe_feature_index"
+        return out
+
+    xy_ref = np.asarray(kps_ref[ia, :2], dtype=np.float64)
+
+    keep_mask, filter_stats = pnp_current_image_spatial_thinning_mask(
+        xy_cur,
+        radius_px=float(pnp_cfg["pnp_spatial_thinning_radius_px"]),
+        max_points_per_radius=int(pnp_cfg["pnp_spatial_thinning_max_points_per_radius"]),
+        min_keep=int(pnp_cfg["pnp_spatial_thinning_min_keep"]),
+    )
+    keep_mask = align_bool_mask_1d(keep_mask, N, name="spatial_thinning_keep_mask")
+    removed_mask = ~keep_mask
+
+    group_masks = _threshold_pair_group_masks(pose_pair, N, include_12px_all=True)
+
+    removed_by_group = {}
+    for group_name, group_mask in group_masks.items():
+        group_count = int(np.sum(group_mask))
+        removed_count = int(np.sum(removed_mask & group_mask))
+        removed_by_group[group_name] = {
+            "count": int(group_count),
+            "removed": int(removed_count),
+            "removed_fraction": None if group_count == 0 else float(removed_count / group_count),
+        }
+
+    out.update(
+        {
+            "ok": True,
+            "reason": None,
+            "n_pose_eligible_after": int(np.sum(keep_mask)),
+            "n_removed": int(np.sum(removed_mask)),
+            "filter_stats": filter_stats,
+            "removed_by_group": removed_by_group,
+            "removed_spatial": {
+                "reference": _point_spatial_summary(xy_ref[removed_mask], img_ref.size),
+                "current": _point_spatial_summary(xy_cur[removed_mask], img_cur.size),
+            },
+            "kept_spatial": {
+                "reference": _point_spatial_summary(xy_ref[keep_mask], img_ref.size),
+                "current": _point_spatial_summary(xy_cur[keep_mask], img_cur.size),
+            },
+        }
+    )
+
+    return out
+
+
+# Format the threshold-pair current-image spatial thinning diagnostic
+def _format_threshold_pair_spatial_thinning_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_spatial_thinning: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
+
+    stats = diagnostic["filter_stats"]
+    before = stats.get("before", {})
+    after = stats.get("after", {})
+    removed = diagnostic["removed_by_group"]
+    removed_current = diagnostic["removed_spatial"]["current"]
+    kept_current = diagnostic["kept_spatial"]["current"]
+
+    line_filter = (
+        f"  threshold_pair_spatial_thinning: before={int(diagnostic['n_pose_eligible_before'])} "
+        f"after={int(diagnostic['n_pose_eligible_after'])} "
+        f"removed={int(diagnostic['n_removed'])} "
+        f"radius={float(stats.get('radius_px', 0.0)):.1f} "
+        f"cap={int(stats.get('max_points_per_radius', 0))} "
+        f"dense_before={int(before.get('n_dense_points', 0))} "
+        f"dense_after={int(after.get('n_dense_points', 0))} "
+        f"density_max_before={int(before.get('density_count_max', 0) or 0)} "
+        f"density_max_after={int(after.get('density_count_max', 0) or 0)} "
+        f"largest_component_before={int(before.get('largest_component_count', 0))} "
+        f"largest_component_after={int(after.get('largest_component_count', 0))}"
+    )
+
+    line_groups = (
+        f"  threshold_pair_spatial_thinning_removed_groups: "
+        f"pnp_8px={int(removed['pnp_8px_inliers']['removed'])}/{int(removed['pnp_8px_inliers']['count'])} "
+        f"pnp_12px_all={int(removed['pnp_12px_all_inliers']['removed'])}/{int(removed['pnp_12px_all_inliers']['count'])} "
+        f"pnp_12px_only={int(removed['pnp_12px_only_inliers']['removed'])}/{int(removed['pnp_12px_only_inliers']['count'])} "
+        f"rejected={int(removed['rejected_by_both']['removed'])}/{int(removed['rejected_by_both']['count'])}"
+    )
+
+    line_removed_spatial = (
+        f"  threshold_pair_spatial_thinning_removed_spatial: "
+        f"current_bbox={_format_optional_point(removed_current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(removed_current['bbox_area_fraction'], digits=3)} "
+        f"current_grid={removed_current['occupancy_grid']} "
+        f"current_max_cell_fraction={_format_optional_float(removed_current['max_cell_fraction'], digits=2)}"
+    )
+
+    line_kept_spatial = (
+        f"  threshold_pair_spatial_thinning_kept_spatial: "
+        f"current_bbox={_format_optional_point(kept_current['bbox'])} "
+        f"current_area_fraction={_format_optional_float(kept_current['bbox_area_fraction'], digits=3)} "
+        f"current_cells={int(kept_current['occupied_cells'])} "
+        f"current_max_cell_fraction={_format_optional_float(kept_current['max_cell_fraction'], digits=2)}"
+    )
+
+    return [line_filter, line_groups, line_removed_spatial, line_kept_spatial]
+
+
+# Build landmark birth-source masks for a correspondence bundle
+def _birth_source_masks(seed: dict, landmark_ids: np.ndarray) -> dict:
+    landmark_ids = np.asarray(landmark_ids, dtype=np.int64).reshape(-1)
+    birth_sources = np.full((int(landmark_ids.size),), "unknown", dtype=object)
+
+    # Build landmark lookup
+    lm_by_id: dict[int, dict] = {}
+    landmarks = seed.get("landmarks", []) if isinstance(seed, dict) else []
+    if isinstance(landmarks, list):
+        for lm in landmarks:
+            if not isinstance(lm, dict):
+                continue
+            if "id" not in lm:
+                continue
+            lm_by_id[int(lm["id"])] = lm
+
+    # Read birth source for each correspondence
+    for j, lm_id in enumerate(landmark_ids):
+        lm = lm_by_id.get(int(lm_id), None)
+        if not isinstance(lm, dict):
+            continue
+        birth_source = lm.get("birth_source", None)
+        if isinstance(birth_source, str):
+            birth_sources[j] = str(birth_source)
+
+    return {
+        "bootstrap": birth_sources == "bootstrap",
+        "map_growth": birth_sources == "map_growth",
+        "unknown": birth_sources == "unknown",
+    }
+
+
+# Convert a diagnostic pose value into R and t
+def _diag_pose_to_rt(pose) -> tuple[np.ndarray, np.ndarray] | None:
+    try:
+        if isinstance(pose, dict):
+            if "R" not in pose or "t" not in pose:
+                return None
+            return np.asarray(pose["R"], dtype=np.float64).reshape(3, 3), np.asarray(pose["t"], dtype=np.float64).reshape(3)
+
+        if isinstance(pose, (tuple, list)) and len(pose) == 2:
+            return np.asarray(pose[0], dtype=np.float64).reshape(3, 3), np.asarray(pose[1], dtype=np.float64).reshape(3)
+
+        arr = np.asarray(pose, dtype=np.float64)
+        if arr.shape != (4, 4):
+            return None
+        return arr[:3, :3], arr[:3, 3].reshape(3)
+    except Exception:
+        return None
+
+
+# Check whether a local BA observation can project under the stored pose
+def _diag_projection_valid(K: np.ndarray, R: np.ndarray, t: np.ndarray, X_w: np.ndarray, *, eps: float) -> bool:
+    try:
+        X_c = np.asarray(R, dtype=np.float64) @ np.asarray(X_w, dtype=np.float64).reshape(3) + np.asarray(t, dtype=np.float64).reshape(3)
+    except Exception:
+        return False
+
+    if not np.isfinite(X_c).all():
+        return False
+
+    z = float(X_c[2])
+    if z <= float(eps):
+        return False
+
+    fx = float(K[0, 0])
+    fy = float(K[1, 1])
+    cx = float(K[0, 2])
+    cy = float(K[1, 2])
+    u = fx * float(X_c[0]) / z + cx
+    v = fy * float(X_c[1]) / z + cy
+
+    return bool(np.isfinite(u) and np.isfinite(v))
+
+
+# Reconstruct the landmark id set used by the successful local BA window
+def _local_ba_optimised_landmark_ids(K: np.ndarray, seed: dict, local_ba_stats: dict, *, eps: float) -> list[int]:
+    if not isinstance(seed, dict) or not isinstance(local_ba_stats, dict):
+        return []
+    if not bool(local_ba_stats.get("succeeded", False)):
+        return []
+
+    local_kfs = [int(kf) for kf in local_ba_stats.get("local_keyframes", [])]
+    if len(local_kfs) == 0:
+        return []
+
+    local_kf_set = set(int(kf) for kf in local_kfs)
+    pose_by_kf: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    for kf in local_kfs:
+        try:
+            pose_blocks = _diag_pose_to_rt(get_pose_for_kf(seed, int(kf), context="diagnostic local BA pose"))
+        except Exception:
+            pose_blocks = None
+        if pose_blocks is not None:
+            pose_by_kf[int(kf)] = pose_blocks
+
+    if len(pose_by_kf) == 0:
+        return []
+
+    ids: list[int] = []
+    landmarks = seed.get("landmarks", []) if isinstance(seed.get("landmarks", []), list) else []
+    for lm in landmarks:
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+
+        lm_id = int(lm["id"])
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            continue
+
+        valid_obs_kfs: set[int] = set()
+        obs = lm.get("obs", [])
+        if not isinstance(obs, list):
+            continue
+
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            obs_kf = int(ob.get("kf", -1))
+            if int(obs_kf) not in local_kf_set or int(obs_kf) not in pose_by_kf:
+                continue
+
+            xy = np.asarray(ob.get("xy", np.zeros((2,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+            if xy.size != 2 or not np.isfinite(xy).all():
+                continue
+
+            R, t = pose_by_kf[int(obs_kf)]
+            if _diag_projection_valid(K, R, t, X_w, eps=float(eps)):
+                valid_obs_kfs.add(int(obs_kf))
+
+        if len(valid_obs_kfs) >= 2:
+            ids.append(int(lm_id))
+
+    return sorted(ids)
+
+
+# Snapshot the installed support-only lookup before runtime rebuild
+def _refreshed_basis_assignment_snapshot(seed: dict, pose_out: dict, *, source_frame_index: int) -> dict:
+    active_kf = int(seed.get("active_keyframe_kf", -1))
+    lookup_raw = get_active_landmark_lookup(seed)
+    lookup_arr = np.asarray(lookup_raw, dtype=np.int64).reshape(-1)
+    lookup_by_feat = {
+        int(feat_idx): int(lm_id)
+        for feat_idx, lm_id in enumerate(lookup_arr)
+        if int(lm_id) >= 0
+    }
+    installed_pairs = set((int(feat_idx), int(lm_id)) for feat_idx, lm_id in lookup_by_feat.items())
+    installed_landmark_counts: dict[int, int] = {}
+    for lm_id in lookup_by_feat.values():
+        installed_landmark_counts[int(lm_id)] = int(installed_landmark_counts.get(int(lm_id), 0) + 1)
+
+    accepted_pairs: set[tuple[int, int]] = set()
+    corrs = pose_out.get("corrs", None) if isinstance(pose_out, dict) else None
+    if corrs is not None and hasattr(corrs, "landmark_ids") and hasattr(corrs, "cur_feat_idx"):
+        landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+        cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+        N = min(int(landmark_ids.size), int(cur_feat_idx.size))
+        support_mask = align_bool_mask_1d(
+            pose_out.get("pnp_inlier_mask", np.zeros((N,), dtype=bool)),
+            N,
+            name="refreshed basis support mask",
+        )
+        for i in np.flatnonzero(support_mask):
+            accepted_pairs.add((int(cur_feat_idx[int(i)]), int(landmark_ids[int(i)])))
+
+    assignment_by_feature: dict[tuple[int, int], int] = {}
+    assignment_conflicts: list[dict] = []
+    for lm in seed.get("landmarks", []):
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+        lm_id = int(lm["id"])
+        obs = lm.get("obs", [])
+        if not isinstance(obs, list):
+            continue
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            obs_kf = int(ob.get("kf", -1))
+            feat_idx = int(ob.get("feat", -1))
+            if obs_kf < 0 or feat_idx < 0:
+                continue
+            key = (int(obs_kf), int(feat_idx))
+            previous = assignment_by_feature.get(key, None)
+            if previous is not None and int(previous) != int(lm_id):
+                assignment_conflicts.append(
+                    {
+                        "kf": int(obs_kf),
+                        "feat": int(feat_idx),
+                        "landmark_ids": [int(previous), int(lm_id)],
+                    }
+                )
+                continue
+            assignment_by_feature[key] = int(lm_id)
+
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic refreshed basis landmarks")
+    installed_missing_landmark_ids = sorted(
+        int(lm_id)
+        for lm_id in set(lookup_by_feat.values())
+        if int(lm_id) not in lm_by_id
+    )
+    installed_observation_mismatches = []
+    for feat_idx, lm_id in sorted(installed_pairs):
+        observed_lm_id = assignment_by_feature.get((int(active_kf), int(feat_idx)), None)
+        if observed_lm_id is None or int(observed_lm_id) != int(lm_id):
+            installed_observation_mismatches.append(
+                {
+                    "feat": int(feat_idx),
+                    "lookup_landmark_id": int(lm_id),
+                    "observation_landmark_id": None if observed_lm_id is None else int(observed_lm_id),
+                }
+            )
+
+    return {
+        "source_frame_index": int(source_frame_index),
+        "active_keyframe_index": int(active_kf),
+        "lookup_size": int(lookup_arr.size),
+        "lookup_by_feat": lookup_by_feat,
+        "installed_pairs": installed_pairs,
+        "installed_landmark_ids": set(int(v) for v in lookup_by_feat.values()),
+        "accepted_pairs": accepted_pairs,
+        "installed_pairs_not_in_accepted_support": sorted(installed_pairs - accepted_pairs),
+        "accepted_pairs_missing_from_lookup": sorted(accepted_pairs - installed_pairs),
+        "duplicate_installed_landmark_ids": {
+            int(lm_id): int(count)
+            for lm_id, count in installed_landmark_counts.items()
+            if int(count) > 1
+        },
+        "installed_missing_landmark_ids": installed_missing_landmark_ids,
+        "installed_observation_mismatches": installed_observation_mismatches,
+        "observation_assignment_conflicts": assignment_conflicts,
+    }
+
+
+# Audit one landmark against canonical poses
+def _landmark_geometry_history(seed: dict, lm: dict, K: np.ndarray, *, eps: float = 1e-12) -> dict:
+    X_w = np.asarray(lm.get("X_w", None), dtype=np.float64).reshape(-1)
+    observations = lm.get("obs", [])
+    observation_rows: list[dict] = []
+    valid_errors_px: list[float] = []
+    valid_keyframes: list[int] = []
+
+    if not isinstance(observations, list):
+        observations = []
+
+    for observation_index, ob in enumerate(observations):
+        row = {
+            "observation_index": int(observation_index),
+            "kf": None,
+            "feat": None,
+            "xy": None,
+            "valid": False,
+            "reason": None,
+            "depth": None,
+            "reprojection_error_px": None,
+        }
+        if not isinstance(ob, dict):
+            row["reason"] = "invalid_observation_record"
+            observation_rows.append(row)
+            continue
+
+        obs_kf = int(ob.get("kf", -1))
+        obs_feat = int(ob.get("feat", -1))
+        xy = np.asarray(ob.get("xy", None), dtype=np.float64).reshape(-1)
+        row["kf"] = int(obs_kf)
+        row["feat"] = int(obs_feat)
+        row["xy"] = None if xy.size != 2 else [float(v) for v in xy]
+
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            row["reason"] = "invalid_landmark_position"
+            observation_rows.append(row)
+            continue
+        if obs_kf < 0 or obs_feat < 0 or xy.size != 2 or not np.isfinite(xy).all():
+            row["reason"] = "invalid_observation_values"
+            observation_rows.append(row)
+            continue
+
+        try:
+            pose = get_pose_for_kf(seed, int(obs_kf), context="landmark geometry history pose")
+            pose_blocks = _diag_pose_to_rt(pose)
+        except Exception:
+            pose_blocks = None
+        if pose_blocks is None:
+            row["reason"] = "canonical_pose_unavailable"
+            observation_rows.append(row)
+            continue
+
+        R, t = pose_blocks
+        X_c = np.asarray(R, dtype=np.float64) @ X_w.reshape(3) + np.asarray(t, dtype=np.float64).reshape(3)
+        if not np.isfinite(X_c).all():
+            row["reason"] = "nonfinite_camera_point"
+            observation_rows.append(row)
+            continue
+
+        depth = float(X_c[2])
+        row["depth"] = float(depth)
+        if depth <= float(eps):
+            row["reason"] = "non_positive_depth"
+            observation_rows.append(row)
+            continue
+
+        err_sq = np.asarray(
+            reprojection_errors_sq(
+                K,
+                R,
+                t,
+                X_w.reshape(3, 1),
+                xy.reshape(2, 1),
+            ),
+            dtype=np.float64,
+        ).reshape(-1)
+        if err_sq.size != 1 or not np.isfinite(err_sq[0]) or float(err_sq[0]) < 0.0:
+            row["reason"] = "invalid_reprojection"
+            observation_rows.append(row)
+            continue
+
+        error_px = float(np.sqrt(err_sq[0]))
+        row.update(
+            {
+                "valid": True,
+                "reason": None,
+                "reprojection_error_px": float(error_px),
+            }
+        )
+        observation_rows.append(row)
+        valid_errors_px.append(float(error_px))
+        valid_keyframes.append(int(obs_kf))
+
+    summary = _reprojection_error_summary(np.asarray(valid_errors_px, dtype=np.float64))
+    median_px = summary.get("median", None)
+    p90_px = summary.get("p90", None)
+    max_px = summary.get("max", None)
+    consistent = (
+        int(summary["count"]) >= 2
+        and median_px is not None
+        and p90_px is not None
+        and max_px is not None
+        and float(median_px) <= 3.0
+        and float(p90_px) <= 8.0
+        and float(max_px) <= 12.0
+    )
+
+    return {
+        "X_w": None if X_w.size != 3 else [float(v) for v in X_w],
+        "observation_count_total": int(len(observation_rows)),
+        "valid_observation_count": int(len(valid_errors_px)),
+        "invalid_observation_count": int(len(observation_rows) - len(valid_errors_px)),
+        "first_valid_observation_kf": None if len(valid_keyframes) == 0 else int(min(valid_keyframes)),
+        "last_valid_observation_kf": None if len(valid_keyframes) == 0 else int(max(valid_keyframes)),
+        "valid_observation_residuals_px": [float(v) for v in valid_errors_px],
+        "reprojection_error_px": summary,
+        "geometry_status": "consistent" if bool(consistent) else "drifting",
+        "observations": observation_rows,
+    }
+
+
+# Summarise pooled observation residuals by landmark metadata
+def _geometry_history_group_summary(rows: list[dict], group_key: str) -> dict:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        group_value = row.get(group_key, None)
+        group_name = "None" if group_value is None else str(group_value)
+        groups.setdefault(group_name, []).append(row)
+
+    out: dict[str, dict] = {}
+    for group_name, group_rows in sorted(groups.items()):
+        errors_px: list[float] = []
+        for row in group_rows:
+            errors_px.extend(float(v) for v in row.get("valid_observation_residuals_px", []))
+
+        out[str(group_name)] = {
+            "count": int(len(group_rows)),
+            "landmark_ids": [int(row["linked_landmark_id"]) for row in group_rows],
+            "valid_observation_count": int(len(errors_px)),
+            "consistent_count": int(sum(1 for row in group_rows if row.get("geometry_status") == "consistent")),
+            "drifting_count": int(sum(1 for row in group_rows if row.get("geometry_status") == "drifting")),
+            "reprojection_error_px": _reprojection_error_summary(
+                np.asarray(errors_px, dtype=np.float64)
+            ),
+        }
+
+    return out
+
+
+# Audit live correspondences against the preserved refreshed basis
+def _frame_assignment_audit(
+    seed: dict,
+    basis_snapshot: dict,
+    pose_out: dict,
+    K: np.ndarray,
+    *,
+    frame_index: int,
+    latest_ba_record: dict | None,
+) -> dict:
+    corrs = pose_out.get("corrs", None) if isinstance(pose_out, dict) else None
+    if corrs is None:
+        return {
+            "ok": False,
+            "reason": "missing_live_correspondences",
+            "frame_index": int(frame_index),
+        }
+
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    kf_feat_idx = np.asarray(corrs.kf_feat_idx, dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(corrs.cur_feat_idx, dtype=np.int64).reshape(-1)
+    N = int(landmark_ids.size)
+    if int(kf_feat_idx.size) != N or int(cur_feat_idx.size) != N:
+        return {
+            "ok": False,
+            "reason": "live_correspondence_length_mismatch",
+            "frame_index": int(frame_index),
+        }
+
+    active_kf = int(basis_snapshot["active_keyframe_index"])
+    lookup_by_feat = dict(basis_snapshot["lookup_by_feat"])
+    installed_landmark_ids = set(int(v) for v in basis_snapshot["installed_landmark_ids"])
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic frame assignment landmarks")
+    feats = get_active_keyframe_features(seed)
+    kps_xy = np.asarray(feats.kps_xy, dtype=np.float64)
+    R_basis, t_basis = get_pose_for_kf(seed, active_kf, context="assignment audit basis pose")
+
+    live_landmark_counts: dict[int, int] = {}
+    live_kf_feature_counts: dict[int, int] = {}
+    live_cur_feature_counts: dict[int, int] = {}
+    birth_source_counts: dict[str, int] = {}
+    birth_kf_counts: dict[int, int] = {}
+    rows: list[dict] = []
+    reprojection_errors_px: list[float] = []
+    feature_observation_deltas_px: list[float] = []
+    latest_ba_ids = set()
+    latest_ba_frame_index = None
+    latest_ba_active_keyframe = None
+    if isinstance(latest_ba_record, dict):
+        latest_ba_ids = set(int(v) for v in latest_ba_record.get("landmark_ids", []))
+        latest_ba_frame_index = int(latest_ba_record.get("frame_index", -1))
+        latest_ba_active_keyframe = int(latest_ba_record.get("active_keyframe", -1))
+
+    for i in range(N):
+        lm_id = int(landmark_ids[i])
+        feat_idx = int(kf_feat_idx[i])
+        current_feat_idx = int(cur_feat_idx[i])
+        live_landmark_counts[lm_id] = int(live_landmark_counts.get(lm_id, 0) + 1)
+        live_kf_feature_counts[feat_idx] = int(live_kf_feature_counts.get(feat_idx, 0) + 1)
+        live_cur_feature_counts[current_feat_idx] = int(live_cur_feature_counts.get(current_feat_idx, 0) + 1)
+
+        basis_lm_id = lookup_by_feat.get(int(feat_idx), None)
+        feature_mapped = basis_lm_id is not None
+        exact_basis_assignment = feature_mapped and int(basis_lm_id) == int(lm_id)
+        lm = lm_by_id.get(int(lm_id), None)
+        birth_source = "missing"
+        birth_kf = None
+        observation_count = 0
+        has_exact_basis_observation = False
+        basis_observation_xy = None
+        feature_observation_delta_px = None
+        basis_reprojection_error_px = None
+        history = {
+            "X_w": None,
+            "observation_count_total": 0,
+            "valid_observation_count": 0,
+            "invalid_observation_count": 0,
+            "first_valid_observation_kf": None,
+            "last_valid_observation_kf": None,
+            "valid_observation_residuals_px": [],
+            "reprojection_error_px": _reprojection_error_summary(np.zeros((0,), dtype=np.float64)),
+            "geometry_status": "drifting",
+            "observations": [],
+        }
+
+        if isinstance(lm, dict):
+            birth_source = str(lm.get("birth_source", "unknown"))
+            birth_kf_raw = lm.get("birth_kf", None)
+            birth_kf = None if birth_kf_raw is None else int(birth_kf_raw)
+            observation_count = count_valid_landmark_observations(
+                lm,
+                context=f"assignment audit landmark {int(lm_id)}",
+            )
+            obs = lm.get("obs", [])
+            if isinstance(obs, list):
+                for ob in obs:
+                    if not isinstance(ob, dict):
+                        continue
+                    if int(ob.get("kf", -1)) != int(active_kf):
+                        continue
+                    if int(ob.get("feat", -1)) != int(feat_idx):
+                        continue
+                    basis_observation_xy = np.asarray(ob.get("xy", None), dtype=np.float64).reshape(2)
+                    has_exact_basis_observation = True
+                    break
+
+            if 0 <= int(feat_idx) < int(kps_xy.shape[0]):
+                feature_xy = np.asarray(kps_xy[int(feat_idx), :2], dtype=np.float64).reshape(2)
+                if basis_observation_xy is not None:
+                    feature_observation_delta_px = float(np.linalg.norm(feature_xy - basis_observation_xy))
+                    feature_observation_deltas_px.append(float(feature_observation_delta_px))
+
+                X_w = np.asarray(lm.get("X_w", None), dtype=np.float64).reshape(-1)
+                if X_w.size == 3 and np.isfinite(X_w).all():
+                    err_sq = np.asarray(
+                        reprojection_errors_sq(
+                            K,
+                            R_basis,
+                            t_basis,
+                            X_w.reshape(3, 1),
+                            feature_xy.reshape(2, 1),
+                        ),
+                        dtype=np.float64,
+                    ).reshape(-1)
+                    if err_sq.size == 1 and np.isfinite(err_sq[0]) and float(err_sq[0]) >= 0.0:
+                        basis_reprojection_error_px = float(np.sqrt(err_sq[0]))
+                        reprojection_errors_px.append(float(basis_reprojection_error_px))
+
+            history = _landmark_geometry_history(seed, lm, K)
+
+        birth_source_counts[birth_source] = int(birth_source_counts.get(birth_source, 0) + 1)
+        if birth_kf is not None:
+            birth_kf_counts[int(birth_kf)] = int(birth_kf_counts.get(int(birth_kf), 0) + 1)
+
+        observation_count_bin = "0-3"
+        if int(history["valid_observation_count"]) >= 8:
+            observation_count_bin = "8+"
+        elif int(history["valid_observation_count"]) >= 4:
+            observation_count_bin = "4-7"
+
+        rows.append(
+            {
+                "correspondence_index": int(i),
+                "keyframe_feature_index": int(feat_idx),
+                "current_feature_index": int(current_feat_idx),
+                "linked_landmark_id": int(lm_id),
+                "birth_source": birth_source,
+                "birth_kf": birth_kf,
+                "observation_count": int(observation_count),
+                "landmark_in_refreshed_support_basis": bool(int(lm_id) in installed_landmark_ids),
+                "feature_mapped_in_refreshed_basis": bool(feature_mapped),
+                "refreshed_basis_landmark_id": None if basis_lm_id is None else int(basis_lm_id),
+                "exact_refreshed_basis_assignment": bool(exact_basis_assignment),
+                "has_exact_frame18_observation": bool(has_exact_basis_observation),
+                "feature_observation_delta_px": feature_observation_delta_px,
+                "frame18_basis_reprojection_error_px": basis_reprojection_error_px,
+                "in_latest_ba": bool(int(lm_id) in latest_ba_ids),
+                "observation_count_bin": observation_count_bin,
+                **history,
+            }
+        )
+
+    live_pairs = set((int(kf_feat_idx[i]), int(landmark_ids[i])) for i in range(N))
+    exact_rows = int(sum(1 for row in rows if bool(row["exact_refreshed_basis_assignment"])))
+    mapped_rows = int(sum(1 for row in rows if bool(row["feature_mapped_in_refreshed_basis"])))
+    basis_landmark_rows = int(sum(1 for row in rows if bool(row["landmark_in_refreshed_support_basis"])))
+    exact_observation_rows = int(sum(1 for row in rows if bool(row["has_exact_frame18_observation"])))
+    all_history_errors_px = [
+        float(error_px)
+        for row in rows
+        for error_px in row.get("valid_observation_residuals_px", [])
+    ]
+
+    return {
+        "ok": True,
+        "reason": None,
+        "frame_index": int(frame_index),
+        "basis_source_frame_index": int(basis_snapshot["source_frame_index"]),
+        "active_keyframe_index": int(active_kf),
+        "n_live_correspondences": int(N),
+        "n_unique_live_landmarks": int(len(live_landmark_counts)),
+        "n_unique_live_keyframe_features": int(len(live_kf_feature_counts)),
+        "n_unique_live_current_features": int(len(live_cur_feature_counts)),
+        "n_live_features_mapped_in_refreshed_basis": int(mapped_rows),
+        "n_live_landmarks_in_refreshed_support_basis": int(basis_landmark_rows),
+        "n_exact_refreshed_basis_assignments": int(exact_rows),
+        "n_exact_frame18_observations": int(exact_observation_rows),
+        "live_pairs_not_in_refreshed_basis": [
+            [int(feat_idx), int(lm_id)]
+            for feat_idx, lm_id in sorted(live_pairs - basis_snapshot["installed_pairs"])
+        ],
+        "duplicate_live_landmark_ids": {
+            str(lm_id): int(count)
+            for lm_id, count in live_landmark_counts.items()
+            if int(count) > 1
+        },
+        "duplicate_live_keyframe_features": {
+            str(feat_idx): int(count)
+            for feat_idx, count in live_kf_feature_counts.items()
+            if int(count) > 1
+        },
+        "duplicate_live_current_features": {
+            str(feat_idx): int(count)
+            for feat_idx, count in live_cur_feature_counts.items()
+            if int(count) > 1
+        },
+        "birth_source_counts": birth_source_counts,
+        "birth_kf_counts": {
+            str(kf): int(count)
+            for kf, count in sorted(birth_kf_counts.items())
+        },
+        "frame18_basis_reprojection_error_px": _reprojection_error_summary(
+            np.asarray(reprojection_errors_px, dtype=np.float64)
+        ),
+        "frame18_feature_observation_delta_px": _reprojection_error_summary(
+            np.asarray(feature_observation_deltas_px, dtype=np.float64)
+        ),
+        "geometry_history": {
+            "status_rule": "consistent when median <= 3 px, p90 <= 8 px, and max <= 12 px over at least two valid observations",
+            "latest_ba_frame_index": latest_ba_frame_index,
+            "latest_ba_active_keyframe": latest_ba_active_keyframe,
+            "latest_ba_landmark_count": int(len(latest_ba_ids)),
+            "live_landmarks_inside_latest_ba": int(sum(1 for row in rows if bool(row["in_latest_ba"]))),
+            "live_landmarks_outside_latest_ba": int(sum(1 for row in rows if not bool(row["in_latest_ba"]))),
+            "consistent_landmark_count": int(sum(1 for row in rows if row["geometry_status"] == "consistent")),
+            "drifting_landmark_count": int(sum(1 for row in rows if row["geometry_status"] == "drifting")),
+            "all_valid_observations": {
+                "count": int(len(all_history_errors_px)),
+                "reprojection_error_px": _reprojection_error_summary(
+                    np.asarray(all_history_errors_px, dtype=np.float64)
+                ),
+            },
+            "by_birth_source": _geometry_history_group_summary(rows, "birth_source"),
+            "by_birth_kf": _geometry_history_group_summary(rows, "birth_kf"),
+            "by_latest_ba_participation": _geometry_history_group_summary(rows, "in_latest_ba"),
+            "by_observation_count_bin": _geometry_history_group_summary(rows, "observation_count_bin"),
+        },
+        "refreshed_basis": {
+            "lookup_size": int(basis_snapshot["lookup_size"]),
+            "n_installed_pairs": int(len(basis_snapshot["installed_pairs"])),
+            "n_accepted_support_pairs": int(len(basis_snapshot["accepted_pairs"])),
+            "installed_pairs_not_in_accepted_support": [
+                [int(feat_idx), int(lm_id)]
+                for feat_idx, lm_id in basis_snapshot["installed_pairs_not_in_accepted_support"]
+            ],
+            "accepted_pairs_missing_from_lookup": [
+                [int(feat_idx), int(lm_id)]
+                for feat_idx, lm_id in basis_snapshot["accepted_pairs_missing_from_lookup"]
+            ],
+            "duplicate_installed_landmark_ids": {
+                str(lm_id): int(count)
+                for lm_id, count in basis_snapshot["duplicate_installed_landmark_ids"].items()
+            },
+            "installed_missing_landmark_ids": [
+                int(lm_id)
+                for lm_id in basis_snapshot["installed_missing_landmark_ids"]
+            ],
+            "installed_observation_mismatches": basis_snapshot["installed_observation_mismatches"],
+            "observation_assignment_conflicts": basis_snapshot["observation_assignment_conflicts"],
+        },
+        "rows": rows,
+    }
+
+
+# Build the active keyframe feature-to-landmark lookup from observations
+def _active_landmark_lookup_from_observations(seed: dict) -> dict[int, int]:
+    lookup: dict[int, int] = {}
+    if not isinstance(seed, dict):
+        return lookup
+
+    active_kf = int(seed.get("active_keyframe_kf", -1))
+    if active_kf < 0:
+        return lookup
+
+    for lm in seed.get("landmarks", []):
+        if not isinstance(lm, dict) or "id" not in lm:
+            continue
+        lm_id = int(lm["id"])
+        obs = lm.get("obs", [])
+        if not isinstance(obs, list):
+            continue
+
+        for ob in obs:
+            if not isinstance(ob, dict):
+                continue
+            if int(ob.get("kf", -1)) != int(active_kf):
+                continue
+            feat = int(ob.get("feat", -1))
+            if feat < 0:
+                continue
+            if feat not in lookup:
+                lookup[int(feat)] = int(lm_id)
+
+    return lookup
+
+
+# Count BA landmarks seen in current tracked active-keyframe matches
+def _tracked_landmark_ids_from_active_lookup(seed: dict, track_out: dict) -> set[int]:
+    if not isinstance(track_out, dict):
+        return set()
+
+    lookup = _active_landmark_lookup_from_observations(seed)
+    kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    N = min(int(kf_feat_idx.size), int(cur_feat_idx.size))
+
+    ids: set[int] = set()
+    for j in range(N):
+        feat = int(kf_feat_idx[j])
+        cur_feat = int(cur_feat_idx[j])
+        if feat < 0 or cur_feat < 0:
+            continue
+        lm_id = lookup.get(int(feat), -1)
+        if int(lm_id) >= 0:
+            ids.add(int(lm_id))
+
+    return ids
+
+
+# Count raw mapped support before pose-eligibility observation gates
+def _raw_mapped_support_landmark_ids(seed: dict, track_out: dict) -> set[int]:
+    if not isinstance(track_out, dict):
+        return set()
+
+    lookup = _active_landmark_lookup_from_observations(seed)
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic raw mapped support landmarks")
+    kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
+    N = min(int(kf_feat_idx.size), int(cur_feat_idx.size), int(xy_cur.shape[0]) if xy_cur.ndim == 2 else 0)
+
+    ids: set[int] = set()
+    for j in range(N):
+        feat = int(kf_feat_idx[j])
+        cur_feat = int(cur_feat_idx[j])
+        if feat < 0 or cur_feat < 0:
+            continue
+
+        lm_id = int(lookup.get(int(feat), -1))
+        if lm_id < 0:
+            continue
+
+        lm = lm_by_id.get(int(lm_id), None)
+        if lm is None:
+            continue
+
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            continue
+        if not np.isfinite(xy_cur[j, :2]).all():
+            continue
+
+        ids.add(int(lm_id))
+
+    return ids
+
+
+# Count ids whose landmark is in the latest local BA set
+def _count_ids_inside_set(ids: list[int], id_set: set[int]) -> int:
+    return int(sum(1 for lm_id in ids if int(lm_id) in id_set))
+
+
+# Check landmark birth source without importing private production helpers
+def _diag_landmark_bootstrap_born(lm: dict) -> bool:
+    return bool(isinstance(lm, dict) and lm.get("birth_source", None) == "bootstrap")
+
+
+# Read pose-support landmark ids as correspondence lists
+def _pose_support_landmark_id_lists(pose_out: dict) -> tuple[list[int], list[int]]:
+    pose_ids: list[int] = []
+    inlier_ids: list[int] = []
+    if not isinstance(pose_out, dict):
+        return pose_ids, inlier_ids
+
+    corrs = pose_out.get("corrs", None)
+    if corrs is None or not hasattr(corrs, "landmark_ids"):
+        return pose_ids, inlier_ids
+
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    pose_ids = [int(v) for v in landmark_ids]
+    pnp_inlier_mask = align_bool_mask_1d(
+        pose_out.get("pnp_inlier_mask", np.zeros((int(landmark_ids.size),), dtype=bool)),
+        int(landmark_ids.size),
+        name="support funnel pnp_inlier_mask",
+    )
+    inlier_ids = [int(v) for v in landmark_ids[pnp_inlier_mask]]
+    return pose_ids, inlier_ids
+
+
+# Build a detailed support funnel for one tracked frame
+def _support_funnel_diagnostic(
+    seed: dict,
+    track_out: dict,
+    pose_out: dict,
+    *,
+    frame_index: int,
+    reference_keyframe_index: int,
+    min_landmark_observations: int,
+    allow_bootstrap_landmarks_for_pose: bool,
+    min_post_bootstrap_observations_for_pose: int,
+    latest_ba_record: dict | None,
+) -> dict:
+    lookup = _active_landmark_lookup_from_observations(seed)
+    lm_by_id = build_landmark_id_index(seed, context="diagnostic support funnel landmarks")
+    ba_ids = set()
+    latest_ba_frame_index = None
+    latest_ba_active_keyframe = None
+    if isinstance(latest_ba_record, dict):
+        latest_ba_frame_index = int(latest_ba_record.get("frame_index", -1))
+        latest_ba_active_keyframe = int(latest_ba_record.get("active_keyframe", -1))
+        ba_ids = set(int(v) for v in latest_ba_record.get("landmark_ids", []))
+
+    stats = track_out.get("stats", {}) if isinstance(track_out, dict) else {}
+    kf_feat_idx = np.asarray(track_out.get("kf_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    cur_feat_idx = np.asarray(track_out.get("cur_feat_idx", np.zeros((0,), dtype=np.int64)), dtype=np.int64).reshape(-1)
+    xy_cur = np.asarray(track_out.get("xy_cur", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
+    xy_kf = np.asarray(track_out.get("xy_kf", np.zeros((0, 2), dtype=np.float64)), dtype=np.float64)
+    N = min(
+        int(kf_feat_idx.size),
+        int(cur_feat_idx.size),
+        int(xy_cur.shape[0]) if xy_cur.ndim == 2 else 0,
+        int(xy_kf.shape[0]) if xy_kf.ndim == 2 else 0,
+    )
+
+    mapped_ids: list[int] = []
+    valid_ids: list[int] = []
+    obs_pass_ids: list[int] = []
+    n_invalid_kf_feature = 0
+    n_unmapped_by_lookup = 0
+    n_missing_landmark = 0
+    n_invalid_x_w = 0
+    n_invalid_image_points = 0
+    n_observation_gated_out = 0
+    n_observation_gated_out_bootstrap = 0
+    n_observation_gated_out_post_bootstrap = 0
+    n_obs_pass_bootstrap = 0
+    n_obs_pass_post_bootstrap = 0
+
+    for j in range(N):
+        feat = int(kf_feat_idx[j])
+        if feat < 0:
+            n_invalid_kf_feature += 1
+            continue
+
+        lm_id = int(lookup.get(int(feat), -1))
+        if lm_id < 0:
+            n_unmapped_by_lookup += 1
+            continue
+
+        mapped_ids.append(int(lm_id))
+        lm = lm_by_id.get(int(lm_id), None)
+        if lm is None:
+            n_missing_landmark += 1
+            continue
+
+        X_w = np.asarray(lm.get("X_w", np.zeros((3,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+        if X_w.size != 3 or not np.isfinite(X_w).all():
+            n_invalid_x_w += 1
+            continue
+
+        if not np.isfinite(xy_cur[j, :2]).all() or not np.isfinite(xy_kf[j, :2]).all():
+            n_invalid_image_points += 1
+            continue
+
+        valid_ids.append(int(lm_id))
+        bootstrap_born = _diag_landmark_bootstrap_born(lm)
+        n_obs = 0
+        obs = lm.get("obs", [])
+        if isinstance(obs, list):
+            for ob in obs:
+                if not isinstance(ob, dict):
+                    continue
+                if int(ob.get("kf", -1)) < 0:
+                    continue
+                if int(ob.get("feat", -1)) < 0:
+                    continue
+                xy = np.asarray(ob.get("xy", np.zeros((2,), dtype=np.float64)), dtype=np.float64).reshape(-1)
+                if xy.size == 2 and np.isfinite(xy).all():
+                    n_obs += 1
+
+        if bootstrap_born:
+            if not bool(allow_bootstrap_landmarks_for_pose):
+                n_observation_gated_out += 1
+                n_observation_gated_out_bootstrap += 1
+                continue
+            min_obs_required = int(min_landmark_observations)
+        else:
+            min_obs_required = max(
+                int(min_landmark_observations),
+                int(min_post_bootstrap_observations_for_pose),
+            )
+
+        if int(n_obs) < int(min_obs_required):
+            n_observation_gated_out += 1
+            if bootstrap_born:
+                n_observation_gated_out_bootstrap += 1
+            else:
+                n_observation_gated_out_post_bootstrap += 1
+            continue
+
+        obs_pass_ids.append(int(lm_id))
+        if bootstrap_born:
+            n_obs_pass_bootstrap += 1
+        else:
+            n_obs_pass_post_bootstrap += 1
+
+    pose_ids_list, inlier_ids_list = _pose_support_landmark_id_lists(pose_out)
+    mapped_inside = _count_ids_inside_set(mapped_ids, ba_ids)
+    valid_inside = _count_ids_inside_set(valid_ids, ba_ids)
+    obs_inside = _count_ids_inside_set(obs_pass_ids, ba_ids)
+    pose_inside = _count_ids_inside_set(pose_ids_list, ba_ids)
+    inlier_inside = _count_ids_inside_set(inlier_ids_list, ba_ids)
+
+    return {
+        "event": "support_funnel",
+        "frame_index": int(frame_index),
+        "reference_keyframe_index": int(reference_keyframe_index),
+        "active_keyframe_index": int(seed.get("active_keyframe_kf", -1)) if isinstance(seed, dict) else -1,
+        "raw_tracked_pairs": int(stats.get("n_matches", N)),
+        "track_inliers": int(stats.get("n_inliers", N)),
+        "tracked_inlier_pairs": int(N),
+        "invalid_keyframe_feature_indices": int(n_invalid_kf_feature),
+        "unmapped_by_active_lookup": int(n_unmapped_by_lookup),
+        "mapped_by_active_lookup": int(len(mapped_ids)),
+        "missing_landmark_records": int(n_missing_landmark),
+        "invalid_X_w": int(n_invalid_x_w),
+        "invalid_image_points": int(n_invalid_image_points),
+        "valid_landmarks_X_w": int(len(valid_ids)),
+        "observation_gated_out": int(n_observation_gated_out),
+        "observation_gated_out_bootstrap_born": int(n_observation_gated_out_bootstrap),
+        "observation_gated_out_post_bootstrap_born": int(n_observation_gated_out_post_bootstrap),
+        "observation_gated_pass": int(len(obs_pass_ids)),
+        "observation_gated_pass_bootstrap_born": int(n_obs_pass_bootstrap),
+        "observation_gated_pass_post_bootstrap_born": int(n_obs_pass_post_bootstrap),
+        "final_pnp_correspondences": int(len(pose_ids_list)),
+        "pnp_inliers": int(len(inlier_ids_list)),
+        "latest_ba_frame_index": latest_ba_frame_index,
+        "latest_ba_active_keyframe": latest_ba_active_keyframe,
+        "latest_ba_optimised_landmarks": int(len(ba_ids)),
+        "mapped_inside_latest_ba": int(mapped_inside),
+        "mapped_outside_latest_ba": int(len(mapped_ids) - mapped_inside),
+        "valid_inside_latest_ba": int(valid_inside),
+        "valid_outside_latest_ba": int(len(valid_ids) - valid_inside),
+        "observation_pass_inside_latest_ba": int(obs_inside),
+        "observation_pass_outside_latest_ba": int(len(obs_pass_ids) - obs_inside),
+        "final_pnp_inside_latest_ba": int(pose_inside),
+        "final_pnp_outside_latest_ba": int(len(pose_ids_list) - pose_inside),
+        "pnp_inliers_inside_latest_ba": int(inlier_inside),
+        "pnp_inliers_outside_latest_ba": int(len(inlier_ids_list) - inlier_inside),
+        "lost_valid_to_observation": int(len(valid_ids) - len(obs_pass_ids)),
+        "lost_valid_to_observation_inside_latest_ba": int(valid_inside - obs_inside),
+        "lost_valid_to_observation_outside_latest_ba": int((len(valid_ids) - valid_inside) - (len(obs_pass_ids) - obs_inside)),
+        "lost_observation_to_final_pnp": int(len(obs_pass_ids) - len(pose_ids_list)),
+        "lost_observation_to_final_pnp_inside_latest_ba": int(obs_inside - pose_inside),
+        "lost_observation_to_final_pnp_outside_latest_ba": int((len(obs_pass_ids) - obs_inside) - (len(pose_ids_list) - pose_inside)),
+        "lost_final_pnp_to_inliers": int(len(pose_ids_list) - len(inlier_ids_list)),
+        "lost_final_pnp_to_inliers_inside_latest_ba": int(pose_inside - inlier_inside),
+        "lost_final_pnp_to_inliers_outside_latest_ba": int((len(pose_ids_list) - pose_inside) - (len(inlier_ids_list) - inlier_inside)),
+    }
+
+
+# Read pose-eligible and accepted PnP inlier landmark ids
+def _pose_support_landmark_id_sets(pose_out: dict) -> tuple[set[int], set[int]]:
+    if not isinstance(pose_out, dict):
+        return set(), set()
+
+    corrs = pose_out.get("corrs", None)
+    if corrs is None or not hasattr(corrs, "landmark_ids"):
+        return set(), set()
+
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    N = int(landmark_ids.size)
+    if N == 0:
+        return set(), set()
+
+    inlier_mask = align_bool_mask_1d(
+        pose_out.get("pnp_inlier_mask", np.zeros((N,), dtype=bool)),
+        N,
+        name="diagnostic pnp_inlier_mask",
+    )
+    if inlier_mask is None:
+        inlier_mask = np.zeros((N,), dtype=bool)
+
+    pose_ids = set(int(v) for v in landmark_ids)
+    inlier_ids = set(int(v) for v in landmark_ids[inlier_mask])
+
+    return pose_ids, inlier_ids
+
+
+# Build one downstream propagation row for a prior successful BA step
+def _local_ba_propagation_row(
+    ba_record: dict,
+    seed_before: dict,
+    frontend_out: dict,
+    frame_context: dict,
+    *,
+    seen_ids: set[int] | None = None,
+    mapped_ids: set[int] | None = None,
+) -> dict:
+    ba_ids = set(int(v) for v in ba_record.get("landmark_ids", []))
+    track_out = frontend_out.get("track_out", {}) if isinstance(frontend_out, dict) else {}
+    pose_out = frontend_out.get("pose_out", {}) if isinstance(frontend_out, dict) else {}
+
+    if seen_ids is None:
+        seen_ids = _tracked_landmark_ids_from_active_lookup(seed_before, track_out)
+    if mapped_ids is None:
+        mapped_ids = _raw_mapped_support_landmark_ids(seed_before, track_out)
+    pose_ids, inlier_ids = _pose_support_landmark_id_sets(pose_out)
+
+    ba_seen = ba_ids & seen_ids
+    ba_mapped = ba_ids & mapped_ids
+    ba_pose = ba_ids & pose_ids
+    ba_inlier = ba_ids & inlier_ids
+
+    pose_total = int(len(pose_ids))
+    pose_inside = int(len(ba_pose))
+    pose_outside = int(max(0, pose_total - pose_inside))
+    failure_support_location = None
+    if not bool(frame_context.get("pipeline_ok", False)):
+        if pose_total <= 0:
+            failure_support_location = "no_pose_eligible_support"
+        elif pose_inside > pose_outside:
+            failure_support_location = "mostly_inside_recent_ba"
+        else:
+            failure_support_location = "mostly_outside_recent_ba"
+
+    return {
+        "event": "local_ba_propagation",
+        "ba_frame_index": int(ba_record["frame_index"]),
+        "frame_index": int(frame_context["frame_index"]),
+        "frame_offset": int(frame_context["frame_index"]) - int(ba_record["frame_index"]),
+        "ba_active_keyframe": int(ba_record.get("active_keyframe", -1)),
+        "ba_n_optimised_landmarks": int(len(ba_ids)),
+        "n_seen_again": int(len(ba_seen)),
+        "n_mapped_support": int(len(ba_mapped)),
+        "n_pose_eligible_support": int(len(ba_pose)),
+        "n_pnp_inlier_support": int(len(ba_inlier)),
+        "n_seen_again_total": int(len(seen_ids)),
+        "n_mapped_support_total": int(len(mapped_ids)),
+        "n_pose_eligible_total": int(len(pose_ids)),
+        "n_pnp_inlier_total": int(len(inlier_ids)),
+        "pipeline_ok": bool(frame_context.get("pipeline_ok", False)),
+        "pipeline_reason": frame_context.get("pipeline_reason", None),
+        "n_track_inliers": int(frame_context.get("n_track_inliers", 0)),
+        "n_pnp_corr": int(frame_context.get("pipeline_n_pnp_corr", frame_context.get("n_pnp_corr", 0))),
+        "n_pnp_inliers": int(frame_context.get("pipeline_n_pnp_inliers", frame_context.get("n_pnp_inliers", 0))),
+        "rescue_attempted": bool(frame_context.get("rescue_attempted", False)),
+        "rescue_succeeded": bool(frame_context.get("rescue_succeeded", False)),
+        "failure_pose_support_inside_recent_ba": int(pose_inside),
+        "failure_pose_support_outside_recent_ba": int(pose_outside),
+        "failure_support_location": failure_support_location,
+    }
+
+
+# Compare threshold-pair PnP poses at 8 px and 12 px
+def _compare_threshold_pair_poses(seed: dict, corrs, K: np.ndarray, *, pnp_cfg: dict, pose_pair: dict | None = None) -> dict:
+    N = int(np.asarray(corrs.X_w, dtype=np.float64).shape[1])
+    all_mask = np.ones((N,), dtype=bool)
+
+    out = {
+        "ok": False,
+        "reason": None,
+        "n_pose_eligible": int(N),
+        "pose_8px_ok": False,
+        "pose_12px_ok": False,
+        "rotation_diff_deg": None,
+        "translation_direction_delta_deg": None,
+        "camera_centre_direction_delta_deg": None,
+        "inliers_8px": 0,
+        "inliers_12px": 0,
+        "inlier_overlap": 0,
+        "inlier_iou": None,
+        "inlier_overlap_over_8px": None,
+        "inlier_overlap_over_12px": None,
+        "inliers_unique_to_12px": 0,
+        "threshold_stability_classification": "unavailable",
+        "threshold_stability_unstable": False,
+        "threshold_stability_reasons": [],
+        "threshold_stability_supports_disjoint": False,
+        "threshold_stability_support_iou_low": False,
+        "threshold_stability_translation_direction_disagrees": False,
+        "threshold_stability_camera_centre_direction_disagrees": False,
+        "component_8px": {},
+        "component_12px": {},
+        "component_gate_8px_rejected": False,
+        "component_gate_12px_rejected": False,
+        "component_gate_8px_reason": None,
+        "component_gate_12px_reason": None,
+        "reprojection_all_8px": _pose_reprojection_block(corrs, K, None, None, all_mask, eps=float(pnp_cfg["eps"])),
+        "reprojection_all_12px": _pose_reprojection_block(corrs, K, None, None, all_mask, eps=float(pnp_cfg["eps"])),
+        "unique_12px": {
+            "count": 0,
+            "birth_source": {"bootstrap": 0, "map_growth": 0, "unknown": 0},
+            "reprojection_under_8px": _pose_reprojection_block(corrs, K, None, None, np.zeros((N,), dtype=bool), eps=float(pnp_cfg["eps"])),
+            "reprojection_under_12px": _pose_reprojection_block(corrs, K, None, None, np.zeros((N,), dtype=bool), eps=float(pnp_cfg["eps"])),
+        },
+    }
+
+    # Run both PnP thresholds on the same correspondence bundle
+    if pose_pair is None:
+        pose_pair = _threshold_pair_pose_pair(corrs, K, pnp_cfg=pnp_cfg)
+    pose_8 = pose_pair["pose_8px"]
+    pose_12 = pose_pair["pose_12px"]
+
+    group_masks = _threshold_pair_group_masks(pose_pair, N, include_12px_all=True)
+    mask_8 = group_masks["pnp_8px_inliers"]
+    mask_12 = group_masks["pnp_12px_all_inliers"]
+    overlap = mask_8 & mask_12
+    union = mask_8 | mask_12
+    unique_12 = mask_12 & ~mask_8
+
+    n_8 = int(np.sum(mask_8))
+    n_12 = int(np.sum(mask_12))
+    n_overlap = int(np.sum(overlap))
+    n_union = int(np.sum(union))
+    n_unique_12 = int(np.sum(unique_12))
+
+    out.update(
+        {
+            "pose_8px_ok": bool(pose_8["ok"]),
+            "pose_12px_ok": bool(pose_12["ok"]),
+            "pose_8px_reason": pose_8.get("reason", None),
+            "pose_12px_reason": pose_12.get("reason", None),
+            "inliers_8px": int(n_8),
+            "inliers_12px": int(n_12),
+            "inlier_overlap": int(n_overlap),
+            "inlier_iou": None if n_union == 0 else float(n_overlap / n_union),
+            "inlier_overlap_over_8px": None if n_8 == 0 else float(n_overlap / n_8),
+            "inlier_overlap_over_12px": None if n_12 == 0 else float(n_overlap / n_12),
+            "inliers_unique_to_12px": int(n_unique_12),
+            "component_8px": pose_8.get("pnp_component_support", None),
+            "component_12px": pose_12.get("pnp_component_support", None),
+            "component_gate_8px_rejected": bool(pose_8.get("pnp_component_gate_rejected", False)),
+            "component_gate_12px_rejected": bool(pose_12.get("pnp_component_gate_rejected", False)),
+            "component_gate_8px_reason": pose_8.get("pnp_component_gate_reason", None),
+            "component_gate_12px_reason": pose_12.get("pnp_component_gate_reason", None),
+        }
+    )
+
+    # Compare recovered poses when both are available
+    if bool(pose_8["ok"]) and bool(pose_12["ok"]):
+        R_8 = np.asarray(pose_8["R"], dtype=np.float64)
+        R_12 = np.asarray(pose_12["R"], dtype=np.float64)
+        t_8 = np.asarray(pose_8["t"], dtype=np.float64).reshape(3)
+        t_12 = np.asarray(pose_12["t"], dtype=np.float64).reshape(3)
+
+        try:
+            translation_direction_delta_deg = float(np.degrees(angle_between_translations(t_8, t_12)))
+        except Exception:
+            translation_direction_delta_deg = None
+
+        C_8 = camera_centre(R_8, t_8)
+        C_12 = camera_centre(R_12, t_12)
+
+        try:
+            camera_centre_direction_delta_deg = float(np.degrees(angle_between_translations(C_8, C_12)))
+        except Exception:
+            camera_centre_direction_delta_deg = None
+
+        out["rotation_diff_deg"] = float(np.degrees(angle_between_rotmats(R_8, R_12)))
+        out["translation_direction_delta_deg"] = translation_direction_delta_deg
+        out["camera_centre_direction_delta_deg"] = camera_centre_direction_delta_deg
+        out["reprojection_all_8px"] = _pose_reprojection_block(corrs, K, R_8, t_8, all_mask, eps=float(pnp_cfg["eps"]))
+        out["reprojection_all_12px"] = _pose_reprojection_block(corrs, K, R_12, t_12, all_mask, eps=float(pnp_cfg["eps"]))
+        out["unique_12px"]["reprojection_under_8px"] = _pose_reprojection_block(corrs, K, R_8, t_8, unique_12, eps=float(pnp_cfg["eps"]))
+        out["unique_12px"]["reprojection_under_12px"] = _pose_reprojection_block(corrs, K, R_12, t_12, unique_12, eps=float(pnp_cfg["eps"]))
+
+    # Classify the fixed 8 px versus 12 px threshold stability
+    stability_flags = pnp_threshold_stability_flags(
+        ref_pose_ok=bool(pose_8["ok"]),
+        compare_pose_ok=bool(pose_12["ok"]),
+        ref_threshold_px=8.0,
+        compare_threshold_px=12.0,
+        support_iou=out.get("inlier_iou", None),
+        support_union=int(n_union),
+        translation_direction_delta_deg=out["translation_direction_delta_deg"],
+        camera_centre_direction_delta_deg=out["camera_centre_direction_delta_deg"],
+        min_support_iou=float(pnp_cfg.get("pnp_threshold_stability_min_support_iou", 0.25)),
+        max_translation_direction_deg=float(pnp_cfg.get("pnp_threshold_stability_max_translation_direction_deg", 120.0)),
+        max_camera_centre_direction_deg=float(pnp_cfg.get("pnp_threshold_stability_max_camera_centre_direction_deg", 120.0)),
+        disjoint_support_iou=float(pnp_cfg.get("pnp_threshold_stability_disjoint_iou", 0.05)),
+    )
+    out.update(
+        {
+            "threshold_stability_classification": stability_flags["classification"],
+            "threshold_stability_unstable": bool(stability_flags["unstable"]),
+            "threshold_stability_reasons": stability_flags["instability_reasons"],
+            "threshold_stability_supports_disjoint": bool(stability_flags["supports_effectively_disjoint"]),
+            "threshold_stability_support_iou_low": bool(stability_flags["support_iou_low"]),
+            "threshold_stability_translation_direction_disagrees": bool(stability_flags["translation_direction_disagrees"]),
+            "threshold_stability_camera_centre_direction_disagrees": bool(stability_flags["camera_centre_direction_disagrees"]),
+        }
+    )
+
+    # Split 12-only inliers by landmark birth source
+    birth_masks = _birth_source_masks(seed, np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1))
+    out["unique_12px"]["count"] = int(n_unique_12)
+    out["unique_12px"]["birth_source"] = {
+        "bootstrap": int(np.sum(unique_12 & birth_masks["bootstrap"])),
+        "map_growth": int(np.sum(unique_12 & birth_masks["map_growth"])),
+        "unknown": int(np.sum(unique_12 & birth_masks["unknown"])),
+    }
+
+    out["ok"] = bool(pose_8["ok"]) and bool(pose_12["ok"])
+    if not bool(out["ok"]):
+        out["reason"] = "one_or_both_poses_failed"
+
+    return out
+
+
+# Analyse pose-eligible non-PnP correspondences under the recovered pose
+def _analyse_non_pnp_pose_eligible_reprojection(seed: dict, pose_out: dict, K: np.ndarray, *, eps: float) -> dict:
+    out = {
+        "ok": False,
+        "reason": None,
+        "n_pose_eligible": 0,
+        "n_pnp_inliers": 0,
+        "n_non_pnp": 0,
+        "all": _non_pnp_reprojection_block(np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=bool), np.zeros((0,), dtype=bool), np.zeros((0,), dtype=bool)),
+        "by_birth_source": {
+            "bootstrap": _non_pnp_reprojection_block(np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=bool), np.zeros((0,), dtype=bool), np.zeros((0,), dtype=bool)),
+            "map_growth": _non_pnp_reprojection_block(np.zeros((0,), dtype=np.float64), np.zeros((0,), dtype=bool), np.zeros((0,), dtype=bool), np.zeros((0,), dtype=bool)),
+        },
+    }
+
+    # Stop when no recovered pose is available
+    if not isinstance(pose_out, dict) or not bool(pose_out.get("ok", False)):
+        out["reason"] = "pose_not_recovered"
+        return out
+
+    # Read PnP correspondence bundle
+    corrs = pose_out.get("corrs", None)
+    if corrs is None or not hasattr(corrs, "X_w") or not hasattr(corrs, "x_cur") or not hasattr(corrs, "landmark_ids"):
+        out["reason"] = "missing_correspondences"
+        return out
+
+    # Read correspondence arrays
+    X_w = np.asarray(corrs.X_w, dtype=np.float64)
+    x_cur = np.asarray(corrs.x_cur, dtype=np.float64)
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+
+    if X_w.ndim != 2 or X_w.shape[0] != 3:
+        out["reason"] = "bad_world_points"
+        return out
+    if x_cur.ndim != 2 or x_cur.shape[0] != 2:
+        out["reason"] = "bad_image_points"
+        return out
+
+    N = int(X_w.shape[1])
+    if int(x_cur.shape[1]) != N or int(landmark_ids.size) != N:
+        out["reason"] = "correspondence_length_mismatch"
+        return out
+
+    pnp_inlier_mask = align_bool_mask_1d(pose_out.get("pnp_inlier_mask", np.zeros((N,), dtype=bool)), N, name="pose_out['pnp_inlier_mask']")
+    non_pnp_mask = ~pnp_inlier_mask
+
+    out["n_pose_eligible"] = int(N)
+    out["n_pnp_inliers"] = int(np.sum(pnp_inlier_mask))
+    out["n_non_pnp"] = int(np.sum(non_pnp_mask))
+
+    if N == 0 or not np.any(non_pnp_mask):
+        out["ok"] = True
+        out["reason"] = None
+        return out
+
+    # Build landmark birth-source lookup
+    lm_by_id: dict[int, dict] = {}
+    landmarks = seed.get("landmarks", []) if isinstance(seed, dict) else []
+    if isinstance(landmarks, list):
+        for lm in landmarks:
+            if not isinstance(lm, dict):
+                continue
+            if "id" not in lm:
+                continue
+            lm_by_id[int(lm["id"])] = lm
+
+    # Read the recovered pose
+    R = np.asarray(pose_out.get("R", None), dtype=np.float64)
+    t = np.asarray(pose_out.get("t", None), dtype=np.float64).reshape(-1)
+    if R.shape != (3, 3) or t.size != 3:
+        out["reason"] = "bad_pose"
+        return out
+
+    # Compute depths and reprojection errors under the recovered pose
+    X_c = world_to_camera_points(R, t.reshape(3), X_w)
+    z = np.asarray(X_c[2, :], dtype=np.float64).reshape(-1)
+    finite_depth = np.isfinite(z)
+    positive_depth = finite_depth & (z > float(eps))
+    non_positive_depth = finite_depth & ~positive_depth
+
+    err_sq = np.asarray(reprojection_errors_sq(K, R, t.reshape(3), X_w, x_cur), dtype=np.float64).reshape(-1)
+    errors_px = np.full((N,), np.inf, dtype=np.float64)
+    finite_err_sq = np.isfinite(err_sq) & (err_sq >= 0.0)
+    errors_px[finite_err_sq] = np.sqrt(err_sq[finite_err_sq])
+
+    # Split non-PnP correspondences by landmark birth source
+    birth_sources = np.full((N,), "unknown", dtype=object)
+    for j, lm_id in enumerate(landmark_ids):
+        lm = lm_by_id.get(int(lm_id), None)
+        if not isinstance(lm, dict):
+            continue
+        birth_source = lm.get("birth_source", None)
+        if isinstance(birth_source, str):
+            birth_sources[j] = str(birth_source)
+
+    out["ok"] = True
+    out["reason"] = None
+    out["all"] = _non_pnp_reprojection_block(errors_px, positive_depth, non_positive_depth, non_pnp_mask)
+    out["by_birth_source"] = {
+        "bootstrap": _non_pnp_reprojection_block(errors_px, positive_depth, non_positive_depth, non_pnp_mask & (birth_sources == "bootstrap")),
+        "map_growth": _non_pnp_reprojection_block(errors_px, positive_depth, non_positive_depth, non_pnp_mask & (birth_sources == "map_growth")),
+    }
+
+    return out
+
+
+# Format the threshold-pair non-PnP reprojection diagnostic
+def _format_non_pnp_reprojection_diagnostic(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict) or not bool(diagnostic.get("ok", False)):
+        return [f"  threshold_pair_non_pnp_reprojection: unavailable reason={diagnostic.get('reason', None) if isinstance(diagnostic, dict) else None}"]
+
+    all_block = diagnostic["all"]
+    summary = all_block["error_px"]
+    hist = all_block["hist_px"]
+    birth = diagnostic["by_birth_source"]
+    bootstrap_summary = birth["bootstrap"]["error_px"]
+    map_growth_summary = birth["map_growth"]["error_px"]
+
+    line_total = (
+        f"  threshold_pair_non_pnp_reprojection: n={int(diagnostic['n_non_pnp'])} "
+        f"usable={int(summary['count'])} "
+        f"positive_depth={int(all_block['n_positive_depth'])} "
+        f"non_positive_depth={int(all_block['n_non_positive_depth'])} "
+        f"nonfinite_reprojection={int(all_block['n_nonfinite_reprojection'])} "
+        f"min={_format_optional_px(summary['min'])} "
+        f"median={_format_optional_px(summary['median'])} "
+        f"p75={_format_optional_px(summary['p75'])} "
+        f"p90={_format_optional_px(summary['p90'])} "
+        f"p95={_format_optional_px(summary['p95'])} "
+        f"max={_format_optional_px(summary['max'])}"
+    )
+
+    line_hist = (
+        f"  threshold_pair_non_pnp_bins: <=2={int(hist['le_2_px'])} "
+        f"2-3={int(hist['gt_2_le_3_px'])} "
+        f"3-5={int(hist['gt_3_le_5_px'])} "
+        f"5-8={int(hist['gt_5_le_8_px'])} "
+        f"8-12={int(hist['gt_8_le_12_px'])} "
+        f"12-20={int(hist['gt_12_le_20_px'])} "
+        f">20={int(hist['gt_20_px'])}"
+    )
+
+    line_birth = (
+        f"  threshold_pair_non_pnp_birth: bootstrap_n={int(birth['bootstrap']['n_total'])} "
+        f"bootstrap_median={_format_optional_px(bootstrap_summary['median'])} "
+        f"map_growth_n={int(birth['map_growth']['n_total'])} "
+        f"map_growth_median={_format_optional_px(map_growth_summary['median'])}"
+    )
+
+    return [line_total, line_hist, line_birth]
+
+
+# Format the threshold-pair PnP comparison
+def _format_threshold_pair_pose_comparison(diagnostic: dict) -> list[str]:
+    if not isinstance(diagnostic, dict):
+        return ["  threshold_pair_pnp_comparison: unavailable reason=missing_diagnostic"]
+
+    all_8 = diagnostic["reprojection_all_8px"]["error_px"]
+    all_12 = diagnostic["reprojection_all_12px"]["error_px"]
+    unique_8 = diagnostic["unique_12px"]["reprojection_under_8px"]["error_px"]
+    unique_12 = diagnostic["unique_12px"]["reprojection_under_12px"]["error_px"]
+    birth = diagnostic["unique_12px"]["birth_source"]
+    component_8 = diagnostic.get("component_8px", {}) if isinstance(diagnostic.get("component_8px", {}), dict) else {}
+    component_12 = diagnostic.get("component_12px", {}) if isinstance(diagnostic.get("component_12px", {}), dict) else {}
+    stability_reasons = diagnostic.get("threshold_stability_reasons", [])
+    if isinstance(stability_reasons, list):
+        stability_reason_text = ",".join(str(v) for v in stability_reasons)
+    else:
+        stability_reason_text = str(stability_reasons)
+    if stability_reason_text == "":
+        stability_reason_text = "None"
+
+    line_pose = (
+        f"  threshold_pair_pnp_pose: pose_8px_ok={bool(diagnostic.get('pose_8px_ok', False))} "
+        f"pose_12px_ok={bool(diagnostic.get('pose_12px_ok', False))} "
+        f"rotation_delta_deg={_format_optional_px(diagnostic.get('rotation_diff_deg', None))} "
+        f"translation_direction_delta_deg={_format_optional_px(diagnostic.get('translation_direction_delta_deg', None))} "
+        f"camera_centre_direction_delta_deg={_format_optional_px(diagnostic.get('camera_centre_direction_delta_deg', None))}"
+    )
+
+    line_inliers = (
+        f"  threshold_pair_pnp_inliers: inliers_8px={int(diagnostic.get('inliers_8px', 0))} "
+        f"inliers_12px={int(diagnostic.get('inliers_12px', 0))} "
+        f"overlap={int(diagnostic.get('inlier_overlap', 0))} "
+        f"iou={_format_optional_px(diagnostic.get('inlier_iou', None))} "
+        f"unique_to_12px={int(diagnostic.get('inliers_unique_to_12px', 0))}"
+    )
+
+    line_stability = (
+        f"  threshold_pair_pnp_stability: classification={diagnostic.get('threshold_stability_classification', 'unavailable')} "
+        f"unstable={bool(diagnostic.get('threshold_stability_unstable', False))} "
+        f"disjoint={bool(diagnostic.get('threshold_stability_supports_disjoint', False))} "
+        f"support_iou_low={bool(diagnostic.get('threshold_stability_support_iou_low', False))} "
+        f"translation_direction_disagrees={bool(diagnostic.get('threshold_stability_translation_direction_disagrees', False))} "
+        f"camera_centre_direction_disagrees={bool(diagnostic.get('threshold_stability_camera_centre_direction_disagrees', False))} "
+        f"reasons={stability_reason_text}"
+    )
+
+    line_components = (
+        f"  threshold_pair_pnp_components: "
+        f"component_count_8px={int(component_8.get('component_count', 0))} "
+        f"largest_component_8px={int(component_8.get('largest_component_size', 0))} "
+        f"largest_component_fraction_8px={_format_optional_float(component_8.get('largest_component_fraction', None), digits=2)} "
+        f"largest_component_area_fraction_8px={_format_optional_float(component_8.get('largest_component_bbox_area_fraction', None), digits=4)} "
+        f"component_gate_8px_rejected={bool(diagnostic.get('component_gate_8px_rejected', False))} "
+        f"component_gate_8px_reason={diagnostic.get('component_gate_8px_reason', None)} "
+        f"component_count_12px={int(component_12.get('component_count', 0))} "
+        f"largest_component_12px={int(component_12.get('largest_component_size', 0))} "
+        f"largest_component_fraction_12px={_format_optional_float(component_12.get('largest_component_fraction', None), digits=2)} "
+        f"largest_component_area_fraction_12px={_format_optional_float(component_12.get('largest_component_bbox_area_fraction', None), digits=4)} "
+        f"component_gate_12px_rejected={bool(diagnostic.get('component_gate_12px_rejected', False))} "
+        f"component_gate_12px_reason={diagnostic.get('component_gate_12px_reason', None)}"
+    )
+
+    line_all = (
+        f"  threshold_pair_pnp_all_reprojection: median_8px={_format_optional_px(all_8['median'])} "
+        f"p75_8px={_format_optional_px(all_8['p75'])} "
+        f"p90_8px={_format_optional_px(all_8['p90'])} "
+        f"median_12px={_format_optional_px(all_12['median'])} "
+        f"p75_12px={_format_optional_px(all_12['p75'])} "
+        f"p90_12px={_format_optional_px(all_12['p90'])}"
+    )
+
+    line_unique = (
+        f"  threshold_pair_pnp_unique_to_12px: count={int(diagnostic['unique_12px']['count'])} "
+        f"bootstrap={int(birth['bootstrap'])} "
+        f"map_growth={int(birth['map_growth'])} "
+        f"median_under_8px={_format_optional_px(unique_8['median'])} "
+        f"median_under_12px={_format_optional_px(unique_12['median'])} "
+        f"p95_under_12px={_format_optional_px(unique_12['p95'])}"
+    )
+
+    return [line_pose, line_inliers, line_stability, line_components, line_all, line_unique]
+
+
+def main(
+    *,
+    default_profile_path: str | Path | None = None,
+    default_output_stem: str = "diag_pnp",
+) -> None:
+    parser = argparse.ArgumentParser()
+
+    # Dataset profile
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default=None if default_profile_path is None else str(default_profile_path),
+        required=default_profile_path is None,
+    )
+    # Optional dataset override
+    parser.add_argument("--dataset_root", type=str, default=None)
+    # Optional sequence override
+    parser.add_argument("--seq", type=str, default=None)
+    # Optional output override
+    parser.add_argument("--out_dir", type=str, default=None)
+
+    # Bootstrap source frame index
+    parser.add_argument("--i0", type=int, default=None)
+    # Bootstrap target frame index
+    parser.add_argument("--i1", type=int, default=None)
+    # Number of subsequent frames to diagnose
+    parser.add_argument("--num_track", type=int, default=5)
+    # Threshold sweep in pixels
+    parser.add_argument("--thresholds", type=float, nargs="+", default=[3.0, 5.0, 8.0, 12.0])
+    # Console scorecard verbosity
+    parser.add_argument("--scorecard", choices=["short", "long", "off"], default="short")
+    # Frame used for threshold-pair deep diagnostics
+    parser.add_argument("--threshold_pair_frame_index", type=int, default=4)
+    # Rescue frames whose active support refresh is suppressed diagnostically
+    parser.add_argument("--suppress_support_refresh_frames", type=int, nargs="*", default=[])
+    # Minimum landmark observation count used before PnP
+    parser.add_argument("--min_landmark_observations", type=int, default=2)
+    # Tight reprojection gate for appending existing-landmark observations
+    parser.add_argument("--max_append_reproj_error_px_existing", type=float, default=2.0)
+    # Enable the diagnostic PnP spatial support gate
+    parser.add_argument("--enable_pnp_spatial_gate", action=argparse.BooleanOptionalAction, default=True)
+    # PnP spatial support grid columns
+    parser.add_argument("--pnp_spatial_grid_cols", type=int, default=4)
+    # PnP spatial support grid rows
+    parser.add_argument("--pnp_spatial_grid_rows", type=int, default=3)
+    # Minimum occupied cells required for accepted PnP support
+    parser.add_argument("--min_pnp_inlier_cells", type=int, default=1)
+    # Maximum fraction of accepted PnP support allowed in one cell
+    parser.add_argument("--max_pnp_single_cell_fraction", type=float, default=1.0)
+    # Minimum inlier bounding-box image area fraction
+    parser.add_argument("--min_pnp_bbox_area_fraction", type=float, default=0.01)
+    # Enable the diagnostic PnP component-support gate
+    parser.add_argument("--enable_pnp_component_gate", action=argparse.BooleanOptionalAction, default=False)
+    # Current-image radius for accepted-inlier component support
+    parser.add_argument("--pnp_component_radius_px", type=float, default=80.0)
+    # Maximum accepted PnP support allowed in one component
+    parser.add_argument("--max_pnp_largest_component_fraction", type=float, default=1.0)
+    # Minimum accepted PnP inlier component count
+    parser.add_argument("--min_pnp_component_count", type=int, default=0)
+    # Minimum largest-component bounding-box image area fraction
+    parser.add_argument("--min_pnp_largest_component_bbox_area_fraction", type=float, default=0.0)
+    # Enable the diagnostic local displacement-consistency pose filter
+    parser.add_argument("--enable_pnp_local_consistency_filter", action=argparse.BooleanOptionalAction, default=False)
+    # Apply the local displacement-consistency filter to the live frontend state
+    parser.add_argument("--apply_pnp_local_consistency_filter_to_pipeline", action=argparse.BooleanOptionalAction, default=False)
+    # Keyframe-image radius for local displacement-consistency neighbours
+    parser.add_argument("--pnp_local_consistency_radius_px", type=float, default=80.0)
+    # Minimum local neighbours required by the local displacement-consistency filter
+    parser.add_argument(
+        "--pnp_local_consistency_min_neighbours",
+        dest="pnp_local_consistency_min_neighbours",
+        type=int,
+        default=3,
+    )
+    # Maximum residual from the local median displacement
+    parser.add_argument("--pnp_local_consistency_max_median_residual_px", type=float, default=12.0)
+    # Minimum remaining pose correspondences before the filter falls back to keep-all
+    parser.add_argument("--pnp_local_consistency_min_keep", type=int, default=0)
+    # Enable the diagnostic current-image spatial thinning pose filter
+    parser.add_argument("--enable_pnp_spatial_thinning_filter", action=argparse.BooleanOptionalAction, default=False)
+    # Apply the current-image spatial thinning filter to the live frontend state
+    parser.add_argument("--apply_pnp_spatial_thinning_filter_to_pipeline", action=argparse.BooleanOptionalAction, default=False)
+    # Current-image radius for spatial thinning
+    parser.add_argument("--pnp_spatial_thinning_radius_px", type=float, default=20.0)
+    # Maximum retained pose correspondences allowed within the thinning radius
+    parser.add_argument("--pnp_spatial_thinning_max_points_per_radius", type=int, default=16)
+    # Minimum remaining pose correspondences before spatial thinning falls back to keep-all
+    parser.add_argument("--pnp_spatial_thinning_min_keep", type=int, default=0)
+    _add_pnp_threshold_stability_args(parser)
+
+    args = parser.parse_args()
+
+    profile_path = Path(args.profile).expanduser().resolve()
+    cfg, K = _load_runtime_cfg(profile_path)
+    frontend_kwargs = _frontend_kwargs_from_cfg(cfg)
+    profile_pnp_cfg = cfg.get("pnp", {})
+    pnp_cfg = _pnp_solver_cfg(profile_pnp_cfg if isinstance(profile_pnp_cfg, dict) else None)
+    thresholds = _parse_thresholds(list(args.thresholds))
+    scorecard_mode = str(args.scorecard)
+    threshold_pair_frame_index = check_int_ge0(args.threshold_pair_frame_index, name="threshold_pair_frame_index")
+    suppress_support_refresh_frames = {
+        check_int_ge0(frame_index, name="suppress_support_refresh_frame")
+        for frame_index in args.suppress_support_refresh_frames
+    }
+    min_landmark_observations = check_int_gt0(args.min_landmark_observations, name="min_landmark_observations")
+    max_append_reproj_error_px_existing = check_positive(
+        args.max_append_reproj_error_px_existing,
+        name="max_append_reproj_error_px_existing",
+        eps=0.0,
+    )
+    pnp_cfg = _apply_diagnostic_pnp_cli_overrides(pnp_cfg, args)
+
+    dataset_cfg = cfg["dataset"]
+    run_cfg = cfg["run"]
+    dataset_name = str(dataset_cfg["name"])
+
+    dataset_root = (
+        Path(args.dataset_root).expanduser().resolve()
+        if args.dataset_root is not None
+        else (ROOT / dataset_cfg["root"]).resolve()
+    )
+    seq_name = str(args.seq) if args.seq is not None else str(dataset_cfg["seq"])
+
+    if args.out_dir is not None:
+        out_dir = Path(args.out_dir).expanduser().resolve()
+    else:
+        out_dir = (ROOT / str(run_cfg.get("out_dir", "out")) / default_output_stem).resolve()
+
+    check_dir(dataset_root, name="dataset_root")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log_path = out_dir / "pnp_diag.jsonl"
+    _reset_jsonl(log_path)
+
+    run_bootstrap_cfg = run_cfg.get("bootstrap", {})
+    i0 = check_int_ge0(
+        run_bootstrap_cfg.get("i0", 0) if args.i0 is None else args.i0,
+        name="i0",
+    )
+    i1 = check_int_ge0(
+        run_bootstrap_cfg.get("i1", 1) if args.i1 is None else args.i1,
+        name="i1",
+    )
+    num_track = check_int_gt0(args.num_track, name="num_track")
+
+    if i1 <= i0:
+        raise ValueError(f"Expected i1 > i0 for bootstrap; got i0={i0}, i1={i1}")
+
+    # Load dataset sequence
+    seq = load_sequence(
+        dataset_name,
+        dataset_root,
+        seq_name,
+        normalise_01=True,
+        dtype=np.float64,
+        require_timestamps=True,
+    )
+
+    max_frames = dataset_cfg.get("max_frames", None)
+    min_required_frames = int(i1 + 1 + num_track)
+    if max_frames is None:
+        n_effective = len(seq)
+    else:
+        n_effective = min(len(seq), max(int(max_frames), int(min_required_frames)))
+    if n_effective <= 0:
+        raise ValueError("Loaded sequence is empty")
+
+    if i0 >= n_effective or i1 >= n_effective:
+        raise IndexError(f"Bootstrap indices out of range for effective sequence length {n_effective}")
+
+    # Read bootstrap images
+    im0, ts0, id0 = seq.get(i0)
+    im1, ts1, id1 = seq.get(i1)
+
+    # Run two-view bootstrap
+    boot = bootstrap_from_two_frames(
+        K,
+        K,
+        im0,
+        im1,
+        feature_cfg=frontend_kwargs["feature_cfg"],
+        F_cfg=frontend_kwargs["F_cfg"],
+        H_cfg=frontend_kwargs["H_cfg"],
+        bootstrap_cfg=frontend_kwargs["bootstrap_cfg"],
+    )
+
+    print(f"sequence: {seq.name}")
+    print(f"dataset_root: {dataset_root}")
+    print(f"seq_name: {seq_name}")
+    print(f"bootstrap pair: {i0} ({id0}, t={ts0}) -> {i1} ({id1}, t={ts1})")
+    print(f"bootstrap ok: {boot['ok']}")
+    print(f"bootstrap stats: {boot['stats']}")
+    print(f"max_append_reproj_error_px_existing: {max_append_reproj_error_px_existing}")
+    print(f"suppress_support_refresh_frames: {sorted(suppress_support_refresh_frames)}")
+    print(
+        f"pnp_spatial_gate: enabled={bool(pnp_cfg['enable_pnp_spatial_gate'])} "
+        f"grid={int(pnp_cfg['pnp_spatial_grid_cols'])}x{int(pnp_cfg['pnp_spatial_grid_rows'])} "
+        f"min_cells={int(pnp_cfg['min_pnp_inlier_cells'])} "
+        f"max_single_cell_fraction={float(pnp_cfg['max_pnp_single_cell_fraction'])} "
+        f"min_bbox_area_fraction={float(pnp_cfg['min_pnp_bbox_area_fraction'])}"
+    )
+    print(
+        f"pnp_component_gate: enabled={bool(pnp_cfg['enable_pnp_component_gate'])} "
+        f"radius_px={float(pnp_cfg['pnp_component_radius_px'])} "
+        f"max_largest_component_fraction={float(pnp_cfg['max_pnp_largest_component_fraction'])} "
+        f"min_component_count={int(pnp_cfg['min_pnp_component_count'])} "
+        f"min_largest_component_bbox_area_fraction={float(pnp_cfg['min_pnp_largest_component_bbox_area_fraction'])}"
+    )
+    print(
+        f"pnp_local_consistency_filter: enabled={bool(pnp_cfg['enable_pnp_local_consistency_filter'])} "
+        f"apply_to_pipeline={bool(pnp_cfg['apply_pnp_local_consistency_filter_to_pipeline'])} "
+        f"radius_px={float(pnp_cfg['pnp_local_consistency_radius_px'])} "
+        f"min_neighbours={int(pnp_cfg['pnp_local_consistency_min_neighbours'])} "
+        f"max_median_residual_px={float(pnp_cfg['pnp_local_consistency_max_median_residual_px'])} "
+        f"min_keep={int(pnp_cfg['pnp_local_consistency_min_keep'])}"
+    )
+    print(
+        f"pnp_spatial_thinning_filter: enabled={bool(pnp_cfg['enable_pnp_spatial_thinning_filter'])} "
+        f"apply_to_pipeline={bool(pnp_cfg['apply_pnp_spatial_thinning_filter_to_pipeline'])} "
+        f"radius_px={float(pnp_cfg['pnp_spatial_thinning_radius_px'])} "
+        f"max_points_per_radius={int(pnp_cfg['pnp_spatial_thinning_max_points_per_radius'])} "
+        f"min_keep={int(pnp_cfg['pnp_spatial_thinning_min_keep'])}"
+    )
+    print(
+        f"pnp_threshold_stability: enabled={bool(pnp_cfg['enable_pnp_threshold_stability_diagnostic'])} "
+        f"gate={bool(pnp_cfg['enable_pnp_threshold_stability_gate'])} "
+        f"compare_px={float(pnp_cfg['pnp_threshold_stability_compare_px'])} "
+        f"min_iou={float(pnp_cfg['pnp_threshold_stability_min_support_iou'])} "
+        f"max_translation_direction_deg={float(pnp_cfg['pnp_threshold_stability_max_translation_direction_deg'])} "
+        f"max_camera_centre_direction_deg={float(pnp_cfg['pnp_threshold_stability_max_camera_centre_direction_deg'])} "
+        f"disjoint_iou={float(pnp_cfg['pnp_threshold_stability_disjoint_iou'])}"
+    )
+
+    # Write compact run configuration for reproducibility
+    _append_jsonl(
+        log_path,
+        {
+            "event": "run_config",
+            "profile": str(profile_path),
+            "dataset_root": str(dataset_root),
+            "seq_name": str(seq_name),
+            "i0": int(i0),
+            "i1": int(i1),
+            "num_track": int(num_track),
+            "thresholds": [float(v) for v in thresholds],
+            "scorecard": str(scorecard_mode),
+            "threshold_pair_frame_index": int(threshold_pair_frame_index),
+            "suppress_support_refresh_frames": sorted(int(v) for v in suppress_support_refresh_frames),
+            "min_landmark_observations": int(min_landmark_observations),
+            "max_append_reproj_error_px_existing": float(max_append_reproj_error_px_existing),
+            "enable_pnp_local_consistency_filter": bool(pnp_cfg["enable_pnp_local_consistency_filter"]),
+            "enable_pnp_spatial_thinning_filter": bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]),
+            "apply_pnp_local_consistency_filter_to_pipeline": bool(pnp_cfg["apply_pnp_local_consistency_filter_to_pipeline"]),
+            "apply_pnp_spatial_thinning_filter_to_pipeline": bool(pnp_cfg["apply_pnp_spatial_thinning_filter_to_pipeline"]),
+        },
+    )
+
+    # Write the bootstrap summary
+    _append_jsonl(
+        log_path,
+        {
+            "event": "bootstrap",
+            "frame_index_0": int(i0),
+            "frame_index_1": int(i1),
+            "ok": bool(boot["ok"]),
+            "reason": boot["stats"].get("reason", None),
+            "n_landmarks": 0 if not isinstance(boot.get("seed"), dict) else int(len(boot["seed"].get("landmarks", []))),
+        },
+    )
+
+    if not bool(boot["ok"]) or not isinstance(boot.get("seed"), dict):
+        print("bootstrap failed; stopping")
+        return
+
+    seed = boot["seed"]
+    keyframe_feats = get_active_keyframe_features(seed)
+    keyframe_index = i1
+
+    print(f"initial landmarks: {len(seed.get('landmarks', []))}")
+    print(f"keyframe index: {keyframe_index}")
+
+    start_track = keyframe_index + 1
+    stop_track = min(n_effective, start_track + num_track)
+    scorecard_rows: list[dict] = []
+    successful_ba_records: list[dict] = []
+    latest_refreshed_basis_snapshot = None
+
+    for i in range(start_track, stop_track):
+        # Keep the current reference keyframe for this diagnostic step
+        ref_keyframe_index = int(keyframe_index)
+        ref_keyframe_feats = keyframe_feats
+        live_pipeline_ref_keyframe_index = int(seed.get("active_keyframe_kf", ref_keyframe_index))
+        live_pipeline_ref_keyframe_feats = get_active_keyframe_features(seed)
+        refreshed_basis_for_frame = latest_refreshed_basis_snapshot
+        active_basis_before = _active_support_basis_snapshot(seed)
+
+        # Read the current frame image
+        cur_im, cur_ts, cur_id = seq.get(i)
+        cur_image_shape = (int(np.asarray(cur_im).shape[0]), int(np.asarray(cur_im).shape[1]))
+
+        # Track the current frame against the active keyframe
+        track_out = track_against_keyframe(
+            K,
+            ref_keyframe_feats,
+            cur_im,
+            feature_cfg=frontend_kwargs["feature_cfg"],
+            F_cfg=frontend_kwargs["F_cfg"],
+        )
+
+        # Build the shared pose frontend keyword block
+        pose_kwargs = pnp_frontend_kwargs_from_cfg(pnp_cfg)
+        pose_kwargs.update(
+            {
+                "threshold_px": float(frontend_kwargs["pnp_threshold_px"]),
+                "min_landmark_observations": int(min_landmark_observations),
+                "image_shape": cur_image_shape,
+            }
+        )
+
+        # Build the unfiltered pose output for before/after diagnostics
+        base_pose_unfiltered_kwargs = dict(pose_kwargs)
+        base_pose_unfiltered_kwargs["enable_pnp_local_consistency_filter"] = False
+        base_pose_unfiltered_kwargs["enable_pnp_spatial_thinning_filter"] = False
+        base_pose_unfiltered_out = estimate_pose_from_seed(
+            K,
+            seed,
+            track_out,
+            **base_pose_unfiltered_kwargs,
+        )
+
+        # Build the active pose output with the optional diagnostic filters
+        if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+            base_pose_active_kwargs = dict(pose_kwargs)
+            base_pose_active_kwargs["enable_pnp_local_consistency_filter"] = bool(pnp_cfg["enable_pnp_local_consistency_filter"])
+            base_pose_active_kwargs["enable_pnp_spatial_thinning_filter"] = bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])
+            base_pose_out = estimate_pose_from_seed(
+                K,
+                seed,
+                track_out,
+                **base_pose_active_kwargs,
+            )
+        else:
+            base_pose_out = base_pose_unfiltered_out
+
+        corrs = base_pose_out["corrs"]
+        corrs_before_filters = base_pose_unfiltered_out["corrs"]
+        track_stats = track_out.get("stats", {})
+        base_pose_stats = base_pose_out.get("stats", {})
+        base_pose_unfiltered_stats = base_pose_unfiltered_out.get("stats", {})
+        propagation_seen_ids = _tracked_landmark_ids_from_active_lookup(seed, track_out)
+        propagation_mapped_ids = _raw_mapped_support_landmark_ids(seed, track_out)
+        latest_ba_record = successful_ba_records[-1] if len(successful_ba_records) > 0 else None
+        support_funnel_diagnostic = _support_funnel_diagnostic(
+            seed,
+            track_out,
+            base_pose_out,
+            frame_index=i,
+            reference_keyframe_index=ref_keyframe_index,
+            min_landmark_observations=int(min_landmark_observations),
+            allow_bootstrap_landmarks_for_pose=bool(pnp_cfg["allow_bootstrap_landmarks_for_pose"]),
+            min_post_bootstrap_observations_for_pose=int(pnp_cfg["min_post_bootstrap_observations_for_pose"]),
+            latest_ba_record=latest_ba_record,
+        )
+
+        # Run the detailed threshold-pair diagnostics on the configured frame
+        non_pnp_reprojection_diagnostic = None
+        local_consistency_diagnostic = None
+        spatial_thinning_diagnostic = None
+        pnp_pose_comparison_before_diagnostic = None
+        pnp_pose_comparison_diagnostic = None
+        pnp_spatial_before_diagnostic = None
+        pnp_spatial_diagnostic = None
+        live_pipeline_threshold_rows = None
+        live_pipeline_pose_comparison_diagnostic = None
+        live_pipeline_spatial_diagnostic = None
+        live_pipeline_local_consistency_diagnostic = None
+        live_pipeline_assignment_audit = None
+        if int(i) == int(threshold_pair_frame_index):
+            pnp_pose_pair_before = _threshold_pair_pose_pair(
+                corrs_before_filters,
+                K,
+                pnp_cfg=pnp_cfg,
+                image_shape=cur_image_shape,
+            )
+            pnp_pose_pair = pnp_pose_pair_before
+            if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+                pnp_pose_pair = _threshold_pair_pose_pair(
+                    corrs,
+                    K,
+                    pnp_cfg=pnp_cfg,
+                    image_shape=cur_image_shape,
+                )
+            non_pnp_reprojection_diagnostic = _analyse_non_pnp_pose_eligible_reprojection(
+                seed,
+                base_pose_out,
+                K,
+                eps=float(pnp_cfg["eps"]),
+            )
+            local_consistency_diagnostic = _build_threshold_pair_local_consistency_diagnostic(
+                seq,
+                ref_keyframe_index,
+                i,
+                ref_keyframe_feats,
+                corrs_before_filters,
+                pose_pair=pnp_pose_pair_before,
+                pnp_cfg=pnp_cfg,
+            )
+            spatial_thinning_diagnostic = _build_threshold_pair_spatial_thinning_diagnostic(
+                seq,
+                ref_keyframe_index,
+                i,
+                ref_keyframe_feats,
+                corrs_before_filters,
+                pose_pair=pnp_pose_pair_before,
+                pnp_cfg=pnp_cfg,
+            )
+            pnp_pose_comparison_before_diagnostic = _compare_threshold_pair_poses(
+                seed,
+                corrs_before_filters,
+                K,
+                pnp_cfg=pnp_cfg,
+                pose_pair=pnp_pose_pair_before,
+            )
+            pnp_pose_comparison_diagnostic = _compare_threshold_pair_poses(
+                seed,
+                corrs,
+                K,
+                pnp_cfg=pnp_cfg,
+                pose_pair=pnp_pose_pair,
+            )
+            if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+                pnp_spatial_before_diagnostic = _build_threshold_pair_spatial_diagnostic(
+                    seq,
+                    ref_keyframe_index,
+                    i,
+                    ref_keyframe_feats,
+                    track_out,
+                    corrs_before_filters,
+                    out_dir,
+                    pose_pair=pnp_pose_pair_before,
+                    name_suffix="before_filters",
+                )
+            pnp_spatial_diagnostic = _build_threshold_pair_spatial_diagnostic(
+                seq,
+                ref_keyframe_index,
+                i,
+                ref_keyframe_feats,
+                track_out,
+                corrs,
+                out_dir,
+                pose_pair=pnp_pose_pair,
+                name_suffix="after_filters" if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]) else "",
+            )
+
+        # Sweep PnP thresholds on the same correspondence bundle
+        threshold_rows = [
+            _run_threshold_diagnostic(corrs, K, threshold_px=float(threshold_px), pnp_cfg=pnp_cfg, image_shape=cur_image_shape)
+            for threshold_px in thresholds
+        ]
+
+        # Advance the real frontend state after recording diagnostics
+        seed_landmarks_before = int(len(seed.get("landmarks", [])))
+        pipeline_pnp_kwargs = dict(pose_kwargs)
+        pipeline_pnp_kwargs["enable_pnp_local_consistency_filter"] = bool(pnp_cfg["apply_pnp_local_consistency_filter_to_pipeline"])
+        pipeline_pnp_kwargs["enable_pnp_spatial_thinning_filter"] = bool(pnp_cfg["apply_pnp_spatial_thinning_filter_to_pipeline"])
+        frontend_out = process_frame_against_seed(
+            K,
+            seed,
+            cur_im,
+            feature_cfg=frontend_kwargs["feature_cfg"],
+            F_cfg=frontend_kwargs["F_cfg"],
+            **pipeline_pnp_kwargs,
+            current_kf=i,
+            max_append_reproj_error_px_existing=float(max_append_reproj_error_px_existing),
+        )
+        frontend_out, support_refresh_would_have_triggered, support_refresh_suppressed = _suppress_selected_support_refresh(
+            frontend_out,
+            active_basis_before,
+            frame_index=int(i),
+            suppress_frames=suppress_support_refresh_frames,
+        )
+        frontend_stats = frontend_out.get("stats", {}) if isinstance(frontend_out, dict) else {}
+        seed_landmarks_after = int(len(frontend_out.get("seed", {}).get("landmarks", []))) if isinstance(frontend_out, dict) else seed_landmarks_before
+
+        # Replay fixed-set diagnostics on the live pipeline bundle
+        if int(i) == int(threshold_pair_frame_index):
+            live_pipeline_pose_out = frontend_out.get("pose_out", None) if isinstance(frontend_out, dict) else None
+            live_pipeline_track_out = frontend_out.get("track_out", None) if isinstance(frontend_out, dict) else None
+            if isinstance(live_pipeline_pose_out, dict) and live_pipeline_pose_out.get("corrs", None) is not None:
+                live_pipeline_corrs = live_pipeline_pose_out["corrs"]
+                live_pipeline_pose_pair = _threshold_pair_pose_pair(
+                    live_pipeline_corrs,
+                    K,
+                    pnp_cfg=pnp_cfg,
+                    image_shape=cur_image_shape,
+                )
+                live_pipeline_threshold_rows = [
+                    _run_threshold_diagnostic(
+                        live_pipeline_corrs,
+                        K,
+                        threshold_px=float(threshold_px),
+                        pnp_cfg=pnp_cfg,
+                        image_shape=cur_image_shape,
+                    )
+                    for threshold_px in thresholds
+                ]
+                live_pipeline_local_consistency_diagnostic = _build_threshold_pair_local_consistency_diagnostic(
+                    seq,
+                    live_pipeline_ref_keyframe_index,
+                    i,
+                    live_pipeline_ref_keyframe_feats,
+                    live_pipeline_corrs,
+                    pose_pair=live_pipeline_pose_pair,
+                    pnp_cfg=pnp_cfg,
+                )
+                live_pipeline_pose_comparison_diagnostic = _compare_threshold_pair_poses(
+                    seed,
+                    live_pipeline_corrs,
+                    K,
+                    pnp_cfg=pnp_cfg,
+                    pose_pair=live_pipeline_pose_pair,
+                )
+                live_pipeline_spatial_diagnostic = _build_threshold_pair_spatial_diagnostic(
+                    seq,
+                    live_pipeline_ref_keyframe_index,
+                    i,
+                    live_pipeline_ref_keyframe_feats,
+                    live_pipeline_track_out,
+                    live_pipeline_corrs,
+                    out_dir,
+                    pose_pair=live_pipeline_pose_pair,
+                    name_suffix="live_pipeline",
+                )
+                if (
+                    isinstance(refreshed_basis_for_frame, dict)
+                    and int(refreshed_basis_for_frame.get("active_keyframe_index", -1))
+                    == int(live_pipeline_ref_keyframe_index)
+                ):
+                    live_pipeline_assignment_audit = _frame_assignment_audit(
+                        seed,
+                        refreshed_basis_for_frame,
+                        live_pipeline_pose_out,
+                        K,
+                        frame_index=int(i),
+                        latest_ba_record=latest_ba_record,
+                    )
+
+        if bool(frontend_stats.get("guarded_support_refresh_triggered", False)):
+            latest_refreshed_basis_snapshot = _refreshed_basis_assignment_snapshot(
+                frontend_out["seed"],
+                frontend_out["pose_out"],
+                source_frame_index=int(i),
+            )
+
+        append_stats = {}
+        if isinstance(frontend_out, dict) and isinstance(frontend_out.get("seed", None), dict):
+            append_stats = frontend_out["seed"].get("last_tracked_observation_append_stats", {})
+            if not isinstance(append_stats, dict):
+                append_stats = {}
+            if int(append_stats.get("current_kf", -1)) != int(i):
+                append_stats = {}
+
+        local_ba_stats_full = frontend_stats.get("local_ba_stats", {})
+        if not isinstance(local_ba_stats_full, dict):
+            local_ba_stats_full = {}
+        local_ba_local_keyframes = [int(kf) for kf in local_ba_stats_full.get("local_keyframes", [])]
+        local_ba_optimised_keyframes = [int(kf) for kf in local_ba_stats_full.get("optimised_keyframes", [])]
+        local_ba_anchor_kf = local_ba_stats_full.get("anchor_kf", None)
+        local_ba_seed_after = frontend_out.get("seed", {}) if isinstance(frontend_out, dict) else {}
+        local_ba_active_keyframe = None
+        if isinstance(local_ba_seed_after, dict) and "active_keyframe_kf" in local_ba_seed_after:
+            local_ba_active_keyframe = int(local_ba_seed_after.get("active_keyframe_kf", -1))
+        local_ba_optimised_landmark_ids = _local_ba_optimised_landmark_ids(
+            K,
+            local_ba_seed_after,
+            local_ba_stats_full,
+            eps=float(pnp_cfg["eps"]),
+        )
+
+        standard_stats = _standard_frame_stats(
+            frame_index=i,
+            reference_keyframe_index=ref_keyframe_index,
+            frontend_out=frontend_out,
+            seed_landmarks_before=seed_landmarks_before,
+            seed_landmarks_after=seed_landmarks_after,
+        )
+
+        # Record the frame context in the JSONL log
+        frame_context = {
+            **standard_stats,
+            "frame_index": int(i),
+            "frame_id": str(cur_id),
+            "timestamp": float(cur_ts),
+            "reference_keyframe_index": int(ref_keyframe_index),
+            "live_pipeline_reference_keyframe_index": int(live_pipeline_ref_keyframe_index),
+            "active_basis_before_kf": int(active_basis_before["kf"]),
+            "active_basis_after_kf": int(frontend_out.get("seed", {}).get("active_keyframe_kf", -1)),
+            "accepted_pose_type": (
+                "failed"
+                if not bool(frontend_out.get("ok", False))
+                else "rescue"
+                if bool(frontend_stats.get("localisation_only_rescue_frame", False))
+                else "normal"
+            ),
+            "support_refresh_would_have_triggered": bool(support_refresh_would_have_triggered),
+            "support_refresh_suppressed": bool(support_refresh_suppressed),
+            "threshold_pair_frame_index": int(threshold_pair_frame_index),
+            "seed_landmarks_before": int(seed_landmarks_before),
+            "seed_landmarks_after": int(seed_landmarks_after),
+            "local_ba_active_keyframe": local_ba_active_keyframe,
+            "local_ba_local_keyframes": local_ba_local_keyframes,
+            "local_ba_anchor_kf": local_ba_anchor_kf,
+            "local_ba_optimised_keyframes": local_ba_optimised_keyframes,
+            "local_ba_optimised_landmark_ids": local_ba_optimised_landmark_ids,
+            "local_ba_n_optimised_landmark_ids": int(len(local_ba_optimised_landmark_ids)),
+            "local_ba_landmark_id_count_matches_stats": int(len(local_ba_optimised_landmark_ids)) == int(
+                frontend_stats.get("local_ba_n_local_landmarks", 0)
+            ),
+            "track_ok": int(track_stats.get("n_inliers", 0)) > 0,
+            "n_track_matches": int(track_stats.get("n_matches", 0)),
+            "n_track_inliers": int(track_stats.get("n_inliers", 0)),
+            "base_pose_ok": bool(base_pose_out.get("ok", False)),
+            "base_pose_reason": base_pose_stats.get("reason", None),
+            "base_n_pnp_corr": int(base_pose_stats.get("n_corr", 0)),
+            "base_n_pnp_corr_raw": int(base_pose_stats.get("n_corr_raw", 0)),
+            "base_n_pnp_corr_bootstrap_born": int(base_pose_stats.get("n_corr_bootstrap_born", 0)),
+            "base_n_pnp_corr_post_bootstrap_born": int(base_pose_stats.get("n_corr_post_bootstrap_born", 0)),
+            "base_n_pnp_corr_before_local_consistency": int(base_pose_unfiltered_stats.get("n_corr", 0)),
+            "base_n_pnp_corr_before_spatial_thinning": int(base_pose_unfiltered_stats.get("n_corr", 0)),
+            "n_corr_after_pose_filter": int(base_pose_stats.get("n_corr_after_pose_filter", base_pose_stats.get("n_corr", 0))),
+            "n_corr_after_local_consistency_filter": int(
+                base_pose_stats.get("n_corr_after_local_consistency_filter", base_pose_stats.get("n_corr", 0))
+            ),
+            "n_corr_after_spatial_thinning_filter": int(
+                base_pose_stats.get("n_corr_after_spatial_thinning_filter", base_pose_stats.get("n_corr", 0))
+            ),
+            "n_corr_bootstrap_used": int(base_pose_stats.get("n_corr_bootstrap_used", 0)),
+            "n_corr_post_bootstrap_used": int(base_pose_stats.get("n_corr_post_bootstrap_used", 0)),
+            "n_corr_bootstrap_after_local_consistency": int(base_pose_stats.get("n_corr_bootstrap_after_local_consistency", 0)),
+            "n_corr_post_bootstrap_after_local_consistency": int(base_pose_stats.get("n_corr_post_bootstrap_after_local_consistency", 0)),
+            "n_corr_bootstrap_after_spatial_thinning": int(base_pose_stats.get("n_corr_bootstrap_after_spatial_thinning", 0)),
+            "n_corr_post_bootstrap_after_spatial_thinning": int(base_pose_stats.get("n_corr_post_bootstrap_after_spatial_thinning", 0)),
+            "pnp_local_consistency_filter_enabled": bool(base_pose_stats.get("pnp_local_consistency_filter_enabled", False)),
+            "pnp_local_consistency_filter_apply_to_pipeline": bool(pnp_cfg["apply_pnp_local_consistency_filter_to_pipeline"]),
+            "pnp_local_consistency_filter_evaluated": bool(base_pose_stats.get("pnp_local_consistency_filter_evaluated", False)),
+            "pnp_local_consistency_filter_removed": int(base_pose_stats.get("pnp_local_consistency_filter_removed", 0)),
+            "pnp_local_consistency_radius_px": float(base_pose_stats.get("pnp_local_consistency_radius_px", pnp_cfg["pnp_local_consistency_radius_px"])),
+            "pnp_local_consistency_min_neighbours": int(
+                base_pose_stats.get("pnp_local_consistency_min_neighbours", pnp_cfg["pnp_local_consistency_min_neighbours"])
+            ),
+            "pnp_local_consistency_max_median_residual_px": float(
+                base_pose_stats.get(
+                    "pnp_local_consistency_max_median_residual_px",
+                    pnp_cfg["pnp_local_consistency_max_median_residual_px"],
+                )
+            ),
+            "pnp_spatial_thinning_filter_enabled": bool(base_pose_stats.get("pnp_spatial_thinning_filter_enabled", False)),
+            "pnp_spatial_thinning_filter_apply_to_pipeline": bool(pnp_cfg["apply_pnp_spatial_thinning_filter_to_pipeline"]),
+            "pnp_spatial_thinning_filter_evaluated": bool(base_pose_stats.get("pnp_spatial_thinning_filter_evaluated", False)),
+            "pnp_spatial_thinning_filter_removed": int(base_pose_stats.get("pnp_spatial_thinning_filter_removed", 0)),
+            "pnp_spatial_thinning_radius_px": float(
+                base_pose_stats.get("pnp_spatial_thinning_radius_px", pnp_cfg["pnp_spatial_thinning_radius_px"])
+            ),
+            "pnp_spatial_thinning_max_points_per_radius": int(
+                base_pose_stats.get(
+                    "pnp_spatial_thinning_max_points_per_radius",
+                    pnp_cfg["pnp_spatial_thinning_max_points_per_radius"],
+                )
+            ),
+            "base_n_pnp_inliers": int(base_pose_stats.get("n_pnp_inliers", 0)),
+            "base_pnp_component_gate_enabled": bool(base_pose_stats.get("pnp_component_gate_enabled", pnp_cfg["enable_pnp_component_gate"])),
+            "base_pnp_component_gate_evaluated": bool(base_pose_stats.get("pnp_component_gate_evaluated", False)),
+            "base_pnp_component_gate_rejected": bool(base_pose_stats.get("pnp_component_gate_rejected", False)),
+            "base_pnp_component_gate_reason": base_pose_stats.get("pnp_component_gate_reason", None),
+            "base_pnp_component_radius_px": float(base_pose_stats.get("pnp_component_radius_px", pnp_cfg["pnp_component_radius_px"])),
+            "base_pnp_inlier_component_count": int(base_pose_stats.get("pnp_inlier_component_count", 0)),
+            "base_pnp_inlier_largest_component_size": int(base_pose_stats.get("pnp_inlier_largest_component_size", 0)),
+            "base_pnp_inlier_largest_component_fraction": base_pose_stats.get("pnp_inlier_largest_component_fraction", None),
+            "base_pnp_inlier_largest_component_bbox_area_fraction": base_pose_stats.get("pnp_inlier_largest_component_bbox_area_fraction", None),
+            "base_pnp_threshold_stability": base_pose_stats.get("pnp_threshold_stability", None),
+            "base_pnp_threshold_stability_evaluated": bool(base_pose_stats.get("pnp_threshold_stability_evaluated", False)),
+            "base_pnp_threshold_stability_classification": base_pose_stats.get("pnp_threshold_stability_classification", "unavailable"),
+            "base_pnp_threshold_stability_unstable": bool(base_pose_stats.get("pnp_threshold_stability_unstable", False)),
+            "base_pnp_threshold_stability_ref_inliers": int(base_pose_stats.get("pnp_threshold_stability_ref_inliers", 0)),
+            "base_pnp_threshold_stability_compare_inliers": int(base_pose_stats.get("pnp_threshold_stability_compare_inliers", 0)),
+            "base_pnp_threshold_stability_support_iou": base_pose_stats.get("pnp_threshold_stability_support_iou", None),
+            "base_pnp_threshold_stability_rotation_delta_deg": base_pose_stats.get("pnp_threshold_stability_rotation_delta_deg", None),
+            "base_pnp_threshold_stability_translation_direction_delta_deg": base_pose_stats.get("pnp_threshold_stability_translation_direction_delta_deg", None),
+            "base_pnp_threshold_stability_camera_centre_direction_delta_deg": base_pose_stats.get("pnp_threshold_stability_camera_centre_direction_delta_deg", None),
+            "base_pnp_threshold_stability_looser_solution_only": bool(base_pose_stats.get("pnp_threshold_stability_looser_solution_only", False)),
+            "base_pnp_threshold_stability_supports_disjoint": bool(base_pose_stats.get("pnp_threshold_stability_supports_disjoint", False)),
+            "base_pnp_threshold_stability_reasons": base_pose_stats.get("pnp_threshold_stability_reasons", []),
+            "min_landmark_observations": int(base_pose_stats.get("min_landmark_observations", min_landmark_observations)),
+            "allow_bootstrap_landmarks_for_pose": bool(
+                base_pose_stats.get("allow_bootstrap_landmarks_for_pose", pnp_cfg["allow_bootstrap_landmarks_for_pose"])
+            ),
+            "min_post_bootstrap_observations_for_pose": int(
+                base_pose_stats.get(
+                    "min_post_bootstrap_observations_for_pose",
+                    pnp_cfg["min_post_bootstrap_observations_for_pose"],
+                )
+            ),
+            "landmark_observation_histogram": base_pose_stats.get("landmark_observation_histogram", {}),
+            "configured_threshold_px": float(frontend_kwargs["pnp_threshold_px"]),
+            "max_append_reproj_error_px_existing": float(max_append_reproj_error_px_existing),
+            "pnp_spatial_gate_enabled": bool(frontend_stats.get("pnp_spatial_gate_enabled", pnp_cfg["enable_pnp_spatial_gate"])),
+            "pnp_spatial_gate_rejected": bool(frontend_stats.get("pnp_spatial_gate_rejected", False)),
+            "pnp_spatial_gate_reason": frontend_stats.get("pnp_spatial_gate_reason", None),
+            "pnp_inlier_occupied_cells": int(frontend_stats.get("pnp_inlier_occupied_cells", 0)),
+            "pnp_inlier_max_cell_fraction": frontend_stats.get("pnp_inlier_max_cell_fraction", None),
+            "pnp_inlier_bbox_area_fraction": frontend_stats.get("pnp_inlier_bbox_area_fraction", None),
+            "pnp_component_gate_enabled": bool(frontend_stats.get("pnp_component_gate_enabled", pnp_cfg["enable_pnp_component_gate"])),
+            "pnp_component_gate_evaluated": bool(frontend_stats.get("pnp_component_gate_evaluated", False)),
+            "pnp_component_gate_rejected": bool(frontend_stats.get("pnp_component_gate_rejected", False)),
+            "pnp_component_gate_reason": frontend_stats.get("pnp_component_gate_reason", None),
+            "pnp_component_radius_px": float(frontend_stats.get("pnp_component_radius_px", pnp_cfg["pnp_component_radius_px"])),
+            "pnp_inlier_component_count": int(frontend_stats.get("pnp_inlier_component_count", 0)),
+            "pnp_inlier_largest_component_size": int(frontend_stats.get("pnp_inlier_largest_component_size", 0)),
+            "pnp_inlier_largest_component_fraction": frontend_stats.get("pnp_inlier_largest_component_fraction", None),
+            "pnp_inlier_largest_component_bbox_area_fraction": frontend_stats.get("pnp_inlier_largest_component_bbox_area_fraction", None),
+            "pnp_threshold_stability": frontend_stats.get("pnp_threshold_stability", None),
+            "pnp_threshold_stability_evaluated": bool(frontend_stats.get("pnp_threshold_stability_evaluated", False)),
+            "pnp_threshold_stability_classification": frontend_stats.get("pnp_threshold_stability_classification", "unavailable"),
+            "pnp_threshold_stability_unstable": bool(frontend_stats.get("pnp_threshold_stability_unstable", False)),
+            "pnp_threshold_stability_ref_inliers": int(frontend_stats.get("pnp_threshold_stability_ref_inliers", 0)),
+            "pnp_threshold_stability_compare_inliers": int(frontend_stats.get("pnp_threshold_stability_compare_inliers", 0)),
+            "pnp_threshold_stability_support_iou": frontend_stats.get("pnp_threshold_stability_support_iou", None),
+            "pnp_threshold_stability_rotation_delta_deg": frontend_stats.get("pnp_threshold_stability_rotation_delta_deg", None),
+            "pnp_threshold_stability_translation_direction_delta_deg": frontend_stats.get("pnp_threshold_stability_translation_direction_delta_deg", None),
+            "pnp_threshold_stability_camera_centre_direction_delta_deg": frontend_stats.get("pnp_threshold_stability_camera_centre_direction_delta_deg", None),
+            "pnp_threshold_stability_looser_solution_only": bool(frontend_stats.get("pnp_threshold_stability_looser_solution_only", False)),
+            "pnp_threshold_stability_supports_disjoint": bool(frontend_stats.get("pnp_threshold_stability_supports_disjoint", False)),
+            "pnp_threshold_stability_reasons": frontend_stats.get("pnp_threshold_stability_reasons", []),
+            "pipeline_ok": bool(frontend_out.get("ok", False)),
+            "pipeline_reason": frontend_stats.get("reason", None),
+            "pipeline_n_pnp_corr": int(frontend_stats.get("n_pnp_corr", 0)),
+            "pipeline_n_pnp_inliers": int(frontend_stats.get("n_pnp_inliers", 0)),
+            "pipeline_pnp_local_consistency_filter_removed": int(frontend_stats.get("pnp_local_consistency_filter_removed", 0)),
+            "pipeline_pnp_spatial_thinning_filter_removed": int(frontend_stats.get("pnp_spatial_thinning_filter_removed", 0)),
+            "n_append_candidates_existing": int(frontend_stats.get("n_append_candidates_existing", 0)),
+            "n_append_pnp_inliers": int(frontend_stats.get("n_append_pnp_inliers", 0)),
+            "n_append_total": int(frontend_stats.get("n_append_total", 0)),
+            "n_append_extra_reproj_pass": int(frontend_stats.get("n_append_extra_reproj_pass", 0)),
+            "n_append_duplicates": int(frontend_stats.get("n_append_duplicates", 0)),
+            "n_landmarks_with_obs_current_kf_after_append": int(
+                frontend_stats.get("n_landmarks_with_obs_current_kf_after_append", 0)
+            ),
+            "n_append_total_bootstrap_born": int(append_stats.get("n_append_total_bootstrap_born", 0)),
+            "n_append_total_map_growth_born": int(append_stats.get("n_append_total_map_growth_born", 0)),
+            "n_append_extra_reproj_added_bootstrap_born": int(
+                append_stats.get("n_append_extra_reproj_added_bootstrap_born", 0)
+            ),
+            "n_append_extra_reproj_added_map_growth_born": int(
+                append_stats.get("n_append_extra_reproj_added_map_growth_born", 0)
+            ),
+            "n_linked_landmarks_candidate": int(frontend_stats.get("n_linked_landmarks_candidate", 0)),
+            "pipeline_keyframe_promoted": bool(frontend_stats.get("keyframe_promoted", False)),
+            "pipeline_keyframe_reason": frontend_stats.get("keyframe_reason", None),
+        }
+        latest_ba_ids_for_pipeline = set()
+        if isinstance(latest_ba_record, dict):
+            latest_ba_ids_for_pipeline = set(int(v) for v in latest_ba_record.get("landmark_ids", []))
+        pipeline_pose_ids, pipeline_inlier_ids = _pose_support_landmark_id_lists(
+            frontend_out.get("pose_out", {}) if isinstance(frontend_out, dict) else {}
+        )
+        pipeline_pose_inside = _count_ids_inside_set(pipeline_pose_ids, latest_ba_ids_for_pipeline)
+        pipeline_inlier_inside = _count_ids_inside_set(pipeline_inlier_ids, latest_ba_ids_for_pipeline)
+        support_funnel_row = dict(support_funnel_diagnostic)
+        support_funnel_row.update(
+            {
+                "seed_landmarks_before": int(seed_landmarks_before),
+                "seed_landmarks_after": int(seed_landmarks_after),
+                "pipeline_ok": bool(frame_context.get("pipeline_ok", False)),
+                "pipeline_reason": frame_context.get("pipeline_reason", None),
+                "pipeline_n_pnp_corr": int(frame_context.get("pipeline_n_pnp_corr", 0)),
+                "pipeline_n_pnp_inliers": int(frame_context.get("pipeline_n_pnp_inliers", 0)),
+                "pipeline_final_pnp_inside_latest_ba": int(pipeline_pose_inside),
+                "pipeline_final_pnp_outside_latest_ba": int(len(pipeline_pose_ids) - pipeline_pose_inside),
+                "pipeline_pnp_inliers_inside_latest_ba": int(pipeline_inlier_inside),
+                "pipeline_pnp_inliers_outside_latest_ba": int(len(pipeline_inlier_ids) - pipeline_inlier_inside),
+                "pipeline_lost_final_pnp_to_inliers_inside_latest_ba": int(pipeline_pose_inside - pipeline_inlier_inside),
+                "pipeline_lost_final_pnp_to_inliers_outside_latest_ba": int(
+                    (len(pipeline_pose_ids) - pipeline_pose_inside) - (len(pipeline_inlier_ids) - pipeline_inlier_inside)
+                ),
+                "rescue_attempted": bool(frame_context.get("rescue_attempted", False)),
+                "rescue_succeeded": bool(frame_context.get("rescue_succeeded", False)),
+                "localisation_only_rescue_frame": bool(frontend_stats.get("localisation_only_rescue_frame", False)),
+                "support_refresh_triggered": bool(frame_context.get("support_refresh_triggered", False)),
+                "pipeline_keyframe_promoted": bool(frame_context.get("pipeline_keyframe_promoted", False)),
+                "pipeline_keyframe_reason": frame_context.get("pipeline_keyframe_reason", None),
+                "local_ba_succeeded": bool(frontend_stats.get("local_ba_succeeded", False)),
+                "local_ba_n_optimised_landmark_ids": int(len(local_ba_optimised_landmark_ids)),
+            }
+        )
+
+        threshold_scorecard = _threshold_scorecard_rows(threshold_rows)
+        scorecard_row = _frame_scorecard_row(frame_context)
+        scorecard_row.update(
+            {
+                "diagnostic_n_pnp_corr": int(base_pose_stats.get("n_corr", 0)),
+                "diagnostic_n_pnp_inliers": int(base_pose_stats.get("n_pnp_inliers", 0)),
+                "pnp_spatial_gate_rejected": bool(base_pose_stats.get("pnp_spatial_gate_rejected", False)),
+                "pnp_component_gate_rejected": bool(base_pose_stats.get("pnp_component_gate_rejected", False)),
+                "threshold_summary": _format_threshold_summary(threshold_rows),
+                "threshold_scorecard": threshold_scorecard,
+            }
+        )
+        scorecard_rows.append(scorecard_row)
+
+        # Write the frame summary
+        _append_jsonl(
+            log_path,
+            {
+                "event": "frame_summary",
+                **frame_context,
+            },
+        )
+
+        # Write the support-funnel row
+        _append_jsonl(
+            log_path,
+            support_funnel_row,
+        )
+
+        # Write a compact parseable scorecard row
+        _append_jsonl(
+            log_path,
+            {
+                "event": "frame_scorecard",
+                **scorecard_row,
+            },
+            )
+
+        # Write the threshold-pair non-PnP reprojection diagnostic
+        if non_pnp_reprojection_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_non_pnp_reprojection",
+                    **frame_context,
+                    "non_pnp_reprojection": non_pnp_reprojection_diagnostic,
+                },
+            )
+
+        # Write the threshold-pair local consistency diagnostic
+        if local_consistency_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_local_consistency",
+                    **frame_context,
+                    "local_consistency": local_consistency_diagnostic,
+                },
+            )
+
+        # Write the threshold-pair spatial thinning diagnostic
+        if spatial_thinning_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_spatial_thinning",
+                    **frame_context,
+                    "spatial_thinning": spatial_thinning_diagnostic,
+                },
+            )
+
+        # Write the threshold-pair before-filter pose comparison
+        if pnp_pose_comparison_before_diagnostic is not None and (bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])):
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_8px_12px_comparison_before_filters",
+                    **frame_context,
+                    "pnp_threshold_pair_comparison": pnp_pose_comparison_before_diagnostic,
+                },
+            )
+
+        # Write the threshold-pair pose comparison
+        if pnp_pose_comparison_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_8px_12px_comparison",
+                    **frame_context,
+                    "pnp_threshold_pair_comparison": pnp_pose_comparison_diagnostic,
+                },
+            )
+
+        # Write the threshold-pair before-filter spatial diagnostic
+        if pnp_spatial_before_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_spatial_summary_before_filters",
+                    **frame_context,
+                    "pnp_spatial": pnp_spatial_before_diagnostic,
+                },
+            )
+
+        # Write the threshold-pair spatial diagnostic
+        if pnp_spatial_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_spatial_summary",
+                    **frame_context,
+                    "pnp_spatial": pnp_spatial_diagnostic,
+                },
+            )
+
+        live_pipeline_event_context = {
+            **frame_context,
+            "bundle_source": "live_pipeline",
+            "diagnostic_reference_keyframe_index": int(ref_keyframe_index),
+            "reference_keyframe_index": int(live_pipeline_ref_keyframe_index),
+        }
+
+        # Write the live-pipeline threshold-pair pose comparison
+        if live_pipeline_pose_comparison_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_8px_12px_comparison_live_pipeline",
+                    **live_pipeline_event_context,
+                    "pnp_threshold_pair_comparison": live_pipeline_pose_comparison_diagnostic,
+                },
+            )
+
+        # Write the live-pipeline threshold-pair spatial diagnostic
+        if live_pipeline_spatial_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_pnp_spatial_summary_live_pipeline",
+                    **live_pipeline_event_context,
+                    "pnp_spatial": live_pipeline_spatial_diagnostic,
+                },
+            )
+
+        # Write the live-pipeline local consistency diagnostic
+        if live_pipeline_local_consistency_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "threshold_pair_local_consistency_live_pipeline",
+                    **live_pipeline_event_context,
+                    "local_consistency": live_pipeline_local_consistency_diagnostic,
+                },
+            )
+
+        # Write the live-pipeline refreshed-basis assignment audit
+        if live_pipeline_assignment_audit is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "frame_assignment_audit_live_pipeline",
+                    **live_pipeline_event_context,
+                    "assignment_audit": live_pipeline_assignment_audit,
+                },
+            )
+
+        # Write one live-pipeline diagnostic row per threshold
+        if live_pipeline_threshold_rows is not None:
+            for row in live_pipeline_threshold_rows:
+                _append_jsonl(
+                    log_path,
+                    {
+                        "event": "pnp_threshold_live_pipeline",
+                        **live_pipeline_event_context,
+                        **row,
+                    },
+                )
+
+        # Write one diagnostic row per threshold
+        for row in threshold_rows:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "pnp_threshold",
+                    **frame_context,
+                    **row,
+                },
+            )
+
+        # Write downstream reuse of recently BA-optimised landmarks
+        for ba_record in successful_ba_records:
+            frame_offset = int(i) - int(ba_record["frame_index"])
+            if (frame_offset < 1 or frame_offset > 3) and bool(frame_context.get("pipeline_ok", False)):
+                continue
+            _append_jsonl(
+                log_path,
+                _local_ba_propagation_row(
+                    ba_record,
+                    seed,
+                    frontend_out,
+                    frame_context,
+                    seen_ids=propagation_seen_ids,
+                    mapped_ids=propagation_mapped_ids,
+                ),
+            )
+
+        if scorecard_mode != "off":
+            print(_format_frame_scorecard(scorecard_row, mode=scorecard_mode))
+            if scorecard_mode == "short":
+                print(f"  thresholds {scorecard_row['threshold_summary']}")
+
+        if scorecard_mode == "long":
+            print(_format_pnp_threshold_stability_diagnostic(base_pose_stats.get("pnp_threshold_stability", None)))
+            if non_pnp_reprojection_diagnostic is not None:
+                for line in _format_non_pnp_reprojection_diagnostic(non_pnp_reprojection_diagnostic):
+                    print(line)
+            if local_consistency_diagnostic is not None:
+                for line in _format_threshold_pair_local_consistency_diagnostic(local_consistency_diagnostic):
+                    print(line)
+            if spatial_thinning_diagnostic is not None:
+                for line in _format_threshold_pair_spatial_thinning_diagnostic(spatial_thinning_diagnostic):
+                    print(line)
+            if pnp_pose_comparison_before_diagnostic is not None and (
+                bool(pnp_cfg["enable_pnp_local_consistency_filter"])
+                or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"])
+            ):
+                print("  threshold_pair_before_filters:")
+                for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_before_diagnostic):
+                    print(line)
+            if pnp_pose_comparison_diagnostic is not None:
+                if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+                    print("  threshold_pair_after_filters:")
+                for line in _format_threshold_pair_pose_comparison(pnp_pose_comparison_diagnostic):
+                    print(line)
+            if pnp_spatial_before_diagnostic is not None:
+                print("  threshold_pair_spatial_before_filters:")
+                for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_before_diagnostic):
+                    print(line)
+            if pnp_spatial_diagnostic is not None:
+                if bool(pnp_cfg["enable_pnp_local_consistency_filter"]) or bool(pnp_cfg["enable_pnp_spatial_thinning_filter"]):
+                    print("  threshold_pair_spatial_after_filters:")
+                for line in _format_threshold_pair_spatial_diagnostic(pnp_spatial_diagnostic):
+                    print(line)
+            if live_pipeline_threshold_rows is not None:
+                print(
+                    f"  live_pipeline_thresholds: "
+                    f"ref={int(live_pipeline_ref_keyframe_index)} "
+                    f"{_format_threshold_summary(live_pipeline_threshold_rows)}"
+                )
+            if live_pipeline_pose_comparison_diagnostic is not None:
+                print("  threshold_pair_live_pipeline:")
+                for line in _format_threshold_pair_pose_comparison(live_pipeline_pose_comparison_diagnostic):
+                    print(line)
+            if live_pipeline_local_consistency_diagnostic is not None:
+                print("  threshold_pair_local_consistency_live_pipeline:")
+                for line in _format_threshold_pair_local_consistency_diagnostic(live_pipeline_local_consistency_diagnostic):
+                    print(line)
+            if live_pipeline_spatial_diagnostic is not None:
+                print("  threshold_pair_spatial_live_pipeline:")
+                for line in _format_threshold_pair_spatial_diagnostic(live_pipeline_spatial_diagnostic):
+                    print(line)
+
+        if bool(frontend_stats.get("local_ba_succeeded", False)):
+            successful_ba_records.append(
+                {
+                    "frame_index": int(i),
+                    "active_keyframe": -1 if local_ba_active_keyframe is None else int(local_ba_active_keyframe),
+                    "landmark_ids": [int(v) for v in local_ba_optimised_landmark_ids],
+                }
+            )
+
+        # Update the live frontend state for the next frame
+        seed = frontend_out["seed"]
+        if bool(frontend_out.get("stats", {}).get("keyframe_promoted", False)):
+            keyframe_feats = frontend_out["track_out"]["cur_feats"]
+            keyframe_index = i
+
+    run_summary = _run_summary_from_scorecards(scorecard_rows)
+    run_summary.update(
+        {
+            "profile": str(profile_path),
+            "dataset_root": str(dataset_root),
+            "seq_name": str(seq_name),
+            "thresholds": [float(v) for v in thresholds],
+            "log_path": str(log_path),
+        }
+    )
+    _append_jsonl(
+        log_path,
+        {
+            "event": "run_summary",
+            **run_summary,
+        },
+    )
+    print(
+        f"summary: frames={int(run_summary['frames_processed'])} "
+        f"ok={int(run_summary['pipeline_ok_frames'])} "
+        f"failed={int(run_summary['pipeline_failed_frames'])} "
+        f"promoted={int(run_summary['keyframes_promoted'])} "
+        f"rescue={int(run_summary['rescue_attempted_frames'])}/{int(run_summary['rescue_succeeded_frames'])} "
+        f"refresh={int(run_summary['support_refresh_triggered_frames'])} "
+        f"log={log_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()
