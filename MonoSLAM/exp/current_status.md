@@ -13,6 +13,7 @@
 - live-pipeline threshold diagnostics in `scripts/diag_pnp_eth3d.py`
 - live-pipeline local displacement-consistency diagnostics
 - live-pipeline refreshed-basis assignment diagnostics
+- diagnostic-only selected rescue-refresh suppression replay
 
 ## Reverted or failed experiments
 - proactive rescued-basis retracking before late support collapse
@@ -120,8 +121,61 @@
 - the failure is now classified as coherent 2D tracks with internally consistent assignments attached to a geometrically incompatible 3D support set
 - frame-19 geometry drift is broad rather than concentrated in a landmark subgroup
 
+## Rescue-refresh counterfactual
+- one 40-frame replay kept rescue localisation unchanged but suppressed active-basis refresh at frames 12 and 16
+- frame 12 remained the same accepted rescue:
+  - 45 final PnP correspondences
+  - 40 inliers
+  - active basis retained at frame 10 instead of moving to frame 12
+- frame 13 and frame 14 still rescued successfully and refreshed normally
+- frame 15 rescued with 18 / 34 inliers, but its support was too weak to refresh
+- frame 16 then failed with 0 / 22 inliers, so the requested frame-16 refresh suppression was never reached
+- first failure moved earlier from frame 19 to frame 16
+- 40-frame ok / failed changed from 17 / 23 to 14 / 26
+- counterfactual frame 19 used 18 live landmarks from active basis 14:
+  - pooled canonical-history median / p90: 1.89 / 11.82 px
+  - 14 / 18 landmarks still classified as drifting
+  - frame 12 contributed 41.20 per cent of pooled squared reprojection error
+  - frame 12 contributed 56.00 per cent of residuals above 8 px
+- the nine-landmark intersection with the baseline frame-19 set remained broad:
+  - baseline median / p90: 2.63 / 10.42 px
+  - counterfactual median / p90: 1.98 / 11.02 px
+  - drifting landmarks changed from 9 / 9 to 7 / 9
+- suppressing frame-12 refresh therefore reduced some median residuals but materially worsened support survival
+- bad rescue poses are correlated with canonical-history error, but active-basis refresh is not their main harmful propagation path
+- frame-12 refresh is beneficial for support continuity despite the bad canonical pose
+
+## Frame-16-only rescue-refresh counterfactual
+- a fresh trusted baseline replay reproduced:
+  - first failure at frame 19
+  - 17 / 40 frames ok
+  - 10 / 9 rescues attempted / succeeded
+  - nine support refreshes
+- one 40-frame replay preserved frame-12 refresh and suppressed only the frame-16 active-basis refresh
+- frame 16 remained the same accepted rescue:
+  - 28 final PnP correspondences
+  - 24 inliers
+  - active basis retained at frame 15 instead of moving to frame 16
+- frame 17 then failed with 0 / 16 inliers
+- frames 18 and 19 also failed with 0 / 19 and 0 / 22 inliers
+- first failure moved earlier from frame 19 to frame 17
+- 40-frame ok / failed changed from 17 / 23 to 15 / 25
+- rescue attempted / succeeded changed from 10 / 9 to 10 / 7
+- counterfactual frame 19 used 22 live landmarks from active basis 15:
+  - pooled canonical-history median / p90: 2.27 / 10.71 px
+  - 21 / 22 landmarks remained classified as drifting
+  - frame 16 contributed 24.62 per cent of pooled squared reprojection error
+  - frame 16 contributed 35.00 per cent of residuals above 8 px
+- the 16-landmark intersection with the baseline frame-19 set remained broad:
+  - baseline median / p90: 2.79 / 11.00 px
+  - counterfactual median / p90: 2.27 / 11.04 px
+  - all 16 landmarks remained classified as drifting in both runs
+- the lower counterfactual median does not indicate recovery because frames 17 and 18 failed and added no accepted canonical observations
+- frame-16 refresh supports downstream continuity rather than causing the frame-19 collapse
+- frame-16 refresh is not the main problem
+
 ## Current open question
-Does suppressing support-basis refresh at the two bad canonical rescue poses prevent the frame-19 failure?
+Why do rescue localisation frames 12 and 16 become canonical pose-history outliers despite their refreshed support being useful downstream?
 
 ## Best next step
-Run one diagnostic counterfactual that keeps rescue localisation at frames 12 and 16 but retains the preceding active support basis at those two frames.
+Keep rescue refresh enabled and diagnose rescue-pose acceptance quality at frame 16 against neighbouring canonical poses.

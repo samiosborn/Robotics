@@ -17,7 +17,7 @@ from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thi
 from geometry.rotation import angle_between_rotmats
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
-from slam.keyframe_state import get_active_keyframe_features, get_active_landmark_lookup, get_pose_for_kf
+from slam.keyframe_state import get_active_keyframe_features, get_active_keyframe_kf, get_active_landmark_lookup, get_pose_for_kf, set_active_keyframe_record
 from slam.landmark_state import count_valid_landmark_observations
 from slam.pnp_config import pnp_frontend_kwargs_from_cfg
 from slam.pnp_frontend import estimate_pose_from_seed
@@ -345,6 +345,66 @@ def _run_summary_from_scorecards(rows: list[dict]) -> dict:
         "rescue_succeeded_frames": int(sum(1 for row in rows if bool(row.get("rescue_succeeded", False)))),
         "support_refresh_triggered_frames": int(sum(1 for row in rows if bool(row.get("support_refresh_triggered", False)))),
     }
+
+
+# Snapshot the active support basis for diagnostic restoration
+def _active_support_basis_snapshot(seed: dict) -> dict:
+    active_kf = int(get_active_keyframe_kf(seed))
+    R, t = get_pose_for_kf(seed, active_kf, context="diagnostic active basis snapshot")
+    return {
+        "kf": int(active_kf),
+        "R": np.asarray(R, dtype=np.float64).copy(),
+        "t": np.asarray(t, dtype=np.float64).reshape(3).copy(),
+        "feats": get_active_keyframe_features(seed),
+        "landmark_id_by_feat": np.asarray(get_active_landmark_lookup(seed), dtype=np.int64).reshape(-1).copy(),
+    }
+
+
+# Restore one snapshotted basis without changing other frame results
+def _restore_active_support_basis(seed: dict, basis: dict) -> dict:
+    seed_out = dict(seed)
+    seed_out["poses"] = dict(seed.get("poses", {}))
+    seed_out["keyframes"] = dict(seed.get("keyframes", {}))
+    pose = (
+        np.asarray(basis["R"], dtype=np.float64).copy(),
+        np.asarray(basis["t"], dtype=np.float64).reshape(3).copy(),
+    )
+    lookup = np.asarray(basis["landmark_id_by_feat"], dtype=np.int64).reshape(-1).copy()
+    set_active_keyframe_record(seed_out, int(basis["kf"]), pose, basis["feats"], lookup)
+    return seed_out
+
+
+# Suppress a selected refresh after normal rescue processing
+def _suppress_selected_support_refresh(
+    frontend_out: dict,
+    basis_before: dict,
+    *,
+    frame_index: int,
+    suppress_frames: set[int],
+) -> tuple[dict, bool, bool]:
+    if not isinstance(frontend_out, dict):
+        return frontend_out, False, False
+
+    stats = frontend_out.get("stats", {})
+    stats = stats if isinstance(stats, dict) else {}
+    would_refresh = bool(stats.get("guarded_support_refresh_triggered", False))
+    should_suppress = int(frame_index) in suppress_frames and bool(would_refresh)
+    if not bool(should_suppress):
+        return frontend_out, bool(would_refresh), False
+
+    frontend_out = dict(frontend_out)
+    frontend_out["seed"] = _restore_active_support_basis(frontend_out["seed"], basis_before)
+    stats = dict(stats)
+    stats.update(
+        {
+            "guarded_support_refresh_triggered": False,
+            "guarded_support_refresh_reason": "diagnostic_refresh_suppressed",
+            "diagnostic_support_refresh_would_have_triggered": True,
+            "diagnostic_support_refresh_suppressed": True,
+        }
+    )
+    frontend_out["stats"] = stats
+    return frontend_out, True, True
 
 
 # Format an optional pixel error for concise terminal output
@@ -2906,6 +2966,8 @@ def main() -> None:
     parser.add_argument("--scorecard", choices=["short", "long", "off"], default="short")
     # Frame used for threshold-pair deep diagnostics
     parser.add_argument("--threshold_pair_frame_index", type=int, default=4)
+    # Rescue frames whose active support refresh is suppressed diagnostically
+    parser.add_argument("--suppress_support_refresh_frames", type=int, nargs="*", default=[])
     # Minimum landmark observation count used before PnP
     parser.add_argument("--min_landmark_observations", type=int, default=2)
     # Tight reprojection gate for appending existing-landmark observations
@@ -2971,6 +3033,10 @@ def main() -> None:
     thresholds = _parse_thresholds(list(args.thresholds))
     scorecard_mode = str(args.scorecard)
     threshold_pair_frame_index = check_int_ge0(args.threshold_pair_frame_index, name="threshold_pair_frame_index")
+    suppress_support_refresh_frames = {
+        check_int_ge0(frame_index, name="suppress_support_refresh_frame")
+        for frame_index in args.suppress_support_refresh_frames
+    }
     min_landmark_observations = check_int_gt0(args.min_landmark_observations, name="min_landmark_observations")
     max_append_reproj_error_px_existing = check_positive(
         args.max_append_reproj_error_px_existing,
@@ -3051,6 +3117,7 @@ def main() -> None:
     print(f"bootstrap ok: {boot['ok']}")
     print(f"bootstrap stats: {boot['stats']}")
     print(f"max_append_reproj_error_px_existing: {max_append_reproj_error_px_existing}")
+    print(f"suppress_support_refresh_frames: {sorted(suppress_support_refresh_frames)}")
     print(
         f"pnp_spatial_gate: enabled={bool(pnp_cfg['enable_pnp_spatial_gate'])} "
         f"grid={int(pnp_cfg['pnp_spatial_grid_cols'])}x{int(pnp_cfg['pnp_spatial_grid_rows'])} "
@@ -3104,6 +3171,7 @@ def main() -> None:
             "thresholds": [float(v) for v in thresholds],
             "scorecard": str(scorecard_mode),
             "threshold_pair_frame_index": int(threshold_pair_frame_index),
+            "suppress_support_refresh_frames": sorted(int(v) for v in suppress_support_refresh_frames),
             "min_landmark_observations": int(min_landmark_observations),
             "max_append_reproj_error_px_existing": float(max_append_reproj_error_px_existing),
             "enable_pnp_local_consistency_filter": bool(pnp_cfg["enable_pnp_local_consistency_filter"]),
@@ -3150,6 +3218,7 @@ def main() -> None:
         live_pipeline_ref_keyframe_index = int(seed.get("active_keyframe_kf", ref_keyframe_index))
         live_pipeline_ref_keyframe_feats = get_active_keyframe_features(seed)
         refreshed_basis_for_frame = latest_refreshed_basis_snapshot
+        active_basis_before = _active_support_basis_snapshot(seed)
 
         # Read the current frame image
         cur_im, cur_ts, cur_id = seq.get(i)
@@ -3330,6 +3399,12 @@ def main() -> None:
             current_kf=i,
             max_append_reproj_error_px_existing=float(max_append_reproj_error_px_existing),
         )
+        frontend_out, support_refresh_would_have_triggered, support_refresh_suppressed = _suppress_selected_support_refresh(
+            frontend_out,
+            active_basis_before,
+            frame_index=int(i),
+            suppress_frames=suppress_support_refresh_frames,
+        )
         frontend_stats = frontend_out.get("stats", {}) if isinstance(frontend_out, dict) else {}
         seed_landmarks_after = int(len(frontend_out.get("seed", {}).get("landmarks", []))) if isinstance(frontend_out, dict) else seed_landmarks_before
 
@@ -3444,6 +3519,17 @@ def main() -> None:
             "timestamp": float(cur_ts),
             "reference_keyframe_index": int(ref_keyframe_index),
             "live_pipeline_reference_keyframe_index": int(live_pipeline_ref_keyframe_index),
+            "active_basis_before_kf": int(active_basis_before["kf"]),
+            "active_basis_after_kf": int(frontend_out.get("seed", {}).get("active_keyframe_kf", -1)),
+            "accepted_pose_type": (
+                "failed"
+                if not bool(frontend_out.get("ok", False))
+                else "rescue"
+                if bool(frontend_stats.get("localisation_only_rescue_frame", False))
+                else "normal"
+            ),
+            "support_refresh_would_have_triggered": bool(support_refresh_would_have_triggered),
+            "support_refresh_suppressed": bool(support_refresh_suppressed),
             "threshold_pair_frame_index": int(threshold_pair_frame_index),
             "seed_landmarks_before": int(seed_landmarks_before),
             "seed_landmarks_after": int(seed_landmarks_after),

@@ -290,3 +290,83 @@ Decision
 Next step
 - compare the 22 links against the accepted frame-18 pose and stored frame-18 observations
 - distinguish feature-to-landmark assignment error from landmark-geometry drift
+
+---
+
+## 2026-06-13 — Rescue-refresh suppression counterfactual
+
+Base state
+- trusted BA-enabled pipeline with first failure at frame 19
+- bad canonical rescue poses at frames 12 and 16 were the main geometry-history outliers
+
+Hypothesis
+- frames 12 and 16 mainly damage downstream support when their rescued poses become refreshed active bases
+
+Diagnostic step
+- extended `scripts/diag_pnp_eth3d.py` with selected-frame refresh suppression
+- kept rescue localisation, observation append, canonical pose storage, and rescue bookkeeping unchanged
+- replayed 40 frames with refresh suppressed at frames 12 and 16
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 19 --out_dir /tmp/diag_refresh_counterfactual_baseline`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 19 --suppress_support_refresh_frames 12 16 --out_dir /tmp/diag_refresh_counterfactual_no12_no16`
+
+Result
+- frame 12 rescue stayed accepted at 40 / 45, with its refresh suppressed
+- frame 13 and frame 14 refreshed normally
+- frame 15 rescue weakened to 18 / 34 and did not refresh
+- first failure moved earlier from frame 19 to frame 16 at 0 / 22
+- frame-16 refresh suppression was not reached because rescue failed
+- 40-frame ok / failed changed from 17 / 23 to 14 / 26
+- frame-19 canonical-history p90 remained broad at 11.82 px with 14 / 18 landmarks drifting
+- frame 12 still contributed 41.20 per cent of squared error and 56.00 per cent of residuals above 8 px
+
+Decision
+- bad rescue poses are correlated but not the main propagation path
+- frame-12 active-basis refresh is beneficial for support continuity
+- no production change
+
+Next step
+- isolate frame 16 with a frame-16-only no-refresh replay
+
+---
+
+## 2026-06-13 — Frame-16-only refresh suppression
+
+Base state
+- trusted BA-enabled pipeline with first failure at frame 19
+- frame-12 refresh known to be useful for support continuity
+
+Hypothesis
+- frame-16 rescued-support refresh independently propagates downstream harm
+
+Diagnostic step
+- used the existing selected-frame refresh suppression replay
+- preserved frame-12 refresh
+- suppressed active-basis refresh only at frame 16
+- kept rescue acceptance, observation append, canonical pose storage, and bookkeeping unchanged
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 19 --out_dir /tmp/diag_refresh_frame16_baseline`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 19 --suppress_support_refresh_frames 16 --out_dir /tmp/diag_refresh_frame16_no16`
+- parsed frame summaries and frame-19 live assignment audits from both JSONL logs
+
+Result
+- baseline reproduced first failure at frame 19 and 17 / 40 frames ok
+- frame 16 remained accepted at 24 / 28, with basis 15 retained
+- first failure moved earlier to frame 17 at 0 / 16
+- 40-frame ok / failed changed from 17 / 23 to 15 / 25
+- counterfactual frame 19 still failed at 0 / 22 from active basis 15
+- pooled canonical-history median / p90 changed from 2.87 / 10.87 px to 2.27 / 10.71 px
+- drifting landmarks changed from 22 / 22 to 21 / 22
+- frame 16 still contributed 24.62 per cent of squared error and 35.00 per cent of residuals above 8 px
+- all 16 shared frame-19 landmarks remained drifting, with p90 changing from 11.00 px to 11.04 px
+
+Decision
+- frame-16 refresh is not the main problem
+- suppressing it materially worsens support survival
+- keep rescue refresh enabled
+- no production change
+
+Next step
+- diagnose frame-16 rescue-pose acceptance quality against neighbouring canonical poses
