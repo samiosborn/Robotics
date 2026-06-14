@@ -11,7 +11,7 @@ from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add
 from frontend_reporting import format_frame_scorecard as _format_frame_scorecard, seed_landmark_count as _seed_landmark_count, standard_frame_stats as _standard_frame_stats
 from jsonl_io import append_jsonl as _append_jsonl, reset_jsonl as _reset_jsonl
 from core.checks import check_dir, check_int_ge0, check_int_gt0
-from datasets.eth3d import load_eth3d_sequence
+from datasets.loader import load_sequence
 from features.viz import draw_matches
 from slam.frame_pipeline import process_frame_against_seed
 from slam.frontend import bootstrap_from_two_frames
@@ -168,6 +168,7 @@ def main() -> None:
 
     dataset_cfg = cfg["dataset"]
     run_cfg = cfg["run"]
+    dataset_name = str(dataset_cfg.get("name", "eth3d"))
 
     dataset_root = (
         Path(args.dataset_root).expanduser().resolve()
@@ -196,8 +197,9 @@ def main() -> None:
     if i1 <= i0:
         raise ValueError(f"Expected i1 > i0 for bootstrap; got i0={i0}, i1={i1}")
 
-    # Load ETH3D sequence
-    seq = load_eth3d_sequence(
+    # Load dataset sequence
+    seq = load_sequence(
+        dataset_name,
         dataset_root,
         seq_name,
         normalise_01=True,
@@ -208,7 +210,7 @@ def main() -> None:
     max_frames = dataset_cfg.get("max_frames", None)
     n_effective = len(seq) if max_frames is None else min(len(seq), int(max_frames))
     if n_effective <= 0:
-        raise ValueError("Loaded ETH3D sequence is empty")
+        raise ValueError("Loaded sequence is empty")
 
     if i0 >= n_effective or i1 >= n_effective:
         raise IndexError(f"Bootstrap indices out of range for effective sequence length {n_effective}")

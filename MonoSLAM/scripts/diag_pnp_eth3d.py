@@ -12,7 +12,7 @@ from frontend_reporting import format_frame_scorecard as _format_frame_scorecard
 from jsonl_io import append_jsonl as _append_jsonl, reset_jsonl as _reset_jsonl
 
 from core.checks import align_bool_mask_1d, check_dir, check_int_ge0, check_int_gt0, check_positive
-from datasets.eth3d import load_eth3d_sequence
+from datasets.loader import load_sequence
 from geometry.camera import camera_centre, reprojection_errors_sq, reprojection_rmse, world_to_camera_points
 from geometry.pose import angle_between_translations
 from geometry.pnp import estimate_pose_pnp_ransac, pnp_current_image_spatial_thinning_mask, pnp_local_displacement_consistency_mask, pnp_threshold_stability_flags
@@ -2650,6 +2650,7 @@ def main() -> None:
 
     dataset_cfg = cfg["dataset"]
     run_cfg = cfg["run"]
+    dataset_name = str(dataset_cfg.get("name", "eth3d"))
 
     dataset_root = (
         Path(args.dataset_root).expanduser().resolve()
@@ -2676,8 +2677,9 @@ def main() -> None:
     if i1 <= i0:
         raise ValueError(f"Expected i1 > i0 for bootstrap; got i0={i0}, i1={i1}")
 
-    # Load ETH3D sequence
-    seq = load_eth3d_sequence(
+    # Load dataset sequence
+    seq = load_sequence(
+        dataset_name,
         dataset_root,
         seq_name,
         normalise_01=True,
@@ -2692,7 +2694,7 @@ def main() -> None:
     else:
         n_effective = min(len(seq), max(int(max_frames), int(min_required_frames)))
     if n_effective <= 0:
-        raise ValueError("Loaded ETH3D sequence is empty")
+        raise ValueError("Loaded sequence is empty")
 
     if i0 >= n_effective or i1 >= n_effective:
         raise IndexError(f"Bootstrap indices out of range for effective sequence length {n_effective}")

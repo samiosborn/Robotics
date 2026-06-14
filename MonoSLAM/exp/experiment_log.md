@@ -476,3 +476,24 @@ Validation
 
 Decision
 - kept
+
+---
+
+## 2026-06-14 — Stage 3 runner-level dataset-loader cleanup
+
+Change
+- added `src/datasets/loader.py` with explicit dispatch on `dataset.name`
+- `"eth3d"` routes to existing `load_eth3d_sequence`; anything else raises `ValueError`
+- updated `scripts/demo_frontend_eth3d.py` to import `load_sequence` and read `dataset_name` from `dataset_cfg["name"]`
+- updated `scripts/diag_pnp_eth3d.py` identically
+- removed hard-coded "ETH3D" from two error messages in the runners
+- `eth3d.py`, `frontend_eth3d_common.py`, SLAM logic, and old experiment scripts left untouched
+
+Validation
+- script compilation passed: `src/datasets/*.py`, both runners, `frontend_eth3d_common.py`
+- `tests/slam`: 71 passed
+- frontend demo completed normally
+- 12-frame PnP diagnostic: 12 ok, 0 failed
+
+Decision
+- kept
