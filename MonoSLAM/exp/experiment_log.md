@@ -370,3 +370,36 @@ Decision
 
 Next step
 - diagnose frame-16 rescue-pose acceptance quality against neighbouring canonical poses
+
+---
+
+## 2026-06-14 — Frame-16 refresh suppression reproduction
+
+Base state
+- trusted BA-enabled pipeline with first failure at frame 19
+- frame-12 rescued-support refresh preserved
+
+Diagnostic step
+- reran the trusted 40-frame baseline
+- suppressed active-basis refresh only at frame 16
+- kept rescue acceptance, observation append, canonical pose storage, and bookkeeping unchanged
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 19 --out_dir /tmp/diag_refresh_frame16_20260614_baseline`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 19 --suppress_support_refresh_frames 16 --out_dir /tmp/diag_refresh_frame16_20260614_no16`
+- parsed frame summaries and frame-19 live assignment audits from both JSONL logs
+
+Result
+- baseline reproduced first failure at frame 19 and 17 / 40 frames ok
+- frame 16 remained accepted at 24 / 28, with basis 15 retained
+- first failure moved earlier to frame 17 at 0 / 16
+- pooled frame-19 canonical-history median / p90 changed from 2.87 / 10.87 px to 2.27 / 10.71 px
+- 21 / 22 counterfactual frame-19 live landmarks remained drifting
+- frame 16 contributed 24.62 per cent of squared error from 6.27 per cent of observations
+- all 16 shared frame-19 landmarks remained drifting, with p90 changing from 11.00 px to 11.04 px
+
+Decision
+- frame-16 refresh is not the main problem
+- suppressing it worsens support survival
+- keep rescue refresh enabled
+- no production change
