@@ -908,3 +908,54 @@ Decision
 - production code unchanged
 - current status sharpened with causal refresh labels
 - next compare causal labels for a feature beyond pooled history thresholds
+
+---
+
+## 2026-06-15 - Downstream reuse comparison across labelled refresh events
+
+Base state
+- four causal refresh labels: KITTI 14/17 and ETH3D 17 as load_bearing_good_refresh; ETH3D 18 as mostly_neutral_refresh
+- pooled history thresholds confirmed not robust (ETH3D 17 vs 18 differ by one landmark)
+- question: what at-refresh feature separates the three good refreshes from the neutral one
+
+Diagnostic step
+- ran diag_pnp_kitti.py with --num_track 20 and diag_pnp_eth3d.py with --num_track 22
+- parsed frame_summary and rescue_refresh_candidate events from JSONL
+- recorded at-refresh properties (n_inliers, cells, max_cell_frac, drifting_frac) and downstream frame outcomes (f+1, f+2, f+3: ok, inliers, same_basis) for each target refresh frame
+
+Validation
+- `uv run python scripts/diag_pnp_kitti.py --num_track 20 --out_dir /tmp/diag_refresh_kitti --scorecard off`
+- `uv run python scripts/diag_pnp_eth3d.py --num_track 22 --out_dir /tmp/diag_refresh_eth3d --scorecard off`
+- KITTI summary: frames=20, ok=16, failed=4, rescue=9/5, refresh=2
+- ETH3D summary: frames=22, ok=17, failed=5, rescue=10/9, refresh=9
+
+At-refresh properties
+- KITTI 14: 109 inliers, 5 cells, max_cell_frac=0.743, drifting_frac=0.716, basis 13→14
+- KITTI 17: 64 inliers, 5 cells, max_cell_frac=0.844, drifting_frac=0.750, basis 14→17
+- ETH3D 17: 23 inliers, 3 cells, max_cell_frac=0.565, drifting_frac=1.000, basis 16→17
+- ETH3D 18: 23 inliers, 3 cells, max_cell_frac=0.652, drifting_frac=1.000, basis 17→18
+- all four cleared the guard (support_strong_enough=True, spatially_concentrated=False)
+
+Downstream persistence (f+1, f+2, f+3 — ok / inliers / same_basis)
+- KITTI 14 (good): True/62/same  True/65/same  True/64/same  → 3/3 accepted
+- KITTI 17 (good): True/49/same  False/0/same  True/40/same  → 2/3 accepted
+- ETH3D 17 (good): True/23/same  False/0/new-basis  False/0/new-basis  → 1/3 accepted
+- ETH3D 18 (neutral): False/0/same  False/0/same  False/0/same  → 0/3 accepted
+- (ETH3D f+2 for frame-17 uses basis-18 because frame-18 triggers another refresh)
+
+Result
+- downstream reuse is a clean monotone separator: good refreshes ≥ 1 accepted downstream frame; neutral = 0
+- limiting pair ETH3D 17 (good, 1/3) vs ETH3D 18 (neutral, 0/3) is at-refresh-indistinguishable:
+  - both have 23 inliers, 3 cells, drifting_frac=1.000, landmark obs-count median 15–16
+  - largest_component_fraction=1.000 for both; no spatial metric separates them
+- downstream reuse is strictly retrospective: it cannot be measured at refresh time
+
+Classification
+- separator identified: `downstream reuse` (≥1 accepted frame in f+1..f+3)
+- type: retrospective only — no current at-refresh signal predicts it for ETH3D 17 vs 18
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- current status updated with downstream reuse finding and limiting-pair ambiguity
+- next investigate why basis-18 fails at frame 19 while basis-17 allowed frame 18: per-landmark geometry comparison (depth, triangulation baseline, viewpoint angle) between the two bases

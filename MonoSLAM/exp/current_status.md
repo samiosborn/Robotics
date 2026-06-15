@@ -337,5 +337,24 @@ Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candida
 - the earlier proxy label for ETH3D frame 18 as bad is not supported causally: suppressing its refresh does not improve survival
 - single-frame counterfactuals reveal usable refresh labels, but the labels do not yet imply a robust observable separator
 
+## Downstream reuse comparison (2026-06-15)
+- ran KITTI (num_track=20) and ETH3D (num_track=22) through diag_pnp scripts; parsed frame_summary and rescue_refresh_candidate JSONL events
+- at-refresh properties for all four labelled events:
+  - KITTI 14: 109 inliers, 5 cells, max_cell_frac=0.743, drifting_frac=0.716, basis 13→14
+  - KITTI 17: 64 inliers, 5 cells, max_cell_frac=0.844, drifting_frac=0.750, basis 14→17
+  - ETH3D 17: 23 inliers, 3 cells, max_cell_frac=0.565, drifting_frac=1.000, basis 16→17
+  - ETH3D 18: 23 inliers, 3 cells, max_cell_frac=0.652, drifting_frac=1.000, basis 17→18
+  - all four: support_strong_enough=True, spatially_concentrated=False
+- downstream persistence (ok / inliers) at f+1, f+2, f+3:
+  - KITTI 14 (good): T/62, T/65, T/64 → 3/3 accepted
+  - KITTI 17 (good): T/49, F/0, T/40 → 2/3 accepted
+  - ETH3D 17 (good): T/23, F/0†, F/0 → 1/3 accepted
+  - ETH3D 18 (neutral): F/0, F/0, F/0 → 0/3 accepted
+  - †ETH3D frame 17 f+2 uses basis-18 (frame 18 triggers its own refresh)
+- separator: downstream reuse (n_ok_in_window ≥ 1) cleanly separates all three good from the neutral
+- limiting pair ETH3D 17 vs 18 is at-refresh-indistinguishable: identical inlier count (23), cells (3), drifting_frac (1.000), and obs-count median (15 vs 16)
+- downstream reuse is strictly retrospective; no current at-refresh feature predicts it for the ETH3D boundary
+- classification: `downstream reuse` is the separator
+
 ## Current next step
-Keep the production concentration gate and thresholds unchanged. Compare the three load-bearing refreshes against the mostly neutral ETH3D frame-18 refresh for a causal feature that is not already captured by pooled history thresholds.
+Keep the production concentration gate and thresholds unchanged. Investigate why basis-18 fails at ETH3D frame 19 while basis-17 allowed frame 18 to succeed. Perform a per-landmark geometry comparison (depth distribution, triangulation baseline, viewpoint angle) between the basis-17 and basis-18 landmark sets to identify a forward-viability signal measurable at refresh time.
