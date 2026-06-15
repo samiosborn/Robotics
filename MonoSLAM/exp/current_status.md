@@ -223,11 +223,41 @@
 - correcting frame 16 would materially reduce the geometry-drift story, but would not remove the independent frame-12 outlier or the smaller frame-17/18 tail
 - classification: frame-16 accepted rescue pose is a main outlier
 
+## ETH3D frame-16 rescue acceptance-path audit (2026-06-15)
+
+- new script: `scripts/diag_eth3d_frame16_rescue_stages.py`
+- replayed through frame 19, then re-ran all frame-16 rescue stages against basis-15 features (28 correspondences)
+
+Stage-by-stage results:
+
+| stage | threshold px | n_input | loose_ok | n_loose | strict-on-loose | spatial gate | cheirality |
+|-------|-------------|---------|----------|---------|-----------------|--------------|------------|
+| strict_8px | 8 | 28 | False | 0 | — | — | — |
+| stage1_12px | 12 | 28 | False | 0 (RANSAC failed) | — | — | — |
+| stage2_20px | 20 | 28 | True | 24 | 0 / 24 = 0 % | True (3 cells, mcf=0.542) | 1.000 |
+| stage2_seed_40px | 40 | 28 | True | 28 | — | True (3 cells, mcf=0.500) | 1.000 |
+
+- 12 px RANSAC found zero inliers from 28 correspondences — geometry already too inconsistent at 12 px
+- only 20 px RANSAC produced a pose; `allow_loose_localisation_fallback = True` for stage2_20px
+- strict-on-loose fraction = 0 / 24 = 0 %: all 24 loose inliers fail 8 px strict refit
+- temporal gate margins: translation direction delta 8.07 deg vs 120 deg threshold (margin 112 deg); camera centre direction delta 5.84 deg vs 120 deg threshold (margin 114 deg) — trivially passed, not doing useful work here
+- interpolated pose (alpha = 0.50 between frames 15 and 17) on the same 28 corr16 correspondences: median 6.21 px, p90 8.49 px, 6 / 28 above 8 px
+- accepted 20 px pose: 0 / 28 at strict 8 px (all 24 inliers lie in the 8–20 px band by definition)
+- frame 16 lies behind the frame-15-to-17 chord (alpha = -0.179), rotation-path excess 9.94 deg
+- the interpolated pose is a counterfactual only; it was not available inside the live rescue path
+- no better candidate was available under current rescue stages: the stage-by-stage search is exhaustive
+
+Classification: `mixed`
+- no better candidate available under current rescue stages (0 at 8 px, 0 at 12 px)
+- accepted candidate passes all current gates but is globally harmful (strict-on-loose = 0 %, dominates frame-19 geometry drift)
+- root contamination origin is upstream (frame-12 bad canonical pose); frame 16 perpetuates it
+- strict-on-loose fraction is a new at-rescue-time quality signal that was 0 at frame 16 and would have been detectable
+
 ## Current open question
-Why does the frame-16 20 px localisation-only rescue accept a pose that is far worse than the local frame-15-to-17 temporal interpolation on the same later-live landmarks?
+What detectable at-rescue-time signal could have rejected the frame-16 20 px acceptance without also rejecting other useful 20 px rescues?
 
 ## Best next step
-Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candidate poses and acceptance stages against the local temporal reference.
+Add a strict-on-loose fraction gate to `_accept_loose_localisation_fallback`: require that at least a minimum fraction of 20 px inliers also pass 8 px strict refit. A zero strict-on-loose fraction indicates geometry incoherence that the temporal gate at 120 degrees cannot detect.
 
 ## KITTI sequence-00 frame-16 diagnosis
 - pre-guard baseline still fails first at frame 18 with 0 / 56 live PnP inliers from refreshed basis 16

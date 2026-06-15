@@ -1007,6 +1007,56 @@ Decision
 
 ---
 
+## 2026-06-15 - ETH3D frame-16 rescue acceptance-path audit
+
+Base state
+- ETH3D first failure at frame 19, driven by geometry drift from bad canonical poses at frames 12 and 16
+- frame 16 accepted as a 20 px localisation-only rescue; accepted pose is far worse than the local temporal interpolation
+- open question: which stage accepted the bad pose and why did it pass all gates
+
+Diagnostic step
+- added `scripts/diag_eth3d_frame16_rescue_stages.py`
+- replayed through frame 19 to retrieve state, then re-ran all frame-16 rescue stages against the live basis-15 feature set (28 correspondences)
+- audited: stage-by-stage inlier counts, spatial gate stats, cheirality, temporal gate margins, strict-on-loose fraction
+- compared accepted pose against a time-weighted frame-15-to-17 interpolation on the same 28 correspondences
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_eth3d_frame16_rescue_stages.py --out /tmp/frame16_rescue_stages.json`
+
+Result
+
+Stage-by-stage:
+
+| stage | threshold px | loose_ok | n_loose | strict-on-loose |
+|-------|-------------|----------|---------|-----------------|
+| strict_8px | 8 | False | 0 | — |
+| stage1_12px | 12 | False | 0 (RANSAC failed) | — |
+| stage2_20px | 20 | True | 24 | 0 / 24 = 0 % |
+| stage2_seed_40px | 40 | True | 28 | — |
+
+- 12 px RANSAC found zero inliers from 28 correspondences; stage2_20px is the first stage to produce a pose
+- strict-on-loose fraction = 0 %: all 24 loose inliers fail 8 px strict refit
+- temporal gate: translation direction delta 8.07 deg, camera centre direction delta 5.84 deg; both trivially under the 120 deg threshold
+- interpolated pose on corr16: median 6.21 px, p90 8.49 px, 6 / 28 above 8 px
+- accepted 20 px pose: 0 / 28 at strict 8 px; interpolation is 71.30 % lower squared error
+- no better candidate was available under the current rescue stages; the acceptance was locally consistent with all current gates
+- strict-on-loose fraction = 0 is a new detectable quality signal; the 120 deg temporal gate does not detect this class of incoherence
+
+Classification: `mixed`
+- no better candidate available under current rescue stages
+- accepted candidate locally passes all gates but is globally harmful
+- root contamination is upstream (frame-12 bad canonical pose); frame 16 perpetuates it
+
+Decision
+- diagnosis only
+- production code unchanged
+- current status sharpened with stage audit, strict-on-loose fraction, and temporal gate margin details
+
+Next step
+- add a strict-on-loose fraction gate to `_accept_loose_localisation_fallback`; require a minimum fraction of 20 px inliers to also survive 8 px strict refit before accepting as localisation-only rescue
+
+---
+
 ## 2026-06-15 - ETH3D frame-19 shared-18 consensus fragility
 
 Base state
