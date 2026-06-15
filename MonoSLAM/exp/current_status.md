@@ -315,5 +315,27 @@ Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candida
 - pooled median, p90, maximum, and current drifting fraction therefore do not provide a robust monotonic separator across both datasets
 - classification: no robust separator yet
 
+## Single-frame refresh counterfactual labels
+- focused replays through frame 21 suppressed one otherwise-allowed refresh while preserving rescue acceptance, observation append, canonical pose storage, and all other refresh decisions
+- KITTI frame 14 is a load-bearing good refresh:
+  - frame 14 still rescued at 109 / 110 when refresh was suppressed
+  - basis 13 was retained instead of installing basis 14
+  - frame 17 still rescued and refreshed, but with only 29 / 58 inliers instead of 64 / 73
+  - first failure moved earlier from frame 19 to frame 18
+- KITTI frame 17 is a load-bearing good refresh:
+  - frame 17 still rescued at 64 / 73 when refresh was suppressed
+  - basis 14 was retained until frame 18 rescued at 23 / 62 and installed basis 18
+  - first failure stayed at frame 19, but the baseline frame-20 recovery disappeared and frames 19–21 all failed
+- ETH3D frame 17 is a load-bearing good refresh:
+  - frame 17 still rescued at 23 / 23 when refresh was suppressed
+  - basis 16 was retained instead of installing basis 17
+  - frame 18 failed at 0 / 18, moving first failure earlier from frame 19 to frame 18
+- ETH3D frame 18 is mostly neutral over the tested horizon:
+  - frame 18 still rescued at 23 / 23 when refresh was suppressed
+  - basis 17 was retained instead of installing basis 18
+  - frame 19 still failed, and frames 20–21 also remained failed
+- the earlier proxy label for ETH3D frame 18 as bad is not supported causally: suppressing its refresh does not improve survival
+- single-frame counterfactuals reveal usable refresh labels, but the labels do not yet imply a robust observable separator
+
 ## Current next step
-Keep the production concentration gate and thresholds unchanged. Isolate the near-boundary KITTI frame-14 versus frame-17 and ETH3D frame-17 versus frame-18 refreshes with single-frame counterfactuals before considering another guard change.
+Keep the production concentration gate and thresholds unchanged. Compare the three load-bearing refreshes against the mostly neutral ETH3D frame-18 refresh for a causal feature that is not already captured by pooled history thresholds.

@@ -864,3 +864,47 @@ Decision
 - classification: no robust separator yet
 - keep the concentration gate under current thresholds
 - next isolate the near-boundary refreshes with single-frame counterfactuals
+
+---
+
+## 2026-06-15 - Single-frame refresh counterfactuals
+
+Base state
+- trusted concentration-gated refresh guard
+- KITTI and ETH3D first hard failure at frame 19
+- near-boundary refresh labels unresolved at KITTI frames 14 / 17 and ETH3D frames 17 / 18
+
+Diagnostic step
+- used the existing selected-frame refresh suppression hook
+- preserved rescue acceptance, observation append, canonical pose storage, and every non-target refresh
+- replayed KITTI frames 4–21 for baseline, frame-14 suppression, and frame-17 suppression
+- replayed ETH3D frames 2–21 for baseline, frame-17 suppression, and frame-18 suppression
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 18 --scorecard off --threshold_pair_frame_index 9999 --out_dir /tmp/single_refresh_kitti_baseline`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 18 --scorecard off --threshold_pair_frame_index 9999 --suppress_support_refresh_frames 14 --out_dir /tmp/single_refresh_kitti_no14`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 18 --scorecard off --threshold_pair_frame_index 9999 --suppress_support_refresh_frames 17 --out_dir /tmp/single_refresh_kitti_no17`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 20 --scorecard off --threshold_pair_frame_index 9999 --out_dir /tmp/single_refresh_eth3d_baseline`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 20 --scorecard off --threshold_pair_frame_index 9999 --suppress_support_refresh_frames 17 --out_dir /tmp/single_refresh_eth3d_no17`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 20 --scorecard off --threshold_pair_frame_index 9999 --suppress_support_refresh_frames 18 --out_dir /tmp/single_refresh_eth3d_no18`
+
+Result
+- KITTI baseline first failed at frame 19; frame 20 recovered and frame 21 failed
+- suppressing KITTI frame 14 kept its 109 / 110 rescue but moved first failure to frame 18
+- suppressing KITTI frame 17 kept its 64 / 73 rescue and first failure at frame 19, but weakened frame 18 to 23 / 62 and removed the frame-20 recovery
+- ETH3D baseline first failed at frame 19 and stayed failed through frame 21
+- suppressing ETH3D frame 17 kept its 23 / 23 rescue but moved first failure to frame 18
+- suppressing ETH3D frame 18 kept its 23 / 23 rescue and left the frame-19-to-21 failure corridor unchanged
+
+Classification
+- KITTI frame 14: `load_bearing_good_refresh`
+- KITTI frame 17: `load_bearing_good_refresh`
+- ETH3D frame 17: `load_bearing_good_refresh`
+- ETH3D frame 18: `mostly_neutral_refresh`
+- overall: `single-frame counterfactuals reveal usable refresh labels`
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- current status sharpened with causal refresh labels
+- next compare causal labels for a feature beyond pooled history thresholds
