@@ -1472,6 +1472,160 @@ def _landmark_geometry_history(seed: dict, lm: dict, K: np.ndarray, *, eps: floa
     }
 
 
+# Summarise every successful rescue as a refresh-calibration candidate
+def _rescue_refresh_candidate_diagnostic(
+    seed: dict,
+    frontend_out: dict,
+    K: np.ndarray,
+    *,
+    frame_index: int,
+    active_basis_before: dict,
+    min_inliers: int,
+) -> dict | None:
+    stats = frontend_out.get("stats", {}) if isinstance(frontend_out, dict) else {}
+    stats = stats if isinstance(stats, dict) else {}
+    if not bool(stats.get("pnp_support_rescue_succeeded", False)):
+        return None
+
+    pose_out = frontend_out.get("pose_out", None)
+    if not isinstance(pose_out, dict) or pose_out.get("corrs", None) is None:
+        return None
+
+    corrs = pose_out["corrs"]
+    landmark_ids = np.asarray(corrs.landmark_ids, dtype=np.int64).reshape(-1)
+    support_mask = np.asarray(
+        pose_out.get("pnp_inlier_mask", np.zeros((landmark_ids.size,), dtype=bool)),
+        dtype=bool,
+    ).reshape(-1)
+    if int(support_mask.size) != int(landmark_ids.size):
+        return None
+
+    support_landmark_ids = sorted(set(int(v) for v in landmark_ids[support_mask]))
+    landmark_by_id = build_landmark_id_index(seed, context="rescue refresh candidate history")
+    landmark_rows: list[dict] = []
+    pooled_residuals_px: list[float] = []
+    n_evaluated = 0
+    n_inconsistent = 0
+
+    for landmark_id in support_landmark_ids:
+        lm = landmark_by_id.get(int(landmark_id), None)
+        if not isinstance(lm, dict):
+            continue
+
+        history = _landmark_geometry_history(seed, lm, K)
+        residuals_px = [
+            float(row["reprojection_error_px"])
+            for row in history.get("observations", [])
+            if bool(row.get("valid", False))
+            and row.get("kf", None) is not None
+            and int(row["kf"]) < int(frame_index)
+            and row.get("reprojection_error_px", None) is not None
+        ]
+        summary = _reprojection_error_summary(
+            np.asarray(residuals_px, dtype=np.float64)
+        )
+        valid_count = int(len(residuals_px))
+        median_px = summary.get("median", None)
+        p90_px = summary.get("p90", None)
+        max_px = summary.get("max", None)
+        evaluated = bool(
+            valid_count >= 2
+            and median_px is not None
+            and p90_px is not None
+            and max_px is not None
+        )
+        inconsistent = bool(
+            evaluated
+            and (
+                float(median_px) > 3.0
+                or float(p90_px) > 8.0
+                or float(max_px) > 12.0
+            )
+        )
+        if bool(evaluated):
+            n_evaluated += 1
+        if bool(inconsistent):
+            n_inconsistent += 1
+
+        pooled_residuals_px.extend(residuals_px)
+        landmark_rows.append(
+            {
+                "landmark_id": int(landmark_id),
+                "valid_observation_count": int(valid_count),
+                "median_residual_px": median_px,
+                "p90_residual_px": p90_px,
+                "max_residual_px": max_px,
+                "history_evaluated": bool(evaluated),
+                "history_inconsistent": bool(inconsistent),
+            }
+        )
+
+    n_support = int(len(support_landmark_ids))
+    inconsistent_fraction = float(n_inconsistent / max(n_support, 1))
+    n_pnp_inliers = int(stats.get("n_pnp_inliers", int(np.sum(support_mask))))
+    occupied_cells = int(stats.get("pnp_inlier_occupied_cells", 0))
+    bbox_area = stats.get("pnp_inlier_bbox_area_fraction", None)
+    bbox_area_fraction = 0.0 if bbox_area is None else float(bbox_area)
+    max_cell_fraction = stats.get("pnp_inlier_max_cell_fraction", None)
+    largest_component_fraction = stats.get("pnp_inlier_largest_component_fraction", None)
+    support_strong_enough = bool(
+        n_pnp_inliers >= max(int(min_inliers) + 4, 20)
+        and (occupied_cells >= 2 or bbox_area_fraction >= 0.05)
+    )
+    spatially_concentrated = bool(
+        max_cell_fraction is not None
+        and largest_component_fraction is not None
+        and float(max_cell_fraction) >= 0.90
+        and float(largest_component_fraction) >= 0.90
+    )
+    history_inconsistent = bool(inconsistent_fraction >= 0.50)
+    seed_after = frontend_out.get("seed", {})
+    active_basis_after = (
+        int(seed_after.get("active_keyframe_kf", -1))
+        if isinstance(seed_after, dict)
+        else -1
+    )
+
+    return {
+        "frame_index": int(frame_index),
+        "active_basis_before_kf": int(active_basis_before.get("kf", -1)),
+        "active_basis_after_kf": int(active_basis_after),
+        "n_pnp_corr": int(stats.get("n_pnp_corr", landmark_ids.size)),
+        "n_pnp_inliers": int(n_pnp_inliers),
+        "occupied_cells": int(occupied_cells),
+        "max_single_cell_fraction": max_cell_fraction,
+        "largest_component_fraction": largest_component_fraction,
+        "bbox_area_fraction": bbox_area,
+        "support_strong_enough": bool(support_strong_enough),
+        "spatially_concentrated": bool(spatially_concentrated),
+        "history_support_count": int(n_support),
+        "history_evaluated_count": int(n_evaluated),
+        "history_inconsistent_count": int(n_inconsistent),
+        "history_drifting_fraction": float(inconsistent_fraction),
+        "history_pooled_residual_px": _reprojection_error_summary(
+            np.asarray(pooled_residuals_px, dtype=np.float64)
+        ),
+        "history_landmarks": landmark_rows,
+        "current_guard_refresh_triggered": bool(
+            stats.get("guarded_support_refresh_triggered", False)
+        ),
+        "current_guard_reason": stats.get("guarded_support_refresh_reason", None),
+        "production_history_evaluated_count": int(
+            stats.get("guarded_support_refresh_history_evaluated", 0)
+        ),
+        "production_history_inconsistent_count": int(
+            stats.get("guarded_support_refresh_history_inconsistent", 0)
+        ),
+        "production_history_drifting_fraction": float(
+            stats.get("guarded_support_refresh_history_inconsistent_fraction", 0.0)
+        ),
+        "current_threshold_history_inconsistent": bool(history_inconsistent),
+        "spread_history_extension_would_block": bool(
+            support_strong_enough and history_inconsistent
+        ),
+    }
+
+
 # Summarise pooled observation residuals by landmark metadata
 def _geometry_history_group_summary(rows: list[dict], group_key: str) -> dict:
     groups: dict[str, list[dict]] = {}
@@ -3027,6 +3181,14 @@ def main(
             suppress_frames=suppress_support_refresh_frames,
         )
         frontend_stats = frontend_out.get("stats", {}) if isinstance(frontend_out, dict) else {}
+        rescue_refresh_candidate_diagnostic = _rescue_refresh_candidate_diagnostic(
+            seed,
+            frontend_out,
+            K,
+            frame_index=int(i),
+            active_basis_before=active_basis_before,
+            min_inliers=int(pose_kwargs["min_inliers"]),
+        )
         seed_landmarks_after = int(len(frontend_out.get("seed", {}).get("landmarks", []))) if isinstance(frontend_out, dict) else seed_landmarks_before
 
         # Replay fixed-set diagnostics on the live pipeline bundle
@@ -3362,6 +3524,18 @@ def main(
                 **frame_context,
             },
         )
+
+        # Write one comparable history row for each successful rescue
+        if rescue_refresh_candidate_diagnostic is not None:
+            _append_jsonl(
+                log_path,
+                {
+                    "event": "rescue_refresh_candidate",
+                    "dataset": str(dataset_name),
+                    "sequence": str(seq_name),
+                    **rescue_refresh_candidate_diagnostic,
+                },
+            )
 
         # Write the support-funnel row
         _append_jsonl(

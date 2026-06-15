@@ -810,3 +810,57 @@ Decision
 - reverted
 - production code restored to original guard
 - history-inconsistency thresholds need to be calibrated differently for concentrated vs spread support before this extension can be useful
+
+---
+
+## 2026-06-15 - Cross-dataset refresh-history calibration
+
+Base state
+- trusted concentration-gated refresh guard
+- failed spread-history extension reverted
+- KITTI first hard failure at frame 19
+- ETH3D first hard failure at frame 19
+
+Diagnostic step
+- added a diagnostics-only `rescue_refresh_candidate` JSONL event
+- recorded every successful rescue using its final inlier support and pre-refresh landmark history
+- replayed KITTI sequence 00 for 30 tracked frames
+- replayed ETH3D `cables_2_mono` for 40 tracked frames
+- swept per-landmark median, p90, maximum, and drifting-fraction thresholds
+
+Validation
+- `uv run python -m py_compile scripts/diag_pnp.py`
+- `PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 30 --scorecard off --threshold_pair_frame_index 9999 --out_dir /tmp/refresh_calibration_kitti_current`
+- `PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 40 --scorecard off --threshold_pair_frame_index 9999 --out_dir /tmp/refresh_calibration_eth3d_current`
+
+Label rule
+- `good_refresh`: the next two frames remain accepted, or existing counterfactual evidence shows blocking worsens survival
+- `bad_refresh`: the installed basis remains active into a hard failure within two frames, or existing counterfactual evidence shows blocking improves survival
+- `unclear`: neither rule is supported cleanly
+
+Result
+- KITTI produced 5 successful rescue candidates; ETH3D produced 9
+- recomputed pre-current-frame history matched production history counts on every concentrated KITTI candidate
+- the fresh current replay corrected a stale status detail:
+  - KITTI frame 18 has two occupied cells and is blocked by concentrated history inconsistency
+  - it is not currently blocked by the older one-cell weakness reason
+- current history thresholds flagged all 3 labelled bad candidates and 5 of 8 labelled good candidates
+- KITTI frame 14 good and frame 17 bad had overlapping pooled history:
+  - median 3.63 vs 3.70 px
+  - p90 11.76 vs 10.80 px
+  - drifting fraction 0.716 vs 0.750
+- ETH3D frame 17 unclear and frame 18 bad both had drifting fraction 1.000
+- concentration alone or concentration plus current history caught only KITTI frame 16 among the 3 labelled bad candidates
+- one sampled higher-threshold rule separated the labelled set:
+  - median above 3 px, p90 above 11 px, or maximum above 16 px
+  - drifting fraction at least 0.75
+- the separation was knife-edge:
+  - KITTI frame 17 was exactly 48 / 64 inconsistent landmarks
+  - ETH3D frames 17 and 18 differed by one landmark, 17 / 23 versus 18 / 23
+
+Decision
+- kept the diagnostics-only event
+- production code unchanged
+- classification: no robust separator yet
+- keep the concentration gate under current thresholds
+- next isolate the near-boundary refreshes with single-frame counterfactuals

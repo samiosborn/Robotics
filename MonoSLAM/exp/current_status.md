@@ -249,9 +249,9 @@ Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candida
 - guard effect on the 17-frame corridor (frames 4 through 20):
   - frame 16: rescue ok at 65 / 83, refresh BLOCKED (concentrated + history-inconsistent)
   - frame 17: rescue ok at 64 / 73, refresh ALLOWED (not concentrated, basis → 17)
-  - frame 18: rescue ok at 49 / 58, refresh BLOCKED (only one occupied cell, too weak)
+  - frame 18: rescue ok at 49 / 58, refresh BLOCKED (two cells, max-cell fraction 0.918, concentrated + history-inconsistent)
   - frame 19: rescue FAILS at 0 / 56 from basis 17
-  - frame 20: rescue ok at 40 / 48 from basis 17
+  - frame 20: rescue ok at 40 / 48 from basis 17, refresh BLOCKED (two cells, max-cell fraction 0.975, concentrated + history-inconsistent)
 
 ## KITTI frame-19 post-guard diagnosis
 - new first hard failure: frame 19, active basis 17, 0 / 56 inliers, rescue also fails
@@ -288,5 +288,32 @@ Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candida
 - secondary: weak support geometry — 52 / 56 live landmarks geometrically drifting, canonical p90 12.54 px, basis reproj at 5.03 / 9.05 px before frame 19
 - verdict: KITTI frame-19 is mixed (bad active basis quality and weak support geometry)
 
-## KITTI next step
-Evaluate whether extending the history-inconsistency check from concentration-gated to ALL strong rescue support would catch frame-17's drifting basis before it is installed.
+## Refresh-history calibration across KITTI and ETH3D
+- a fresh current-guard replay collected every successful rescue over the practical horizons:
+  - KITTI sequence 00: 30 tracked frames, 16 accepted, 14 failed, 5 successful rescues, 2 refreshes
+  - ETH3D `cables_2_mono`: 40 tracked frames, 17 accepted, 23 failed, 9 successful rescues, 9 refreshes
+- candidate labels use a short explicit horizon:
+  - `good_refresh`: the next two frames remain accepted, or existing counterfactual evidence shows that blocking the refresh worsens survival
+  - `bad_refresh`: the installed basis remains active into a hard failure within two frames, or existing counterfactual evidence shows that blocking improves survival
+  - `unclear`: neither rule is supported cleanly
+- known good and bad KITTI spread support overlaps strongly under the current history rule:
+  - frame 14 good refresh: max-cell fraction 0.743, pooled median / p90 / max 3.63 / 11.76 / 23.17 px, drifting fraction 0.716
+  - frame 17 bad refresh: max-cell fraction 0.844, pooled median / p90 / max 3.70 / 10.80 / 21.63 px, drifting fraction 0.750
+- ETH3D shows the same late overlap:
+  - frame 16 good refresh: pooled median / p90 / max 2.03 / 7.41 / 18.35 px, drifting fraction 0.875
+  - frame 17 is unclear after one healthy hand-off frame: 2.33 / 10.87 / 19.16 px, drifting fraction 1.000
+  - frame 18 bad refresh: 2.51 / 10.61 / 19.16 px, drifting fraction 1.000
+- the current history rule catches all three labelled bad candidates but also flags five of eight labelled good candidates
+- concentration alone and concentration plus current history avoid labelled-good false positives, but each catches only KITTI frame 16 and misses spread bad candidates at KITTI frame 17 and ETH3D frame 18
+- one more conservative sampled history rule separated the current labelled set:
+  - per-landmark median above 3 px, p90 above 11 px, or maximum above 16 px
+  - candidate drifting fraction at least 0.75
+- that separator is not robust:
+  - KITTI frame 17 sits exactly at 48 / 64, or 0.750
+  - ETH3D frame 17 and frame 18 differ by one landmark at 17 / 23 versus 18 / 23
+  - a one-landmark classification change would remove the separation
+- pooled median, p90, maximum, and current drifting fraction therefore do not provide a robust monotonic separator across both datasets
+- classification: no robust separator yet
+
+## Current next step
+Keep the production concentration gate and thresholds unchanged. Isolate the near-boundary KITTI frame-14 versus frame-17 and ETH3D frame-17 versus frame-18 refreshes with single-frame counterfactuals before considering another guard change.
