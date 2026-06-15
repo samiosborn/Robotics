@@ -121,6 +121,16 @@
 - the remaining causal question is whether refreshing the active support basis from those bad poses propagates the later frame-19 support failure
 - the failure is now classified as coherent 2D tracks with internally consistent assignments attached to a geometrically incompatible 3D support set
 - frame-19 geometry drift is broad rather than concentrated in a landmark subgroup
+- shared-18 consensus fragility (2026-06-15):
+  - the 18 correspondences shared by both live bases are already consensus-fragile at all PnP-relevant thresholds
+  - best inliers at 8 / 12 / 20 / 40 px: 0 / 0 / 2 / 11
+  - 1157 / 2000 DLT minimal samples produce valid models; pairwise rotation dispersion median 130.5°, p90 172.0°, max 180.0°
+  - the hypothesis distribution covers the full rotation manifold — complete geometric incoherence
+  - no single leave-one-out removal improves above 1 inlier at 8 or 12 px; no shared correspondence is the unique poison
+  - lm 311 (ref-residual 10.25 px) is a 40 px outlier: removing it gives 17 / 17 at 40 px, but still 0 at 8 px
+  - adding each of the four extra (basis-18-only) correspondences individually: lm 588 improves 40 px to 19 / 19; lm 181 / 226 / 360 each worsen it; combining all four collapses to 2 at 40 px
+  - the extras interact destructively in combination but do not uniquely cause the strict-threshold failure
+  - classification: `mixed` — shared-18 is the dominant failure path; lm 311 and the extras add secondary interference at 40 px
 
 ## Rescue-refresh counterfactual
 - one 40-frame replay kept rescue localisation unchanged but suppressed active-basis refresh at frames 12 and 16
@@ -356,5 +366,30 @@ Keep rescue refresh enabled and diagnostically audit the frame-16 rescue candida
 - downstream reuse is strictly retrospective; no current at-refresh feature predicts it for the ETH3D boundary
 - classification: `downstream reuse` is the separator
 
+## ETH3D basis-17 versus basis-18 geometry (2026-06-15)
+- added a diagnostics-only replay that snapshots both installed bases and tracks each independently into frame 19
+- basis 17 and basis 18 install the exact same 23 landmark IDs:
+  - intersection 23 / 23, Jaccard 1.000
+  - 16 bootstrap and 7 map-growth landmarks in both
+  - birth-frame split is identical: frame 1 = 16, frame 6 = 2, frame 9 = 5
+  - frame 18 adds one observation to each shared landmark; it does not add or replace a landmark subset
+- installed-set geometry does not show basis 18 becoming weaker:
+  - centred 3D singular values are identical because the landmark set is identical: 17.262 / 3.787 / 2.484
+  - depth median changes from 22.79 to 21.63 and coefficient of variation from 0.074 to 0.083
+  - geometric pairwise camera-ray median increases from 6.89° to 7.30°
+  - historical maximum viewpoint-angle median increases from 9.74° to 9.82°
+  - maximum baseline/depth-ratio median increases from 0.623 to 0.669
+- the same three near-collocated landmark pairs are present in both installed bases; local image-space collisions are not basis-18-specific
+- frame-19 forward comparison also favours basis 18 slightly:
+  - basis 17 yields 18 live correspondences; basis 18 yields 22, containing all 18 plus four
+  - both fail PnP with zero accepted inliers
+  - under a common locally propagated ETH3D reference pose, residual median / p90 is 6.07 / 14.65 px for basis 17 and 6.05 / 12.98 px for basis 18
+  - support within 8 px is 12 / 18 versus 15 / 22
+  - DLT smallest/largest singular ratio is 0.00598 versus 0.00623
+  - pose-Jacobian condition is 603 versus 526
+- the local reference is comparative rather than absolute: frame-17-to-18 validation differs by 2.08° rotation and 21.0° translation direction
+- basis 18 is therefore not a worse depth set, a narrower viewpoint set, or a worse subset swap
+- classification: basis 17 and basis 18 still lack a clear geometric separator
+
 ## Current next step
-Keep the production concentration gate and thresholds unchanged. Investigate why basis-18 fails at ETH3D frame 19 while basis-17 allowed frame 18 to succeed. Perform a per-landmark geometry comparison (depth distribution, triangulation baseline, viewpoint angle) between the basis-17 and basis-18 landmark sets to identify a forward-viability signal measurable at refresh time.
+The shared-18 core is already fully fragile at 8 / 12 / 20 px. No single-point removal rescues it. The geometry drift is broad and systemic, driven by bad canonical rescue poses at frames 12 and 16. Audit the frame-16 rescue acceptance path to understand why the 20 px localisation-only rescue accepted a pose that is far worse than the local temporal interpolation on the same later-live landmarks.

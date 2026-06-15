@@ -959,3 +959,104 @@ Decision
 - production code unchanged
 - current status updated with downstream reuse finding and limiting-pair ambiguity
 - next investigate why basis-18 fails at frame 19 while basis-17 allowed frame 18: per-landmark geometry comparison (depth, triangulation baseline, viewpoint angle) between the two bases
+
+---
+
+## 2026-06-15 - ETH3D basis-17 versus basis-18 geometry
+
+Base state
+- ETH3D frame 17 is a load-bearing refresh; frame 18 is mostly neutral
+- both refreshes have 23 inliers, 3 occupied cells, and drifting fraction 1.000
+- current refresh-time summaries do not separate them
+
+Diagnostic step
+- added `scripts/diag_eth3d_basis17_18_geometry.py`
+- replayed the trusted ETH3D baseline through frame 19
+- snapshotted the installed bases after refreshes 17 and 18
+- compared set membership, landmark provenance, observation counts, depth, 3D extent, singular values, ray spread, viewpoint angles, and baseline/depth ratios
+- tracked each frozen basis independently into frame 19
+- scored both live correspondence sets under a common frame-19 pose propagated from local ETH3D ground-truth motion
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python -m py_compile scripts/diag_eth3d_basis17_18_geometry.py`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_eth3d_basis17_18_geometry.py --output /tmp/eth3d_basis17_18_geometry.json`
+
+Result
+- both bases contain the exact same 23 landmark IDs; intersection 23 / 23, Jaccard 1.000
+- both contain 16 bootstrap and 7 map-growth landmarks with the same birth-frame split
+- frame 18 only contributes one additional observation per landmark
+- centred 3D singular values are identical at 17.262 / 3.787 / 2.484
+- basis-18 depth spread is only slightly larger: median 21.63 versus 22.79, coefficient of variation 0.083 versus 0.074
+- basis-18 ray and historical viewpoint spread are slightly broader, not narrower
+- both installed bases contain the same three near-collocated landmark pairs
+- at frame 19, basis 17 yields 18 correspondences and basis 18 yields 22; all 18 basis-17 live landmarks are contained in basis 18
+- both PnP attempts fail
+- common-reference residual median / p90 is 6.07 / 14.65 px for basis 17 and 6.05 / 12.98 px for basis 18
+- basis 18 has slightly better DLT and pose-Jacobian conditioning
+- the four basis-18-only live correspondences are not uniformly harmful: their comparative residuals are 1.93, 7.07, 7.70, and 11.58 px
+- the propagated reference validates to 2.08° rotation and 21.0° translation-direction disagreement over frame 17 to 18, so residuals are comparative rather than absolute
+
+Classification
+- `basis-17 and basis-18 still lack a clear geometric separator`
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- current status materially sharpened
+- next isolate frame-19 correspondence compatibility and minimal-sample pose dispersion on the 18 shared live landmarks
+
+---
+
+## 2026-06-15 - ETH3D frame-19 shared-18 consensus fragility
+
+Base state
+- ETH3D frame-19 fails PnP with 22 live correspondences and zero accepted inliers at all thresholds
+- basis 17 yields 18 live correspondences; basis 18 yields 22, containing all 18 plus four extra (IDs 181, 226, 360, 588)
+- both PnP attempts fail; question is whether the shared-18 core is already fragile or whether the four extras drive the failure
+
+Diagnostic step
+- added `scripts/diag_eth3d_frame19_shared18.py`
+- replayed trusted ETH3D baseline through frame 18, built frame-19 correspondences with `build_pnp_correspondences_with_stats`
+- split 22 correspondences into shared-18 (IDs not in {181, 226, 360, 588}) and extra-4
+- Part A: ran `_inlier_sweep` at 8 / 12 / 20 / 40 px and `_hypothesis_sample_analysis` (2000 DLT minimal samples) on shared-18
+- Part B: leave-one-out — removed each shared landmark in turn, ran sweep on 17-point residual set
+- Part C: added each extra landmark individually to shared-18, ran sweep on the 19-point set
+
+Validation
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python -m py_compile scripts/diag_eth3d_frame19_shared18.py`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_eth3d_frame19_shared18.py --output /tmp/eth3d_frame19_shared18.json`
+
+Result
+
+Part A — shared-18 baseline:
+- best inliers: 0 / 0 / 2 / 11 at 8 / 12 / 20 / 40 px
+- 1157 of 2000 DLT minimal samples produced valid models
+- pairwise rotation dispersion: median 130.5°, p90 172.0°, max 180.0°
+- no valid hypothesis achieves more than 0 inliers at 8 px or more than 1 inlier at 20 px
+- the 18 shared correspondences scatter every minimal-sample pose across the full rotation manifold
+
+Part B — leave-one-out on shared-18:
+- at 8 px: no single removal improves above 1 inlier (8 removals each achieve 1)
+- at 12 px: no single removal improves above 1 inlier (13 removals each achieve 1)
+- at 20 px: no single removal improves above 2 inliers
+- at 40 px: removing lm 311 uniquely achieves 17 / 17 inliers (all remaining landmarks fit); next best is 12
+- lm 311 reference residual is 10.25 px; removing it does not cure strict-threshold failure
+
+Part C — add extras one at a time to shared-18:
+- adding lm 181 (1.93 px ref-residual): 2 at 40 px — worsens from 11
+- adding lm 226 (11.58 px ref-residual): 6 at 40 px — worsens from 11
+- adding lm 360 (7.07 px ref-residual): 7 at 40 px — worsens from 11
+- adding lm 588 (7.70 px ref-residual): 19 at 40 px — all 19 fit at 40 px; best individual extra
+- full 22 together: 2 at 40 px — catastrophic combined interference
+- at 8 / 12 / 20 px all extras give at most 1 / 3 / 3 inliers regardless
+
+Classification
+- primary: `shared_set_already_consensus_fragile` at all PnP-relevant thresholds (8 / 12 / 20 px)
+- secondary: lm 311 is a partial outlier visible only at 40 px; the four extras interact destructively at 40 px
+- overall: `mixed` — shared-18 is the dominant failure path; extras add interference but do not uniquely cause the collapse
+
+Decision
+- diagnosis only
+- production code unchanged
+- current status sharpened with shared-18 dispersion and LOO findings
+- next step is frame-16 rescue-pose audit to understand why a bad canonical pose was accepted and how it propagated into the landmark geometry
