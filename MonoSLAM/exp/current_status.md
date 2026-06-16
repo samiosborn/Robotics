@@ -453,5 +453,38 @@ Compare the rotation-path excess and temporal neighbour deltas of bad canonical 
 - basis 18 is therefore not a worse depth set, a narrower viewpoint set, or a worse subset swap
 - classification: basis 17 and basis 18 still lack a clear geometric separator
 
+## Bad-vs-useful late fallback comparison (2026-06-16)
+- new diagnostic script: `scripts/diag_bad_vs_useful_fallbacks.py`
+- compared bad canonical-pose fallbacks against useful late fallbacks:
+  - bad: ETH3D frames 12 and 16
+  - useful / load-bearing: ETH3D frame 17 and KITTI frame 17
+  - reference / neutral: ETH3D frame 18, KITTI frames 18 and 20
+- every chosen frame is a 20 px localisation-only fallback with strict-on-loose = 0, confirming strict-on-loose is only a regime marker here
+- event table highlights:
+  - ETH3D 12: basis 10→12, 40 / 45 inliers, refresh allowed, bad canonical pose
+  - ETH3D 16: basis 15→16, 24 / 28 inliers, refresh allowed, bad canonical pose
+  - ETH3D 17: basis 16→17, 23 / 23 inliers, refresh allowed, load-bearing good refresh
+  - KITTI 17: basis 14→17, 64 / 73 inliers, refresh allowed, load-bearing good refresh
+  - KITTI 18 and 20: 49 / 58 and 40 / 48 inliers, refresh blocked by concentrated history inconsistency
+- pose-deviation evidence best separates the bad canonical-pose frames from the useful late fallbacks:
+  - ETH3D 12 / 16 rotation-path excess: 8.97° / 9.94°
+  - ETH3D 17 / KITTI 17 rotation-path excess: 2.49° / 0.76°
+  - frame-neighbour interpolation reduces accepted-support squared error for ETH3D 12 / 16 by 28.2 % / 70.5 %
+  - the same interpolation worsens accepted-support squared error for ETH3D 17 / KITTI 17 by 473.5 % / 260.2 %
+- raw camera-centre turn or outside-chord flags are too blunt:
+  - KITTI 17 is useful but has a large centre-turn / outside-chord artefact
+  - the cleaner pose signal is rotation-path excess plus accepted-support residual comparison against a local neighbour interpolation
+- forward support viability does not separate harmful pose from useful fallback:
+  - future accepted-inlier reuse fractions are high for bad ETH3D 12 / 16: 0.900 / 0.958
+  - useful ETH3D 17 / KITTI 17 are 1.000 / 0.781
+  - bad canonical poses can still carry load-bearing support forward
+- history residuals on accepted support do not separate the classes:
+  - ETH3D 12 has clean prior support history: p90 5.61 px, 5 % inconsistent
+  - useful ETH3D 17 / KITTI 17 have worse prior history: p90 10.87 / 10.80 px
+- neutral references add caution:
+  - KITTI 18 has low rotation-path excess but neighbour interpolation strongly improves its support residuals; its refresh is blocked, so this is not evidence of a load-bearing bad refresh
+  - ETH3D 18 remains mostly neutral over the tested horizon
+- classification: `pose_deviation_from_local_motion`
+
 ## Current next step
-The shared-18 core is already fully fragile at 8 / 12 / 20 px. No single-point removal rescues it. The geometry drift is broad and systemic, driven by bad canonical rescue poses at frames 12 and 16. Audit the frame-16 rescue acceptance path to understand why the 20 px localisation-only rescue accepted a pose that is far worse than the local temporal interpolation on the same later-live landmarks.
+Calibrate a diagnostic-only pose-deviation oracle across all late 20 px fallback frames: rotation-path excess and accepted-support residual change under neighbour interpolation are the current clean signal, but neighbour interpolation is retrospective. The next production-relevant question is whether a previous-motion-only proxy can detect the same bad canonical-pose cases without rejecting load-bearing ETH3D 17 or KITTI 17.

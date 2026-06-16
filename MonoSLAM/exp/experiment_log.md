@@ -1169,3 +1169,60 @@ Decision
 - strict-on-loose gate proposal (from frame-16 rescue audit) is RETRACTED
 - current_status.md updated: classification changed, best next step updated
 - next question: what signal distinguishes bad canonical pose frames (ETH3D 12, 16) from other 20 px fallback frames in the same class
+
+---
+
+## 2026-06-16 - Bad-vs-useful late fallback comparison
+
+Base state
+- trusted baseline after strict-on-loose retraction
+- strict-on-loose = 0 is treated as a late 20 px fallback regime marker, not a harmfulness discriminator
+
+Diagnostic step
+- added `scripts/diag_bad_vs_useful_fallbacks.py`
+- replayed ETH3D through frame 22 and KITTI through frame 22
+- compared bad canonical-pose fallbacks against load-bearing useful fallbacks:
+  - bad: ETH3D frames 12 and 16
+  - useful: ETH3D frame 17 and KITTI frame 17
+  - neutral references: ETH3D frame 18, KITTI frames 18 and 20
+- measured event table fields, local pose-neighbour deltas, neighbour-interpolation residual changes, exact accepted-support history, next-frame residuals, support overlap, and downstream reuse
+
+Validation
+- `uv run python -m py_compile scripts/diag_bad_vs_useful_fallbacks.py`
+- `uv run python scripts/diag_bad_vs_useful_fallbacks.py --eth3d_stop_frame 22 --kitti_stop_frame 22 --out /tmp/bad_vs_useful_fallbacks.json --quiet`
+- parsed `/tmp/bad_vs_useful_fallbacks.json`
+
+Result
+- all chosen frames are 20 px localisation-only fallbacks:
+  - ETH3D 12: basis 10→12, 40 / 45 inliers, refresh allowed, bad canonical pose
+  - ETH3D 16: basis 15→16, 24 / 28 inliers, refresh allowed, bad canonical pose
+  - ETH3D 17: basis 16→17, 23 / 23 inliers, refresh allowed, load-bearing good refresh
+  - KITTI 17: basis 14→17, 64 / 73 inliers, refresh allowed, load-bearing good refresh
+  - KITTI 18 / 20: 49 / 58 and 40 / 48 inliers, refresh blocked by concentrated history inconsistency
+- pose-deviation evidence separates the main bad/useful set:
+  - ETH3D 12 / 16 rotation-path excess: 8.97° / 9.94°
+  - ETH3D 17 / KITTI 17 rotation-path excess: 2.49° / 0.76°
+  - neighbour interpolation reduces accepted-support squared error for ETH3D 12 / 16 by 28.2 % / 70.5 %
+  - the same interpolation worsens accepted-support squared error for ETH3D 17 / KITTI 17 by 473.5 % / 260.2 %
+- raw camera-centre turn / outside-chord is not safe on its own:
+  - KITTI 17 is useful but still has a large centre-turn / outside-chord artefact
+- forward support viability does not separate harmful pose from useful fallback:
+  - future accepted-inlier reuse fractions are 0.900 / 0.958 for bad ETH3D 12 / 16
+  - useful ETH3D 17 / KITTI 17 are 1.000 / 0.781
+- history residuals on accepted support do not separate:
+  - ETH3D 12 prior history p90 is 5.61 px with only 5 % inconsistent landmarks
+  - useful ETH3D 17 / KITTI 17 prior p90 is 10.87 / 10.80 px
+- neutral references remain cautionary:
+  - KITTI 18 has low rotation-path excess but neighbour interpolation greatly improves residuals; refresh is blocked
+  - ETH3D 18 remains mostly neutral over the tested horizon
+
+Classification
+- `pose_deviation_from_local_motion`
+- the clean signal is rotation-path excess plus accepted-support residual comparison against neighbour interpolation
+- neighbour interpolation is retrospective and not directly usable as an at-rescue-time production gate
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- current status updated
+- next step: calibrate a previous-motion-only proxy for the pose-deviation oracle before considering any gate
