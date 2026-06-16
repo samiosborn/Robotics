@@ -251,13 +251,45 @@ Classification: `mixed`
 - no better candidate available under current rescue stages (0 at 8 px, 0 at 12 px)
 - accepted candidate passes all current gates but is globally harmful (strict-on-loose = 0 %, dominates frame-19 geometry drift)
 - root contamination origin is upstream (frame-12 bad canonical pose); frame 16 perpetuates it
-- strict-on-loose fraction is a new at-rescue-time quality signal that was 0 at frame 16 and would have been detectable
+- strict-on-loose fraction was identified as a detectable at-rescue-time signal but cross-dataset calibration shows it is not a robust separator (see strict-on-loose calibration entry below)
+
+## Strict-on-loose cross-dataset calibration (2026-06-15)
+- new script: `scripts/diag_strict_on_loose_calibration.py`
+- replayed ETH3D cables_2_mono (22 frames, 9 accepted rescues) and KITTI sequence 00 (20 frames, 5 accepted rescues)
+- extracted strict-on-loose stats from `pnp_support_rescue_subset_strict_inliers` / `pnp_support_rescue_subset_count`
+
+| dataset | frame | thr | loose | n_inliers | sol_count | sol_frac | fallback | refresh_label |
+|---------|-------|-----|-------|-----------|-----------|----------|----------|---------------|
+| ETH3D | 8 | 20 | 90 | 90 | 90/90 | 1.000 | no | unclear |
+| ETH3D | 10 | 12 | 69 | 56 | 56/69 | 0.812 | no | unclear |
+| ETH3D | 12 | 20 | 40 | 40 | 0/40 | 0.000 | YES | unclear (bad canonical pose) |
+| ETH3D | 13 | 20 | 36 | 36 | 0/36 | 0.000 | YES | unclear |
+| ETH3D | 14 | 20 | 32 | 32 | 0/32 | 0.000 | YES | unclear |
+| ETH3D | 15 | 20 | 30 | 30 | 0/30 | 0.000 | YES | unclear |
+| ETH3D | 16 | 20 | 24 | 24 | 0/24 | 0.000 | YES | load-bearing refresh, bad canonical pose |
+| ETH3D | 17 | 20 | 23 | 23 | 0/23 | 0.000 | YES | load_bearing_good_refresh |
+| ETH3D | 18 | 20 | 23 | 23 | 0/23 | 0.000 | YES | mostly_neutral_refresh |
+| KITTI | 14 | 12 | 52 | 109 | 52/52 | 1.000 | no | load_bearing_good_refresh |
+| KITTI | 16 | 12 | 74 | 65 | 65/74 | 0.878 | no | refresh_blocked_guard |
+| KITTI | 17 | 20 | 64 | 64 | 0/64 | 0.000 | YES | load_bearing_good_refresh |
+| KITTI | 18 | 20 | 49 | 49 | 0/49 | 0.000 | YES | refresh_blocked_guard |
+| KITTI | 20 | 20 | 40 | 40 | 0/40 | 0.000 | YES | refresh_blocked_guard |
+
+Key findings:
+- strict-on-loose = 0 is the normal state for all 20 px loose fallback rescues (10 out of 14 total)
+- ETH3D frame 17 (load_bearing_good_refresh) has strict-on-loose = 0/23 — same as frame 16 (bad canonical pose)
+- KITTI frame 17 (load_bearing_good_refresh) has strict-on-loose = 0/64 — same as bad cases
+- a gate requiring strict-on-loose > 0 would block ETH3D frames 12–18 and KITTI frames 17–20, including all known-good refreshes
+- blocking ETH3D frame 17 was already shown by counterfactual to move first failure from frame 19 to frame 18
+- strict-on-loose = 0 identifies the entire 20 px fallback class, not the pathological subset within it
+
+Classification: `strict-on-loose is too noisy to trust`
 
 ## Current open question
-What detectable at-rescue-time signal could have rejected the frame-16 20 px acceptance without also rejecting other useful 20 px rescues?
+What detectable at-rescue-time signal could have rejected the frame-16 20 px acceptance without also rejecting ETH3D frame 17 and KITTI frame 17 (both good refreshes with strict-on-loose = 0)?
 
 ## Best next step
-Add a strict-on-loose fraction gate to `_accept_loose_localisation_fallback`: require that at least a minimum fraction of 20 px inliers also pass 8 px strict refit. A zero strict-on-loose fraction indicates geometry incoherence that the temporal gate at 120 degrees cannot detect.
+Compare the rotation-path excess and temporal neighbour deltas of bad canonical pose frames (ETH3D 12, 16) against the non-labelled 20 px fallback frames (ETH3D 13–15, 17–18, KITTI 17) to find a within-class separator not already captured by the 120-degree temporal gate.
 
 ## KITTI sequence-00 frame-16 diagnosis
 - pre-guard baseline still fails first at frame 18 with 0 / 56 live PnP inliers from refreshed basis 16

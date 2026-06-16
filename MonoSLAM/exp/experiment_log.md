@@ -1110,3 +1110,62 @@ Decision
 - production code unchanged
 - current status sharpened with shared-18 dispersion and LOO findings
 - next step is frame-16 rescue-pose audit to understand why a bad canonical pose was accepted and how it propagated into the landmark geometry
+
+---
+
+## 2026-06-15 - Cross-dataset strict-on-loose calibration
+
+Base state
+- ETH3D frame-16 rescue-stages audit identified strict-on-loose = 0/24 as a detectable quality signal
+- current_status.md proposed: add a strict-on-loose gate to `_accept_loose_localisation_fallback`
+- open question: is strict-on-loose == 0 a broadly useful pathological signal, or just a one-off?
+
+Diagnostic step
+- added `scripts/diag_strict_on_loose_calibration.py`
+- replayed ETH3D cables_2_mono (22 frames) and KITTI sequence 00 (20 frames)
+- extracted from `pose_out["stats"]` for every accepted rescue:
+  - `pnp_support_rescue_loose_threshold_px`
+  - `pnp_support_rescue_loose_inliers`
+  - `pnp_support_rescue_subset_count`
+  - `pnp_support_rescue_subset_strict_inliers`
+  - `pnp_support_rescue_loose_localisation_fallback_succeeded`
+- strict-on-loose fraction = subset_strict_inliers / subset_count
+- labelled each event with known refresh labels from single-frame counterfactuals
+
+Result
+
+| dataset | frame | thr | loose | n_inliers | sol_count | sol_frac | fallback | refresh_label |
+|---------|-------|-----|-------|-----------|-----------|----------|----------|---------------|
+| ETH3D | 8 | 20 | 90 | 90 | 90/90 | 1.000 | no | unclear |
+| ETH3D | 10 | 12 | 69 | 56 | 56/69 | 0.812 | no | unclear |
+| ETH3D | 12 | 20 | 40 | 40 | 0/40 | 0.000 | YES | unclear (bad canonical pose) |
+| ETH3D | 13 | 20 | 36 | 36 | 0/36 | 0.000 | YES | unclear |
+| ETH3D | 14 | 20 | 32 | 32 | 0/32 | 0.000 | YES | unclear |
+| ETH3D | 15 | 20 | 30 | 30 | 0/30 | 0.000 | YES | unclear |
+| ETH3D | 16 | 20 | 24 | 24 | 0/24 | 0.000 | YES | load-bearing refresh, bad canonical pose |
+| ETH3D | 17 | 20 | 23 | 23 | 0/23 | 0.000 | YES | load_bearing_good_refresh |
+| ETH3D | 18 | 20 | 23 | 23 | 0/23 | 0.000 | YES | mostly_neutral_refresh |
+| KITTI | 14 | 12 | 52 | 109 | 52/52 | 1.000 | no | load_bearing_good_refresh |
+| KITTI | 16 | 12 | 74 | 65 | 65/74 | 0.878 | no | refresh_blocked_guard |
+| KITTI | 17 | 20 | 64 | 64 | 0/64 | 0.000 | YES | load_bearing_good_refresh |
+| KITTI | 18 | 20 | 49 | 49 | 0/49 | 0.000 | YES | refresh_blocked_guard |
+| KITTI | 20 | 20 | 40 | 40 | 0/40 | 0.000 | YES | refresh_blocked_guard |
+
+Key findings:
+- strict-on-loose = 0 is the normal state for 10 of 14 accepted rescues across both datasets
+- strict-on-loose = 0 applies equally to known-good refreshes (ETH3D 17, KITTI 17) and bad poses (ETH3D 12, 16)
+- ETH3D frame 17 (load_bearing_good_refresh): sol = 0/23 — identical to ETH3D frame 16 (bad pose): sol = 0/24
+- KITTI frame 17 (load_bearing_good_refresh): sol = 0/64 — identical pattern to bad cases
+- the transition to sol = 0 at ETH3D frame 12 and KITTI frame 17 is the signature of the late-pipeline regime where geometry has drifted sufficiently that even 12 px RANSAC fails
+- within the late-pipeline 20 px fallback class, strict-on-loose = 0 for all events; there is no discrimination
+- a gate requiring sol > 0 for fallback acceptance would block all ETH3D frames 12–18 and KITTI frames 17–20, including all known-good refreshes in that window
+- blocking ETH3D frame 17 refresh was already shown by counterfactual to move first failure from frame 19 to frame 18
+
+Classification
+- `strict-on-loose is too noisy to trust`
+
+Decision
+- no production change
+- strict-on-loose gate proposal (from frame-16 rescue audit) is RETRACTED
+- current_status.md updated: classification changed, best next step updated
+- next question: what signal distinguishes bad canonical pose frames (ETH3D 12, 16) from other 20 px fallback frames in the same class
