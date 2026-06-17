@@ -366,13 +366,16 @@ def _pose_quality(
     prev_frames = [int(v) for v in accepted_frames if int(v) < frame_index]
     next_frames = [int(v) for v in accepted_frames if int(v) > frame_index]
     prev_frame = None if len(prev_frames) == 0 else int(prev_frames[-1])
+    prev_prev_frame = None if len(prev_frames) < 2 else int(prev_frames[-2])
     next_frame = None if len(next_frames) == 0 else int(next_frames[0])
     pose_cur = frame_record["pose"]
     out: dict[str, Any] = {
+        "previous_previous_accepted_frame": prev_prev_frame,
         "previous_accepted_frame": prev_frame,
         "next_accepted_frame": next_frame,
         "delta_to_previous": None,
         "delta_to_next": None,
+        "previous_motion_proxy": None,
         "local_interpolation": None,
         "local_path": None,
         "unusually_displaced": None,
@@ -381,6 +384,76 @@ def _pose_quality(
         out["delta_to_previous"] = _pose_delta(records[int(prev_frame)]["pose"], pose_cur)
     if next_frame is not None:
         out["delta_to_next"] = _pose_delta(pose_cur, records[int(next_frame)]["pose"])
+
+    X_support, xy_support = _accepted_pose_support_arrays(frame_record["pose_out"])
+    accepted_errors = _residuals_for_pose(K, pose_cur, X_support, xy_support, eps=float(eps))
+    accepted_summary = _summary(accepted_errors)
+    accepted_sq = float(accepted_summary["squared_error"])
+
+    if prev_prev_frame is not None and prev_frame is not None:
+        pose_prev_prev = records[int(prev_prev_frame)]["pose"]
+        pose_prev = records[int(prev_frame)]["pose"]
+        ts_prev_prev = _frame_time(sequence, int(prev_prev_frame))
+        ts_prev = _frame_time(sequence, int(prev_frame))
+        ts_cur = _frame_time(sequence, int(frame_index))
+        previous_dt = float(ts_prev - ts_prev_prev)
+        current_dt = float(ts_cur - ts_prev)
+        alpha = 1.0
+        if abs(previous_dt) > 1e-12:
+            alpha = float((ts_cur - ts_prev_prev) / previous_dt)
+        extrapolated_pose = _interpolate_pose(pose_prev_prev, pose_prev, alpha)
+
+        R_prev_prev, t_prev_prev = _pose(pose_prev_prev)
+        R_prev, t_prev = _pose(pose_prev)
+        R_cur, t_cur = _pose(pose_cur)
+        C_prev_prev = camera_centre(R_prev_prev, t_prev_prev)
+        C_prev = camera_centre(R_prev, t_prev)
+        C_cur = camera_centre(R_cur, t_cur)
+        previous_step = C_prev - C_prev_prev
+        current_step = C_cur - C_prev
+        previous_step_norm = float(np.linalg.norm(previous_step))
+        current_step_norm = float(np.linalg.norm(current_step))
+        step_ratio = None
+        if previous_step_norm > 1e-12:
+            step_ratio = float(current_step_norm / previous_step_norm)
+
+        R_pred, t_pred = _pose(extrapolated_pose)
+        C_pred = camera_centre(R_pred, t_pred)
+        centre_error = float(np.linalg.norm(C_cur - C_pred))
+        centre_error_over_previous_step = None
+        if previous_step_norm > 1e-12:
+            centre_error_over_previous_step = float(centre_error / previous_step_norm)
+
+        extrapolated_errors = _residuals_for_pose(K, extrapolated_pose, X_support, xy_support, eps=float(eps))
+        extrapolated_summary = _summary(extrapolated_errors)
+        extrapolated_sq = float(extrapolated_summary["squared_error"])
+        extrapolated_reduction = None
+        if accepted_sq > 0.0:
+            extrapolated_reduction = float((accepted_sq - extrapolated_sq) / accepted_sq)
+
+        previous_rotation_path_excess = float(
+            np.degrees(angle_between_rotmats(R_prev_prev, R_prev))
+            + np.degrees(angle_between_rotmats(R_prev, R_cur))
+            - np.degrees(angle_between_rotmats(R_prev_prev, R_cur))
+        )
+
+        out["previous_motion_proxy"] = {
+            "previous_previous_accepted_frame": int(prev_prev_frame),
+            "previous_accepted_frame": int(prev_frame),
+            "extrapolation_alpha": float(alpha),
+            "previous_dt": float(previous_dt),
+            "current_dt": float(current_dt),
+            "previous_motion_turn_deg": _direction_deg(previous_step, current_step),
+            "current_step_over_previous_step": step_ratio,
+            "previous_rotation_path_excess_deg": previous_rotation_path_excess,
+            "delta_to_extrapolated_pose": _pose_delta(extrapolated_pose, pose_cur),
+            "extrapolated_centre_error": float(centre_error),
+            "extrapolated_centre_error_over_previous_step": centre_error_over_previous_step,
+            "accepted_support_residuals_under_accepted_pose": accepted_summary,
+            "accepted_support_residuals_under_previous_motion_extrapolated_pose": extrapolated_summary,
+            "previous_motion_extrapolated_squared_error_reduction": extrapolated_reduction,
+        }
+
     if prev_frame is None or next_frame is None:
         return out
 
@@ -392,12 +465,8 @@ def _pose_quality(
     alpha = 0.5 if abs(ts_next - ts_prev) <= 1e-12 else float((ts_cur - ts_prev) / (ts_next - ts_prev))
     interp_pose = _interpolate_pose(pose_prev, pose_next, alpha)
 
-    X_support, xy_support = _accepted_pose_support_arrays(frame_record["pose_out"])
-    accepted_errors = _residuals_for_pose(K, pose_cur, X_support, xy_support, eps=float(eps))
     interp_errors = _residuals_for_pose(K, interp_pose, X_support, xy_support, eps=float(eps))
-    accepted_summary = _summary(accepted_errors)
     interp_summary = _summary(interp_errors)
-    accepted_sq = float(accepted_summary["squared_error"])
     interp_sq = float(interp_summary["squared_error"])
     if accepted_sq > 0.0:
         interp_reduction = float((accepted_sq - interp_sq) / accepted_sq)
@@ -758,6 +827,10 @@ def _classify(results: dict[str, Any]) -> dict[str, Any]:
             local_path = local_path_raw if isinstance(local_path_raw, dict) else {}
             local_interp_raw = pose_quality.get("local_interpolation", {}) if isinstance(pose_quality, dict) else {}
             local_interp = local_interp_raw if isinstance(local_interp_raw, dict) else {}
+            previous_proxy_raw = pose_quality.get("previous_motion_proxy", {}) if isinstance(pose_quality, dict) else {}
+            previous_proxy = previous_proxy_raw if isinstance(previous_proxy_raw, dict) else {}
+            previous_proxy_delta_raw = previous_proxy.get("delta_to_extrapolated_pose", {}) if isinstance(previous_proxy, dict) else {}
+            previous_proxy_delta = previous_proxy_delta_raw if isinstance(previous_proxy_delta_raw, dict) else {}
             history = forward.get("historical_residuals_before_frame", {}) if isinstance(forward, dict) else {}
             rows.append(
                 {
@@ -768,6 +841,17 @@ def _classify(results: dict[str, Any]) -> dict[str, Any]:
                     "rotation_path_excess_deg": local_path.get("rotation_path_excess_deg", None),
                     "outside_neighbour_chord": local_path.get("outside_neighbour_chord", None),
                     "interpolation_squared_error_reduction": local_interp.get("interpolation_squared_error_reduction", None),
+                    "previous_motion_turn_deg": previous_proxy.get("previous_motion_turn_deg", None),
+                    "previous_rotation_path_excess_deg": previous_proxy.get("previous_rotation_path_excess_deg", None),
+                    "previous_motion_extrapolated_rotation_delta_deg": previous_proxy_delta.get("rotation_delta_deg", None),
+                    "previous_motion_extrapolated_centre_error_over_previous_step": previous_proxy.get(
+                        "extrapolated_centre_error_over_previous_step",
+                        None,
+                    ),
+                    "previous_motion_extrapolated_squared_error_reduction": previous_proxy.get(
+                        "previous_motion_extrapolated_squared_error_reduction",
+                        None,
+                    ),
                     "future_pose_eligible_any_fraction": forward.get("future_pose_eligible_any_fraction", None) if isinstance(forward, dict) else None,
                     "future_accepted_inlier_any_fraction": forward.get("future_accepted_inlier_any_fraction", None) if isinstance(forward, dict) else None,
                     "history_inconsistent_fraction": history.get("inconsistent_fraction", None) if isinstance(history, dict) else None,

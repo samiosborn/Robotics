@@ -486,5 +486,30 @@ Compare the rotation-path excess and temporal neighbour deltas of bad canonical 
   - ETH3D 18 remains mostly neutral over the tested horizon
 - classification: `pose_deviation_from_local_motion`
 
+## Previous-motion-only proxy calibration (2026-06-17)
+- extended `scripts/diag_bad_vs_useful_fallbacks.py` diagnostically with one-sided previous-motion proxies
+- comparison set remained:
+  - bad canonical-pose fallbacks: ETH3D frames 12 and 16
+  - load-bearing good refreshes: ETH3D frame 17 and KITTI frame 17
+  - neutral references: ETH3D frame 18, KITTI frames 18 and 20
+- evaluated simple online candidates:
+  - delta from previous accepted pose
+  - camera-centre turn against the previous accepted motion
+  - one-sided rotation-path excess from the previous two accepted poses
+  - constant-velocity pose extrapolation from the previous two accepted poses
+  - accepted-support residual change under that previous-motion extrapolated pose
+- none cleanly separates the bad canonical-pose fallbacks from the useful late fallbacks:
+  - delta from previous accepted pose overlaps ETH3D 16 and ETH3D 17
+  - previous-motion turn flags ETH3D 17 strongly because frame 16 is already a bad previous pose
+  - one-sided rotation-path excess is highest at ETH3D 17, again because the past contains the frame-16 outlier
+  - past extrapolated support residuals do not reproduce the retrospective oracle sign: they are worse than the accepted pose for both bad and useful main frames
+  - KITTI 18 is a neutral caution: past extrapolation improves its residuals despite low retrospective rotation-path excess and blocked refresh
+- the retrospective oracle still separates:
+  - ETH3D 12 / 16 rotation-path excess: 8.97° / 9.94°
+  - ETH3D 17 / KITTI 17 rotation-path excess: 2.49° / 0.76°
+  - neighbour interpolation improves bad accepted-support squared error by 28.2 % / 70.5 %
+  - neighbour interpolation worsens useful accepted-support squared error by 473.5 % / 260.2 %
+- classification: `one-sided motion proxy is too weak`
+
 ## Current next step
-Calibrate a diagnostic-only pose-deviation oracle across all late 20 px fallback frames: rotation-path excess and accepted-support residual change under neighbour interpolation are the current clean signal, but neighbour interpolation is retrospective. The next production-relevant question is whether a previous-motion-only proxy can detect the same bad canonical-pose cases without rejecting load-bearing ETH3D 17 or KITTI 17.
+Do not promote a pure previous-motion-only guard. The clean pose-deviation signal remains retrospective, and the next causal search should move beyond pure accepted-pose motion history rather than retuning broad fallback thresholds.

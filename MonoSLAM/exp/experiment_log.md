@@ -1226,3 +1226,57 @@ Decision
 - production code unchanged
 - current status updated
 - next step: calibrate a previous-motion-only proxy for the pose-deviation oracle before considering any gate
+
+---
+
+## 2026-06-17 - Previous-motion-only proxy calibration
+
+Base state
+- trusted baseline after the bad-vs-useful late fallback comparison
+- retrospective pose-deviation oracle separates bad ETH3D frames 12 / 16 from useful ETH3D frame 17 and KITTI frame 17
+- open question: whether a previous-motion-only proxy can approximate that oracle online
+
+Diagnostic step
+- extended `scripts/diag_bad_vs_useful_fallbacks.py` with a diagnostic-only `previous_motion_proxy` block
+- replayed ETH3D and KITTI through frame 22
+- compared accepted rescue pose against:
+  - previous accepted pose delta
+  - previous camera-centre motion turn
+  - one-sided rotation-path excess from the previous two accepted poses
+  - constant-velocity extrapolated pose from the previous two accepted poses
+  - accepted-support residuals under the past extrapolated pose
+
+Validation
+- `uv run python -m py_compile scripts/diag_bad_vs_useful_fallbacks.py`
+- `uv run python scripts/diag_bad_vs_useful_fallbacks.py --eth3d_stop_frame 22 --kitti_stop_frame 22 --out /tmp/bad_vs_useful_previous_motion.json --quiet`
+- parsed `/tmp/bad_vs_useful_previous_motion.json`
+
+Result
+- event table reproduced the labelled set:
+  - ETH3D 12: basis 10→12, 40 / 45 inliers, 20 px localisation-only, bad canonical pose
+  - ETH3D 16: basis 15→16, 24 / 28 inliers, 20 px localisation-only, bad canonical pose
+  - ETH3D 17: basis 16→17, 23 / 23 inliers, 20 px localisation-only, load-bearing good refresh
+  - KITTI 17: basis 14→17, 64 / 73 inliers, 20 px localisation-only, load-bearing good refresh
+  - ETH3D 18 and KITTI 18 / 20 stayed useful neutral references
+- previous-pose delta does not separate: ETH3D 16 and ETH3D 17 have similar previous-pose rotation / centre-direction deltas
+- previous-motion turn does not separate: ETH3D 17 is 135.68° because the bad frame-16 pose is already in the past
+- one-sided rotation-path excess does not separate: ETH3D 17 is 9.94°, higher than both bad frames under the past-only definition
+- past extrapolated residuals do not reproduce the retrospective oracle:
+  - ETH3D 12 / 16 previous-motion residual reductions: -266.9 % / -2.5 %
+  - ETH3D 17 / KITTI 17 previous-motion residual reductions: -2532.1 % / -223.2 %
+  - the extrapolated pose is worse than the accepted pose for both bad and useful main frames
+- neutral KITTI 18 is an added caution: past extrapolation improves its support residuals by 75.2 % despite low retrospective rotation-path excess and blocked refresh
+- retrospective neighbour interpolation remains the clean signal:
+  - bad ETH3D 12 / 16 rotation-path excess: 8.97° / 9.94°
+  - useful ETH3D 17 / KITTI 17 rotation-path excess: 2.49° / 0.76°
+  - bad interpolation residual reductions: 28.2 % / 70.5 %
+  - useful interpolation residual reductions: -473.5 % / -260.2 %
+
+Classification
+- `one-sided motion proxy is too weak`
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- current status updated
+- do not promote a pure previous-motion-only guard
