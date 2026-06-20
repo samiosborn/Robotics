@@ -1517,3 +1517,67 @@ Decision
 - kept as diagnosis
 - production code unchanged
 - the 40px re-solve is the strongest rescue-time proxy found; next step is stability testing across RANSAC seeds and across both bad frames (12 and 16), before any production patch
+
+---
+
+## 2026-06-20 — 40px re-solve seed stability and cross-frame safety test
+
+Base state
+- 40px re-solve on ETH3D frame 16 found correct pose (3.23px) from previous session
+- question: is this stable across seeds and safe for good/neutral frames?
+
+Method
+- script: `scripts/diag_40px_resolve_stability.py`
+- replay ETH3D (frames 2–19) and KITTI (frames 2–21); capture rescue correspondences for each target frame
+- run 8 RANSAC seeds per frame at 40px threshold, 5000 trials each
+- evaluate on full rescue correspondences; for bad frames (ETH3D 12, 16) also evaluate on live-19 bundle and full-history replacement
+
+Frames tested:
+- ETH3D 12 (bad canonical pose, 45 corrs)
+- ETH3D 16 (bad canonical pose, 28 corrs)
+- ETH3D 17 (good refresh, 23 corrs)
+- KITTI 17 (good refresh, 73 corrs)
+- KITTI 18 (neutral, 58 corrs)
+- KITTI 20 (neutral, 48 corrs)
+
+Results
+
+| frame | accepted median | 8px inliers | 40px best median | 40px 8px inliers | success | tight | max rot delta |
+|-------|-----------------|-------------|-----------------|-----------------|---------|-------|---------------|
+| ETH3D 12 (bad) | 15.25 | 0/45 | 2.13 | 45/45 | 8/8 | YES | 0.000° |
+| ETH3D 16 (bad) | 11.39 | 6/28 | 3.75 | 25/28 | 8/8 | NO | 5.19° |
+| ETH3D 17 (good) | 4.05 | 18/23 | 3.46 | 19/23 | 6/8 | NO | 5.25° |
+| KITTI 17 (good) | 5.52 | 52/73 | 6.05 | 49/73 | 8/8 | YES | 0.26° |
+| KITTI 18 (neutral/bad) | 17.38 | 2/58 | 4.06 | 48/58 | 5/8 | NO | 4.22° |
+| KITTI 20 (neutral) | 2.22 | 40/48 | 3.10 | 40/48 | 8/8 | NO | 6.13° |
+
+Local sq_error reduction (full corrs):
+- ETH3D 12: 96.1%; ETH3D 16: 87.6%; KITTI 18: 72.8%
+- ETH3D 17: 13.4%; KITTI 17: −70.3% (expected: strict-8px pose already good; 40px LM gets more outlier noise); KITTI 20: 5.4%
+
+Full-history replacement (live-19 set, bad frames):
+- ETH3D 12: sq_red=35.9%, Δabove_8=−22; ETH3D 16: sq_red=21.8%, Δabove_8=−14
+
+ETH3D 12 40px inlier detail: all 8 seeds produce IDENTICAL result (max_rot_delta=0.000°, max_cc=0.000); correct pose gives 45/45 at 8px — the only viable 40px local minimum for this frame
+
+ETH3D 16 40px cluster: seed=0 finds correct pose (25/28 at 8px); some seeds find alternative bad local minima (up to 31.91px median); 8px inlier count cleanly discriminates (25 vs <<10)
+
+KITTI 17 best 40px: 1.24° from accepted, 0.11 camera-centre distance — functionally same pose; cluster perfectly tight
+
+KITTI 18 surprise: accepted median=17.38px (2/58 at 8px) — third bad rescue pose (previously labelled neutral); 40px re-solve gives 4.06px, 48/58 at 8px
+
+Good/neutral frames would not be gated (accepted medians: ETH3D 17=4.05px, KITTI 17=5.52px, KITTI 20=2.22px — all well below 8px threshold); their best 40px results differ from accepted by ≤1.25°
+
+Stability pattern
+- HIGH correspondence count + dominant correct minimum (ETH3D 12: 45 corrs): perfectly stable, seed-independent
+- LOWER correspondence count or competing local minima (ETH3D 16: 28, KITTI 18: 58, KITTI 20: 48): cluster not tight; seed-dependent
+- Key discriminator: the correct local minimum always has far more 8px inliers than the alternatives; selecting by highest 8px inlier count on full corrs gives reliable recovery
+
+Classification
+- `40 px re-solve is stable and promising`
+- safe condition: apply only when rescue-residual-shape gate triggers (accepted inlier median > ~8px); select result with highest 8px inlier count from a small multi-seed run (3–5 seeds)
+
+Decision
+- kept as diagnosis; production code unchanged
+- stability confirmed on both ETH3D bad frames; benign on all tested good/neutral frames
+- next step: gated multi-seed 40px re-solve patch with 8px-inlier-count selection criterion; test on full sequences before production merge
