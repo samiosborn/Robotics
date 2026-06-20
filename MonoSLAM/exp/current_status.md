@@ -570,5 +570,36 @@ Key evidence for canonical pose as the harm carrier:
 
 Classification: `canonical_pose_storage looks like the right control point`
 
+## Canonical pose storage counterfactual (2026-06-20)
+
+Script: `scripts/diag_canonical_pose_storage.py`
+
+Replaced the kf=16 canonical pose (analytically; no production change) with:
+- **Past-extrap**: constant-velocity extrapolation from kf=14→15, alpha=2.000 (near-uniform timing)
+- **Oracle**: time-interpolated pose kf=15→17, alpha=0.500 (retrospective reference only)
+
+Frame-16 local (22 live frame-19 landmarks, kf=16 observations):
+
+| pose | median_px | above_8 | sq_error |
+|------|-----------|---------|----------|
+| accepted rescue (bad) | 10.97 | 16/22 | 3 220 |
+| past-extrap (α=2.000) | 10.73 | 19/22 ↑ | 2 774 (−13.9%) |
+| oracle (α=0.500) | 5.95 | 4/22 | 924 (−71.3%) |
+
+Full history (340 rows):
+
+| configuration | median_px | p90_px | above_8 | sq_error |
+|--------------|-----------|--------|---------|----------|
+| baseline | 2.87 | 10.87 | 52 | 12 662 |
+| past-extrap kf16 | 2.87 | 10.67 | 55 (+3) | 12 215 (−3.5%) |
+| oracle kf16 | 2.70 | 8.48 | 40 (−12) | 10 366 (−18.1%) |
+
+**Finding:** the past-extrap pose is a DIFFERENT bad pose (10.73 px median, worse above-8 count) — not a good one. The constant-velocity model from two 20px rescue frames is insufficient; the predicted pose lands far from the true frame-16 camera position. 3.5% global sq_error reduction is below the "helps weakly" threshold.
+
+**Conclusion:** canonical pose storage IS the harm carrier (oracle: 18.1% global sq_error reduction; 71.3% on kf=16 bundle). The practical challenge is finding a viable rescue-time replacement — past-motion extrapolation does not qualify.
+
 ## Current next step
-Before any production patch: run a diagnostic-only counterfactual that keeps the refresh at ETH3D frame 16 but replaces the stored canonical pose with the constant-velocity extrapolation from frames 14–15 (the previous-motion extrapolated pose), and measures the effect on frame-19 landmark history residuals. This validates whether action 2 (keep refresh, replace/skip canonical pose) materially reduces geometry contamination. The diagnostic does not need to suppress the observation append — using a better canonical pose at kf=16 would automatically reduce the reprojection error of the already-appended observations.
+Explore alternative synthetic canonical poses at rescue time:
+- (a) Store the previous keyframe's pose at kf=16 rather than the rescue pose (avoids need for extrapolation accuracy)
+- (b) Suppress the kf=16 entry from `seed["poses"]` with a relaxed invariant for rescue-flagged frames (removes bad pose without substituting another)
+- (c) Investigate whether the residual-shape gate can selectively accept/reject canonical pose storage independently of the refresh decision

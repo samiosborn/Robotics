@@ -1392,3 +1392,61 @@ Decision
 - production code unchanged
 - current status updated with action matrix and coupling constraint
 - next step: diagnostic counterfactual that replaces (not skips) the bad canonical pose at frame 16 with the constant-velocity extrapolated pose from frames 14–15, then measures effect on frame-19 landmark history
+
+---
+
+## 2026-06-20 — Canonical pose storage counterfactual (ETH3D frame 16)
+
+Base state
+- first failure frame 19; ETH3D frames 12 and 16 identified as bad canonical-pose outliers
+- previous session classified `canonical_pose_storage` as the right control point from oracle evidence
+
+Hypothesis
+- replacing the stored canonical pose at kf=16 with a constant-velocity extrapolated pose from kf=14→15 should reduce landmark-history residuals, validating canonical pose storage as the harm carrier
+
+Method
+- baseline: unmodified replay through frame 19 (no production changes)
+- counterfactual: analytical only — replace kf=16 residuals in the 340-row history with residuals under the past-extrap pose; no seed mutation
+- script: `scripts/diag_canonical_pose_storage.py`
+- extrapolation: `_extrapolate_pose(pose_14, pose_15, alpha)` with `alpha = (ts_16 - ts_14) / (ts_15 - ts_14) = 2.000` (near-uniform frame spacing)
+- oracle comparison: time-interpolated pose from kf=15→17 with `alpha = 0.500`
+
+Frame-16 local results (22 live frame-19 landmarks, kf=16 bundle)
+
+| pose | median_px | p90_px | above_8 | sq_error | sq_reduction |
+|------|-----------|--------|---------|----------|--------------|
+| accepted rescue (bad) | 10.97 | 17.51 | 16/22 | 3 220 | — |
+| past-extrap (kf14→15, α=2.000) | 10.73 | 15.43 | 19/22 | 2 774 | −13.9% |
+| oracle interp (kf15→17, α=0.500) | 5.95 | 8.16 | 4/22 | 924 | −71.3% |
+
+Pose delta vs accepted rescue pose
+
+| pose | rotation_delta_deg | camera_centre_distance |
+|------|--------------------|----------------------|
+| past-extrap | 4.76° | 3.17 |
+| oracle | 6.27° | 2.90 |
+
+Full-history counterfactual results (340 rows, 22 live landmarks)
+
+| configuration | median_px | p90_px | above_8 | sq_error | sq_reduction |
+|--------------|-----------|--------|---------|----------|--------------|
+| baseline | 2.87 | 10.87 | 52 | 12 662 | — |
+| past-extrap kf16 | 2.87 | 10.67 | 55 (+3) | 12 215 | −3.5% |
+| oracle kf16 | 2.70 | 8.48 | 40 (−12) | 10 366 | −18.1% |
+
+Findings
+- past-extrap median barely improves (10.97 → 10.73 px, +2.2%) and WORSENS above-8 count (16 → 19)
+- past-extrap gives only 3.5% full-history sq_error reduction — below noise threshold for "helps weakly" (5%)
+- the past-extrap pose is a DIFFERENT bad pose, not a good one; alpha=2.000 overshoots the true frame-16 position in the wrong direction
+- oracle confirms that canonical pose storage IS load-bearing (71.3% kf=16 bundle reduction; 18.1% global reduction)
+- root cause of extrap failure: constant-velocity model from kf=14→15 is insufficient; both 14 and 15 are themselves 20px rescues; accumulated extrapolation error places the predicted pose far from the true camera position at frame 16
+
+Classification
+- `canonical pose storage is strongly implicated` (oracle evidence: 18.1% global sq_error reduction with a correct pose at kf=16)
+- `past-motion-only extrapolation is not a viable rescue-time substitute` (3.5% global reduction, worse above-8; median 10.73 px vs target <8 px)
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- canonical pose storage confirmed as the harm carrier; the rescue-time proxy challenge is now the open sub-problem
+- next step: explore alternative synthetic canonical poses at rescue time: (a) store previous-keyframe pose at kf=16 rather than the rescue pose; (b) suppress the kf=16 canonical pose from history with a relaxed invariant for rescue-flagged frames; (c) investigate whether the residual-shape signal can gate canonical-pose acceptance independently of the refresh decision
