@@ -1450,3 +1450,70 @@ Decision
 - production code unchanged
 - canonical pose storage confirmed as the harm carrier; the rescue-time proxy challenge is now the open sub-problem
 - next step: explore alternative synthetic canonical poses at rescue time: (a) store previous-keyframe pose at kf=16 rather than the rescue pose; (b) suppress the kf=16 canonical pose from history with a relaxed invariant for rescue-flagged frames; (c) investigate whether the residual-shape signal can gate canonical-pose acceptance independently of the refresh decision
+
+---
+
+## 2026-06-20 — Canonical pose proxy comparison (ETH3D frame 16)
+
+Base state
+- canonical pose storage confirmed as harm carrier; past-motion extrapolation found not viable
+- next question: which rescue-time proxy poses are viable substitutes for the bad 20px canonical pose?
+
+Method
+- script: `scripts/diag_frame16_proxy_poses.py`
+- replay through frame 19 (no production changes); capture frame-16 PnP correspondences and loose inlier mask from `pose_out["corrs"]` and `pose_out["pnp_inlier_mask"]`
+- evaluate five proxy candidates on the 22 live-frame-19 landmarks' kf=16 observations and full 340-row history replacement
+
+Candidates tested
+
+| candidate | family | rescue-time only? |
+|-----------|--------|------------------|
+| frame-15 canonical pose | temporal prior | yes |
+| 40px RANSAC on full 28 correspondences | full-support re-solve | yes |
+| trimmed 50% refit (best 16 of 24 loose inliers, 12px) | trimmed-support refit | yes |
+| pruned <15px refit (19 of 24 loose inliers, 12px) | pruned-support refit | yes |
+| oracle kf15→17 interpolation | retrospective reference | no |
+
+Frame-16 local results (22 live frame-19 landmarks, kf=16 bundle)
+
+| candidate | median_px | p90_px | above_8 | sq_error | local_sq_red |
+|-----------|-----------|--------|---------|----------|-------------|
+| accepted bad rescue | 10.97 | 17.51 | 16/22 | 3 220 | 0% |
+| frame-15 pose | 8.82 | 15.81 | 12/22 | 2 430 | 24.5% |
+| 40px re-solve | 3.23 | 7.45 | 2/22 | 464 | 85.6% |
+| trimmed 50% refit | FAILED | — | — | — | — |
+| pruned <15px refit | FAILED | — | — | — | — |
+| oracle interp | 5.95 | 8.16 | 4/22 | 924 | 71.3% |
+
+40px re-solve inlier counts on full 28 correspondences: 25/28 at 8px, 28/28 at 12px, 28/28 at 20px
+
+Full-history counterfactual (340 rows, 22 live landmarks)
+
+| candidate | median_px | p90_px | above_8 | sq_error | sq_reduction | Δabove_8 |
+|-----------|-----------|--------|---------|----------|-------------|---------|
+| baseline | 2.87 | 10.87 | 52 | 12 662 | — | — |
+| frame-15 pose | 2.87 | 10.50 | 48 | 11 872 | 6.2% | −4 |
+| 40px re-solve | 2.62 | 8.48 | 38 | 9 906 | 21.8% | −14 |
+| oracle | 2.70 | 8.48 | 40 | 10 366 | 18.1% | −12 |
+
+Pose delta (40px re-solve vs accepted bad rescue)
+- rotation_delta_deg: 6.75°
+- translation_direction_delta_deg: 8.63°
+- camera_centre_distance: 2.98
+
+Findings
+- the 40px RANSAC on the full 28 rescue correspondences finds the TRUE camera pose at kf=16 (3.23 px median, BETTER than the oracle's 5.95 px)
+- 25/28 correspondences agree with the 40px result at strict 8px — this is the correct pose the strict RANSAC failed to find
+- the trimmed and pruned refits both fail entirely: RANSAC at 12px on the best 12–19 loose inliers under the bad pose finds 0 valid poses, confirming that sorting inliers by residual under the bad pose selects the support most biased toward the wrong minimum
+- frame-15 pose gives only 8.82 px (24.5% local sq_error reduction) and still has 12/22 above-8px — weak improvement
+- root cause of bad rescue: stage2_20px (5000 trials) converges to a wrong local minimum with 24 inliers; the seeded 40px path in the existing rescue pipeline would reach the correct minimum, but it is never executed because stage2_20px succeeds first and returns early
+
+Classification
+- `robust re-refinement looks promising` — specifically, a wider-threshold RANSAC on the FULL rescue correspondence set escapes the 20px wrong local minimum
+- frame-15 pose: `helps only weakly` (8.82 px, 24.5% local sq_error reduction)
+- trimmed/pruned refits: `not viable` (fail completely)
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- the 40px re-solve is the strongest rescue-time proxy found; next step is stability testing across RANSAC seeds and across both bad frames (12 and 16), before any production patch

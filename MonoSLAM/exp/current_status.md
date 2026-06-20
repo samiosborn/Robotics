@@ -598,8 +598,42 @@ Full history (340 rows):
 
 **Conclusion:** canonical pose storage IS the harm carrier (oracle: 18.1% global sq_error reduction; 71.3% on kf=16 bundle). The practical challenge is finding a viable rescue-time replacement — past-motion extrapolation does not qualify.
 
+## Canonical pose proxy comparison (2026-06-20)
+
+Script: `scripts/diag_frame16_proxy_poses.py`
+
+Five proxy candidates compared analytically against the accepted bad rescue pose at kf=16.
+Evaluation: residuals on the 22 live frame-19 landmarks' kf=16 observations; full 340-row history replacement.
+
+Frame-16 local (22 live landmarks, kf=16 bundle):
+
+| candidate | median_px | above_8 | sq_error | local_sq_red |
+|-----------|-----------|---------|----------|-------------|
+| accepted bad rescue (baseline) | 10.97 | 16/22 | 3 220 | 0% |
+| frame-15 canonical pose | 8.82 | 12/22 | 2 430 | 24.5% |
+| **40px re-solve on full 28 corrs** | **3.23** | **2/22** | **464** | **85.6%** |
+| trimmed 50% refit (12px on 16 best loose inliers) | FAILED | — | — | — |
+| pruned <15px refit (12px on 19 loose inliers) | FAILED | — | — | — |
+| oracle interp kf15→17 (retrospective reference) | 5.95 | 4/22 | 924 | 71.3% |
+
+Seeded 40px inlier counts on full 28 correspondences: 25/28 at 8px, 28/28 at 12px, 28/28 at 20px.
+
+Full history counterfactual (340 rows):
+
+| candidate | sq_error | sq_reduction | above_8 | Δabove_8 |
+|-----------|----------|-------------|-------|---------|
+| baseline | 12 662 | — | 52 | — |
+| frame-15 pose | 11 872 | 6.2% | 48 | −4 |
+| **40px re-solve** | **9 906** | **21.8%** | **38** | **−14** |
+| oracle | 10 366 | 18.1% | 40 | −12 |
+
+**Key finding:** the 40px RANSAC on the FULL 28 rescue correspondences finds the correct camera pose for kf=16 (3.23 px median, 85.6% local sq_error reduction — better than the oracle). The 20px rescue RANSAC converges to a wrong local minimum with 24 inliers at 20px; the wider 40px threshold explores a larger hypothesis space and finds the correct minimum, where 25/28 correspondences agree at strict 8px.
+
+**Root cause of the bad rescue:** the production 20px path runs stage2_20px → 24 inliers at wrong local minimum → accepted and returned early; the seeded 40px path (already in the rescue pipeline) is never reached because stage2_20px succeeded first.
+
+**Why trimmed refits fail:** the 16 "best" inliers under the bad pose (median 8.25 px) are concentrated in the wrong region; running fresh RANSAC on those at 12px yields 0 inliers. Sorting by residual under the bad pose selects the support most biased toward the wrong minimum.
+
+Classification: `robust re-refinement looks promising` — specifically, a 40px RANSAC on the FULL rescue correspondence set bypasses the wrong local minimum found by the 20px path.
+
 ## Current next step
-Explore alternative synthetic canonical poses at rescue time:
-- (a) Store the previous keyframe's pose at kf=16 rather than the rescue pose (avoids need for extrapolation accuracy)
-- (b) Suppress the kf=16 entry from `seed["poses"]` with a relaxed invariant for rescue-flagged frames (removes bad pose without substituting another)
-- (c) Investigate whether the residual-shape gate can selectively accept/reject canonical pose storage independently of the refresh decision
+Before any production patch: verify that the 40px re-solve is stable across RANSAC seeds for ETH3D frame 16, and test whether it also recovers a good pose for frame 12. If stable on both bad frames and benign on good frames (ETH3D 17, KITTI 17), the implementation path is: when a 20px localisation-only rescue is accepted but its residual-shape signal exceeds the gate threshold (~8 px inlier median), run a secondary 40px RANSAC on the FULL correspondence set and use that pose for canonical storage (keeping the 20px rescue for the refresh decision).
