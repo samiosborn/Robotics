@@ -539,7 +539,36 @@ Event table for post-refinement inlier residuals:
 
 Classification: `residual-shape signal looks promising`
 
+## Residual-shape action selection (2026-06-20)
+
+The residual-shape signal cleanly identifies bad canonical-pose rescue frames (median 10–15 px) versus good rescue frames (4–6 px). The action-selection question is: once flagged, what should the signal control?
+
+**Three distinct control call sites in `frame_pipeline.py`:**
+- `append_tracked_observations_to_seed` (lines 840–851): writes rescue-frame observations to landmark history
+- guarded refresh `_refresh_active_lookup_basis_from_rescued_support` (lines 890–905): installs new active basis
+- `store_current_pose` (line 968): stores the rescue pose in `seed["poses"][current_kf]`
+
+**Action matrix from existing evidence:**
+
+| action | ETH3D 12/16 (bad pose, load-bearing refresh) | ETH3D/KITTI 17 (good refresh) |
+|--------|-----------------------------------------------|-------------------------------|
+| A1: keep both (current) | frame-19 fails; kf=12/16 dominate landmark-history error | no harm |
+| A2: keep refresh, no canonical pose | hypothetical: refresh keeps support continuity; bad observations absent | equivalent to A1 (not flagged) |
+| A3: keep canonical pose, block refresh | tested: first failure moves earlier (harmful) | tested: first failure moves earlier (harmful) |
+| A4: reject entirely | worse than A3 | worse than A3 |
+
+Key evidence for A3 being harmful:
+- Suppressing frame-12+16 refresh: first failure 19 → 16
+- Suppressing only frame-16 refresh: first failure 19 → 17
+- Suppressing frame-17 refresh: first failure 19 → 18
+
+Key evidence for canonical pose as the harm carrier:
+- Interpolation oracle at frame 16: replacing bad canonical pose with interpolated pose reduces kf=16 squared error by 71%; full-history p90 drops from 10.87 to 8.48 px
+- Frame 12 contributes 56% of frames 15–18 squared error; frame 16 contributes 25% of 340-obs squared error; both through the stored bad canonical pose being evaluated against its appended observations
+
+**Coupling constraint:** Action 2 is non-trivial because the canonical pose agreement invariant (added 2026-06-12) requires `seed["poses"][kf]` to agree with the active keyframe record's pose when that kf is the active basis. Suppressing `store_current_pose` while keeping the refresh breaks this invariant. The implementation must either store a better synthetic pose, relax the invariant for rescue-flagged frames, or use a different basis-kf for the refresh record.
+
+Classification: `canonical_pose_storage looks like the right control point`
+
 ## Current next step
-Validate a gate on post-refinement accepted-inlier residual median (candidate threshold ~7–8 px) across a wider set of frames before committing to a production change.
-The gate condition would read: accepted-inlier median > threshold → flag the rescue as a suspect canonical pose.
-Caution: the rescue refresh may still be load-bearing even when the canonical pose is bad (as at ETH3D 12 and 16); the action should target pose quality not necessarily refresh blocking.
+Before any production patch: run a diagnostic-only counterfactual that keeps the refresh at ETH3D frame 16 but replaces the stored canonical pose with the constant-velocity extrapolation from frames 14–15 (the previous-motion extrapolated pose), and measures the effect on frame-19 landmark history residuals. This validates whether action 2 (keep refresh, replace/skip canonical pose) materially reduces geometry contamination. The diagnostic does not need to suppress the observation append — using a better canonical pose at kf=16 would automatically reduce the reprojection error of the already-appended observations.

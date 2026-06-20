@@ -1344,3 +1344,51 @@ Decision
 - new diagnostic script committed
 - current status updated
 - experiment log updated
+
+---
+
+## 2026-06-20 — Residual-shape action selection
+
+Base state
+- residual-shape signal confirmed: post-refinement accepted-inlier median cleanly separates bad canonical-pose frames (10–15 px) from good rescue frames (4–6 px)
+- open question: what should the signal control — canonical pose storage, refresh, both, or unclear?
+
+Diagnostic step
+- read existing counterfactual evidence (no new code run)
+- mapped three distinct control call sites in `frame_pipeline.py`:
+  - `append_tracked_observations_to_seed` (lines 840–851): observation append
+  - `_refresh_active_lookup_basis_from_rescued_support` (lines 890–905): active basis refresh
+  - `store_current_pose` (line 968): canonical pose storage in `seed["poses"][current_kf]`
+- evaluated four hypothetical actions against every labelled frame using existing counterfactuals and the interpolation oracle
+
+Action matrix (from existing evidence)
+
+| action | ETH3D 12/16 (bad pose, load-bearing refresh) | ETH3D 17 / KITTI 17 (good refresh) | neutral references |
+|--------|-----------------------------------------------|------------------------------------|--------------------|
+| A1: keep both (current) | frame-19 fails; kf=12/16 dominate landmark history | no harm | no harm |
+| A2: keep refresh, no canonical pose | hypothetical: refresh keeps support continuity; bad observations absent from history | equivalent to A1 (not flagged) | equivalent to A1 |
+| A3: keep canonical pose, block refresh | tested: first failure earlier (−2 to −3 frames); harmful | tested: first failure earlier; harmful | neutral to harmful |
+| A4: reject entirely | untested; worse than A3 | worse than A3 | worse |
+
+Evidence for A3 being harmful
+- suppress frame-12+16 refresh: first failure 19 → 16
+- suppress frame-16 only: first failure 19 → 17
+- suppress frame-17 (ETH3D): first failure 19 → 18
+
+Evidence for canonical pose as harm carrier
+- kf=16 interpolation oracle: replacing bad canonical pose reduces kf=16 squared error by 71%; full-history p90 drops from 10.87 to 8.48 px
+- kf=12 contributes 56% of frames 15–18 squared error; kf=16 contributes 25% of 340-obs squared error
+- both contributions flow solely from the bad pose being stored in `seed["poses"][12/16]` and then evaluated against appended observations
+
+Coupling constraint identified
+- canonical pose agreement invariant (added 2026-06-12) requires `seed["poses"][kf]` to agree with the active keyframe record's pose
+- A2 cannot simply skip `store_current_pose` while keeping the refresh; requires either a synthetic/interpolated canonical pose, invariant relaxation for rescue-flagged frames, or a different active-basis kf
+
+Classification
+- `canonical_pose_storage looks like the right control point`
+
+Decision
+- kept as diagnosis
+- production code unchanged
+- current status updated with action matrix and coupling constraint
+- next step: diagnostic counterfactual that replaces (not skips) the bad canonical pose at frame 16 with the constant-velocity extrapolated pose from frames 14–15, then measures effect on frame-19 landmark history
