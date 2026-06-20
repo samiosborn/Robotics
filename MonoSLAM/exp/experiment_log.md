@@ -1280,3 +1280,67 @@ Decision
 - production code unchanged
 - current status updated
 - do not promote a pure previous-motion-only guard
+
+---
+
+## 2026-06-20 — Rescue-time support-conditioned signal comparison
+
+Base state
+- trusted baseline after previous-motion-only proxy calibration
+- retrospective pose-deviation oracle (rotation-path excess + neighbour interpolation residual reduction) cleanly separates bad from useful
+- previous-motion-only proxies are too weak: they are contaminated by the bad frame-16 pose being in the motion history
+- next clean question: is there a signal available at rescue time from the accepted rescue candidate and its support set?
+
+Clarification of strict-on-loose = 0
+- `pnp_support_rescue_subset_strict_inliers = 0` for all 20 px fallback rescues is a code-path artefact
+- the loose localisation fallback branch returns at `pnp_frontend.py` line 518 before the strict RANSAC is attempted
+- strict-on-loose = 0 is always 0 for this code path; it is not a measure of post-refinement inlier quality
+
+Diagnostic step
+- new script: `scripts/diag_rescue_candidate_quality.py`
+- replayed ETH3D (frames 2–20) and KITTI (frames 2–21) under the current guard
+- for each target frame, extracted the accepted inlier set from `pnp_inlier_mask` in `pose_out` after nonlinear refinement
+- computed post-refinement residuals of accepted inliers under the accepted pose
+- computed fine threshold retention: fractions at or below 10 / 12 / 14 / 16 px
+- computed DLT condition (sigma_min / sigma_max from inlier set)
+- attempted bootstrap subsample stability (50 random 6-point subsets)
+
+Event table
+
+| dataset | frame | stage | n_inliers | median_px | p90_px | frac_≤12px | frac_>14px | frac_>16px | label |
+|---------|-------|-------|-----------|-----------|--------|------------|------------|------------|-------|
+| ETH3D | 12 | loose_20px | 40 | 14.66 | 17.44 | 0.175 | 0.550 | 0.300 | bad canonical pose |
+| ETH3D | 16 | loose_20px | 24 | 10.71 | 17.36 | 0.667 | 0.250 | 0.208 | bad canonical pose |
+| ETH3D | 17 | loose_20px | 23 | 4.05 | 9.24 | 0.957 | 0.000 | 0.000 | load-bearing good refresh |
+| KITTI | 17 | loose_20px | 64 | 5.03 | 9.06 | 0.984 | 0.016 | 0.016 | load-bearing good refresh |
+| ETH3D | 18 | loose_20px | 23 | 5.97 | 11.18 | 0.957 | 0.043 | 0.043 | neutral |
+| KITTI | 18 | loose_20px | 49 | 16.98 | 18.86 | 0.041 | 0.959 | 0.694 | neutral (blocked by guard) |
+| KITTI | 20 | loose_20px | 40 | 2.06 | 4.19 | 1.000 | 0.000 | 0.000 | neutral (blocked by guard) |
+
+Signal comparison
+
+- residual median: min(bad) 10.71 px vs max(good) 5.03 px — clean separation
+- frac_at_most_12px: max(bad) 0.667 vs min(good) 0.957 — clean separation
+- frac_above_14px: min(bad) 0.250 vs max(good) 0.016 — clean separation
+- frac_above_16px: min(bad) 0.208 vs max(good) 0.016 — clean separation
+- DLT condition (sigma_min / sigma_max): ETH3D cases all ~2e-5 regardless of label — does not separate
+- bootstrap stability: 6-point DLT subsets numerically ill-conditioned; all 50 trials fail for every frame — unavailable
+
+Mechanism
+- bad pose: 20 px RANSAC finds a consensus at the wrong camera location; nonlinear refinement converges to a local minimum keeping inlier residuals at 10–15 px
+- good pose: 20 px RANSAC finds a consensus at the correct camera location (landmarks have drifted); refinement from the right region gives inlier residuals of 4–6 px despite landmark drift
+- the post-refinement inlier residual distribution is a direct quality indicator of whether nonlinear refinement found a geometrically meaningful solution
+
+Neutral reference notes
+- ETH3D 18 (neutral): median 5.97 px, frac_≤12px 0.957 — indistinguishable from good frames; signal would correctly not block it
+- KITTI 18 (neutral, already blocked by guard): median 16.98 px — agrees with the guard; consistent not redundant
+- KITTI 20 (neutral, blocked by guard for spatial concentration): median 2.06 px — excellent refined pose; signal would correctly not block it; guard's spatial reasoning is independent
+
+Classification
+- `residual-shape signal looks promising`
+
+Decision
+- kept as diagnosis
+- new diagnostic script committed
+- current status updated
+- experiment log updated

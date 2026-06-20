@@ -511,5 +511,35 @@ Compare the rotation-path excess and temporal neighbour deltas of bad canonical 
   - neighbour interpolation worsens useful accepted-support squared error by 473.5 % / 260.2 %
 - classification: `one-sided motion proxy is too weak`
 
+## Rescue-time support-conditioned signal (2026-06-20)
+- new script: `scripts/diag_rescue_candidate_quality.py`
+- replayed both datasets; for each target 20 px fallback rescue extracted post-refinement inlier residuals under the accepted pose
+- five candidate signals: accepted-inlier residual median, p90, frac_at_most_12px, frac_above_14px, frac_above_16px, plus DLT condition and bootstrap stability
+
+Event table for post-refinement inlier residuals:
+
+| dataset | frame | n_inliers | median_px | p90_px | frac_≤12px | frac_>14px | label |
+|---------|-------|-----------|-----------|--------|------------|------------|-------|
+| ETH3D | 12 | 40 | 14.66 | 17.44 | 0.175 | 0.550 | bad canonical pose |
+| ETH3D | 16 | 24 | 10.71 | 17.36 | 0.667 | 0.250 | bad canonical pose |
+| ETH3D | 17 | 23 | 4.05 | 9.24 | 0.957 | 0.000 | load-bearing good refresh |
+| KITTI | 17 | 64 | 5.03 | 9.06 | 0.984 | 0.016 | load-bearing good refresh |
+| ETH3D | 18 | 23 | 5.97 | 11.18 | 0.957 | 0.043 | neutral |
+| KITTI | 18 | 49 | 16.98 | 18.86 | 0.041 | 0.959 | neutral (blocked by guard) |
+| KITTI | 20 | 40 | 2.06 | 4.19 | 1.000 | 0.000 | neutral (blocked by guard) |
+
+- residual median: min(bad) 10.71 px vs max(good) 5.03 px — clean separation
+- frac_at_most_12px: max(bad) 0.667 vs min(good) 0.957 — clean separation
+- frac_above_14px: min(bad) 0.250 vs max(good) 0.016 — clean separation
+- DLT condition does not separate; bootstrap stability unavailable with 6-point DLT subsets
+- strict-on-loose = 0 for all 20 px fallback cases is a code-path artefact (early return at pnp_frontend.py line 518), not a signal
+- mechanism: a bad 20 px rescue pose is trapped in a wrong-location local minimum by nonlinear refinement; residuals of its accepted inliers stay at 10–15 px; a good rescue pose refines from the correct region and gives 4–6 px inlier residuals even with drifted landmarks
+- ETH3D 18 (neutral) at 5.97 px is the limiting reference; a gate at ~7–8 px on accepted-inlier median would separate the labelled set without blocking ETH3D 18
+- KITTI 18 (16.98 px) would also be caught but is already blocked by the spatial guard
+
+Classification: `residual-shape signal looks promising`
+
 ## Current next step
-Do not promote a pure previous-motion-only guard. The clean pose-deviation signal remains retrospective, and the next causal search should move beyond pure accepted-pose motion history rather than retuning broad fallback thresholds.
+Validate a gate on post-refinement accepted-inlier residual median (candidate threshold ~7–8 px) across a wider set of frames before committing to a production change.
+The gate condition would read: accepted-inlier median > threshold → flag the rescue as a suspect canonical pose.
+Caution: the rescue refresh may still be load-bearing even when the canonical pose is bad (as at ETH3D 12 and 16); the action should target pose quality not necessarily refresh blocking.
