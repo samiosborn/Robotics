@@ -1581,3 +1581,91 @@ Decision
 - kept as diagnosis; production code unchanged
 - stability confirmed on both ETH3D bad frames; benign on all tested good/neutral frames
 - next step: gated multi-seed 40px re-solve patch with 8px-inlier-count selection criterion; test on full sequences before production merge
+
+---
+
+## 2026-06-20 — Gated 40 px shadow integration test
+
+Base state
+- 40 px full-set re-solve looked promising on labelled bad and good rescue frames
+- open question: whether a residual-gated multi-seed 40 px shadow path remains beneficial and safe over longer real sequence replays before any production patch
+
+Method
+- new script: `scripts/diag_40px_shadow_integration.py`
+- replayed ETH3D `cables_2_mono` for 40 tracked frames and KITTI sequence 00 for 30 tracked frames
+- left the real pipeline pose, refresh, observation append, canonical pose storage, and seed state unchanged
+- for each accepted rescue, computed accepted-inlier residual median under the accepted pose
+- triggered the shadow path only when that median was above 8 px
+- when triggered, ran 5 seeds of 40 px RANSAC, 5000 trials each, on the full rescue correspondence set
+- selected the candidate with the highest strict 8 px inlier count on the full set, breaking ties by lower full-set residual median
+- estimated current-frame history impact by evaluating stored frame observations under the accepted pose versus the selected shadow pose
+
+Validation
+- `uv run python -m py_compile scripts/diag_40px_shadow_integration.py`
+- `UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_40px_shadow_integration.py --out /tmp/diag_40px_shadow_integration.json`
+- parsed `/tmp/diag_40px_shadow_integration.json`
+
+ETH3D result
+- baseline replay unchanged: 17 / 40 ok, first failure frame 19, 9 successful rescues, 9 refreshes
+- rescue frames considered: 8, 10, 12, 13, 14, 15, 16, 17, 18
+- gate fired only on frames 12 and 16
+- frame 12: accepted median / p90 15.25 / 20.28 px; shadow 2.13 / 4.95 px; strict 8 px 0 / 45 -> 45 / 45; seeds 5 / 5; local verdict better
+- frame 16: accepted median / p90 11.39 / 20.68 px; shadow 3.75 / 7.84 px; strict 8 px 6 / 28 -> 25 / 28; seeds 5 / 5; local verdict better
+- known useful / neutral frames did not trigger: frame 17 support median 4.05 px, frame 18 support median 5.97 px
+- history estimates: frame 12 stored-observation sq-error reduction 95.9% and above-8 reduction 40; frame 16 sq-error reduction 84.7% and above-8 reduction 16
+- downstream reuse estimate: frame 12 support reused as inlier support for frames 13-15; frame 16 support reused at frames 17-18 and remained pose-eligible at failed frame 19
+
+KITTI result
+- baseline replay unchanged: 16 / 30 ok, first failure frame 19, 5 successful rescues, 2 refreshes
+- rescue frames considered: 14, 16, 17, 18, 20
+- gate fired only on frame 18
+- frame 18: accepted median / p90 17.38 / 23.87 px; shadow 4.06 / 18.35 px; strict 8 px 2 / 58 -> 48 / 58; seeds 3 / 5; local verdict better
+- known useful / neutral frames did not trigger: frame 14 support median 1.93 px, frame 17 support median 5.03 px, frame 20 support median 2.06 px
+- history estimate: frame 18 stored-observation sq-error reduction 90.0% and above-8 reduction 43
+- downstream reuse estimate: frame 18 support stayed pose-eligible at frames 19-21 and was reused as inlier support at frame 20
+
+Classification
+- `gated 40 px re-solve is promising and broadly safe`
+
+Decision
+- kept as diagnosis
+- production behaviour unchanged
+- current status updated because the trusted interpretation materially sharpened from labelled-frame stability to sequence-level viability
+- clean next step, if production work resumes: a narrow canonical-pose-storage proxy patch gated by accepted-inlier residual median, leaving refresh and rescue acceptance untouched
+
+---
+
+## 2026-06-20 - Canonical-pose proxy production patch
+
+Base state
+- trusted baseline kept rescue acceptance, rescue refresh, append-on-rescue, BA, and keyframe policy unchanged
+- diagnostic shadow path showed that accepted-inlier residual median above 8 px identified the bad canonical-pose rescue frames
+
+Change
+- added a production canonical-pose proxy path in `src/slam/frame_pipeline.py`
+- trigger: successful loose rescue with accepted-inlier residual median above 8 px
+- action: run five 40 px RANSAC re-solves on the full rescue correspondence set and select by highest strict 8 px inlier count, then lower full-set residual median
+- storage: replace only `store_current_pose` input for the current keyframe when a proxy is selected
+- reporting: passed the new canonical proxy audit fields through standard frame summaries
+- rescue acceptance, refresh, observation append, BA, map growth, and keyframe policy were not changed
+
+Validation
+- `cd /home/samio/WSLGit/Robotics/Robotics/MonoSLAM && UV_CACHE_DIR=/tmp/uv-cache uv run python -m pytest tests/slam tests/datasets -q`: 81 passed
+- `cd /home/samio/WSLGit/Robotics/Robotics/MonoSLAM && UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_eth3d.py --num_track 22 --scorecard short --threshold_pair_frame_index 9999 --out_dir /tmp/diag_pnp_eth3d_after_canonical_proxy_patch`
+- `cd /home/samio/WSLGit/Robotics/Robotics/MonoSLAM && UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/diag_pnp_kitti.py --num_track 22 --scorecard short --threshold_pair_frame_index 9999 --out_dir /tmp/diag_pnp_kitti_after_canonical_proxy_patch`
+- `cd /home/samio/WSLGit/Robotics/Robotics/MonoSLAM && UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/demo_frontend_eth3d.py`
+- `cd /home/samio/WSLGit/Robotics/Robotics/MonoSLAM && UV_CACHE_DIR=/tmp/uv-cache PYTHONPATH=. uv run python scripts/demo_frontend_kitti.py --num_track 1 --out_dir /tmp/kitti_demo_after_canonical_proxy_patch`
+
+Result
+- ETH3D summary: 17 / 22 ok, first failure frame 19, rescue 10 / 9, refresh 9
+- KITTI summary: 16 / 22 ok, first failure frame 19, rescue 11 / 5, refresh 2
+- ETH3D frame 12: trigger fired, proxy stored, 5 seeds, selected 45 / 45 strict 8 px, selected median 2.13 px
+- ETH3D frame 16: trigger fired, proxy stored, 5 seeds, selected 25 / 28 strict 8 px, selected median 3.75 px
+- ETH3D frames 17 and 18 did not trigger
+- KITTI frame 18: trigger fired, proxy stored, 5 seeds, selected 48 / 58 strict 8 px, selected median 4.06 px
+- KITTI frames 17 and 20 did not trigger
+- frame 19 failure remains in both diagnostics, so the short-horizon downstream survival did not improve
+
+Decision
+- kept as a narrow canonical-pose storage patch
+- classification: `result inconclusive`

@@ -8,6 +8,7 @@ import numpy as np
 
 from core.checks import check_int_ge0, check_mask_bool_N, check_matrix_3x3, check_positive
 from geometry.camera import reprojection_errors_sq
+from geometry.pnp import _pnp_inlier_mask_from_pose, estimate_pose_pnp_ransac
 from slam.bundle_adjustment import local_bundle_adjustment_not_run_stats, run_local_bundle_adjustment
 from slam.keyframe import consider_promote_keyframe
 from slam.keyframe_state import get_active_keyframe_features, get_pose_for_kf, has_active_keyframe_state, set_active_keyframe_record, store_current_pose
@@ -17,6 +18,13 @@ from slam.pnp_frontend import estimate_pose_from_seed
 from slam.pnp_stats import pnp_diagnostic_summary_stats
 from slam.seed import seed_keyframe_pose
 from slam.tracking import track_against_keyframe
+
+
+_CANONICAL_POSE_PROXY_GATE_MEDIAN_PX = 8.0
+_CANONICAL_POSE_PROXY_STRICT_EVAL_PX = 8.0
+_CANONICAL_POSE_PROXY_RESCUE_THRESHOLD_PX = 40.0
+_CANONICAL_POSE_PROXY_NUM_TRIALS = 5000
+_CANONICAL_POSE_PROXY_SEEDS = (0, 1, 2, 3, 7)
 
 
 # Copy a pose block for accepted-pose storage
@@ -34,6 +42,218 @@ def _copy_seed_for_active_record(seed: dict[str, Any]) -> dict[str, Any]:
     if "keyframes" in seed and isinstance(seed["keyframes"], dict):
         seed_out["keyframes"] = dict(seed["keyframes"])
     return seed_out
+
+
+def _canonical_pose_proxy_default_stats() -> dict[str, Any]:
+    return {
+        "canonical_pose_proxy_residual_shape_trigger_fired": False,
+        "canonical_pose_proxy_trigger_residual_median_px": None,
+        "canonical_pose_proxy_num_seeds_tried": 0,
+        "canonical_pose_proxy_selected": False,
+        "canonical_pose_proxy_selected_strict_8px_inliers": 0,
+        "canonical_pose_proxy_selected_residual_median_px": None,
+        "canonical_pose_proxy_storage_replaced": False,
+        "canonical_pose_proxy_failed_fallback": False,
+        "canonical_pose_proxy_reason": "not_evaluated",
+    }
+
+
+def _canonical_pose_proxy_residual_median_px(
+    K: np.ndarray,
+    R,
+    t,
+    corrs,
+    *,
+    eps: float,
+    mask=None,
+) -> float | None:
+    X_w = np.asarray(corrs.X_w, dtype=np.float64)
+    x_cur = np.asarray(corrs.x_cur, dtype=np.float64)
+    n_corr = int(X_w.shape[1])
+    if mask is not None:
+        support_mask = check_mask_bool_N(mask, n_corr, name="canonical_pose_proxy_mask")
+        if support_mask is None:
+            support_mask = np.zeros((n_corr,), dtype=bool)
+        X_w = X_w[:, support_mask]
+        x_cur = x_cur[:, support_mask]
+    if int(X_w.shape[1]) == 0:
+        return None
+
+    R_arr = np.asarray(R, dtype=np.float64)
+    t_arr = np.asarray(t, dtype=np.float64).reshape(3)
+    X_c = R_arr @ X_w + t_arr.reshape(3, 1)
+    err_sq = np.asarray(reprojection_errors_sq(K, R_arr, t_arr, X_w, x_cur), dtype=np.float64).reshape(-1)
+    depth = np.asarray(X_c[2, :], dtype=np.float64).reshape(-1)
+    valid = np.isfinite(depth) & (depth > float(eps)) & np.isfinite(err_sq) & (err_sq >= 0.0)
+    if not bool(np.any(valid)):
+        return None
+
+    errors_px = np.sqrt(err_sq[valid])
+    return float(np.median(errors_px))
+
+
+def _canonical_pose_proxy_strict_inliers(
+    K: np.ndarray,
+    R,
+    t,
+    corrs,
+    *,
+    eps: float,
+) -> int:
+    mask, _ = _pnp_inlier_mask_from_pose(
+        corrs.X_w,
+        corrs.x_cur,
+        K,
+        np.asarray(R, dtype=np.float64),
+        np.asarray(t, dtype=np.float64).reshape(3),
+        threshold_px=float(_CANONICAL_POSE_PROXY_STRICT_EVAL_PX),
+        eps=float(eps),
+    )
+    return int(np.sum(np.asarray(mask, dtype=bool).reshape(-1)))
+
+
+def _select_canonical_pose_proxy(
+    K: np.ndarray,
+    pose_out: dict[str, Any],
+    pose_stats: dict[str, Any],
+    *,
+    sample_size: int,
+    min_inliers: int,
+    min_points: int,
+    rank_tol: float,
+    min_cheirality_ratio: float,
+    eps: float,
+    refit: bool,
+    refine_nonlinear: bool,
+    refine_max_iters: int,
+    refine_damping: float,
+    refine_step_tol: float,
+    refine_improvement_tol: float,
+) -> tuple[tuple[np.ndarray, np.ndarray] | None, dict[str, Any]]:
+    stats = _canonical_pose_proxy_default_stats()
+    if not bool(pose_stats.get("pnp_support_rescue_loose_localisation_fallback_succeeded", False)):
+        stats["canonical_pose_proxy_reason"] = "not_loose_rescue"
+        return None, stats
+    if not isinstance(pose_out, dict) or pose_out.get("corrs", None) is None:
+        stats["canonical_pose_proxy_reason"] = "correspondences_unavailable"
+        return None, stats
+    if pose_out.get("R", None) is None or pose_out.get("t", None) is None:
+        stats["canonical_pose_proxy_reason"] = "accepted_pose_unavailable"
+        return None, stats
+
+    corrs = pose_out["corrs"]
+    n_corr = int(corrs.X_w.shape[1])
+    accepted_mask = check_mask_bool_N(
+        pose_out.get("pnp_inlier_mask", np.zeros((n_corr,), dtype=bool)),
+        n_corr,
+        name="canonical_pose_proxy_accepted_mask",
+    )
+    if accepted_mask is None:
+        accepted_mask = np.zeros((n_corr,), dtype=bool)
+
+    accepted_median_px = _canonical_pose_proxy_residual_median_px(
+        K,
+        pose_out["R"],
+        pose_out["t"],
+        corrs,
+        eps=float(eps),
+        mask=accepted_mask,
+    )
+    trigger_fired = bool(
+        accepted_median_px is not None
+        and float(accepted_median_px) > float(_CANONICAL_POSE_PROXY_GATE_MEDIAN_PX)
+    )
+    stats.update(
+        {
+            "canonical_pose_proxy_residual_shape_trigger_fired": bool(trigger_fired),
+            "canonical_pose_proxy_trigger_residual_median_px": accepted_median_px,
+        }
+    )
+    if not bool(trigger_fired):
+        stats["canonical_pose_proxy_reason"] = "trigger_not_fired"
+        return None, stats
+
+    if n_corr < int(sample_size):
+        stats["canonical_pose_proxy_failed_fallback"] = True
+        stats["canonical_pose_proxy_reason"] = "too_few_correspondences"
+        return None, stats
+
+    stats["canonical_pose_proxy_num_seeds_tried"] = int(len(_CANONICAL_POSE_PROXY_SEEDS))
+    best_pose: tuple[np.ndarray, np.ndarray] | None = None
+    best_strict_inliers = 0
+    best_median_px: float | None = None
+
+    for seed_value in _CANONICAL_POSE_PROXY_SEEDS:
+        try:
+            R_proxy, t_proxy, _, _ = estimate_pose_pnp_ransac(
+                corrs,
+                K,
+                num_trials=int(_CANONICAL_POSE_PROXY_NUM_TRIALS),
+                sample_size=int(sample_size),
+                threshold_px=float(_CANONICAL_POSE_PROXY_RESCUE_THRESHOLD_PX),
+                min_inliers=int(min_inliers),
+                seed=int(seed_value),
+                min_points=int(min_points),
+                rank_tol=float(rank_tol),
+                min_cheirality_ratio=float(min_cheirality_ratio),
+                eps=float(eps),
+                refit=bool(refit),
+                refine_nonlinear=bool(refine_nonlinear),
+                refine_max_iters=int(refine_max_iters),
+                refine_damping=float(refine_damping),
+                refine_step_tol=float(refine_step_tol),
+                refine_improvement_tol=float(refine_improvement_tol),
+            )
+        except Exception:
+            continue
+        if R_proxy is None or t_proxy is None:
+            continue
+
+        strict_inliers = _canonical_pose_proxy_strict_inliers(
+            K,
+            R_proxy,
+            t_proxy,
+            corrs,
+            eps=float(eps),
+        )
+        median_px = _canonical_pose_proxy_residual_median_px(
+            K,
+            R_proxy,
+            t_proxy,
+            corrs,
+            eps=float(eps),
+        )
+        candidate_median = float("inf") if median_px is None else float(median_px)
+        best_candidate_median = float("inf") if best_median_px is None else float(best_median_px)
+        if best_pose is None or int(strict_inliers) > int(best_strict_inliers):
+            keep_candidate = True
+        elif int(strict_inliers) == int(best_strict_inliers) and candidate_median < best_candidate_median:
+            keep_candidate = True
+        else:
+            keep_candidate = False
+
+        if bool(keep_candidate):
+            best_pose = (
+                np.asarray(R_proxy, dtype=np.float64).copy(),
+                np.asarray(t_proxy, dtype=np.float64).reshape(3).copy(),
+            )
+            best_strict_inliers = int(strict_inliers)
+            best_median_px = None if median_px is None else float(median_px)
+
+    if best_pose is None:
+        stats["canonical_pose_proxy_failed_fallback"] = True
+        stats["canonical_pose_proxy_reason"] = "all_proxy_seeds_failed"
+        return None, stats
+
+    stats.update(
+        {
+            "canonical_pose_proxy_selected": True,
+            "canonical_pose_proxy_selected_strict_8px_inliers": int(best_strict_inliers),
+            "canonical_pose_proxy_selected_residual_median_px": best_median_px,
+            "canonical_pose_proxy_reason": "proxy_selected",
+        }
+    )
+    return best_pose, stats
 
 
 # Flatten local BA diagnostics into frame stats
@@ -958,6 +1178,26 @@ def process_frame_against_seed(
 
     seed_out = dict(seed_out)
     accepted_R, accepted_t = _copy_pose_blocks(pose_out["R"], pose_out["t"])
+    canonical_R, canonical_t = accepted_R.copy(), accepted_t.copy()
+    canonical_pose_proxy, canonical_pose_proxy_stats = _select_canonical_pose_proxy(
+        K,
+        pose_out,
+        pose_stats,
+        sample_size=int(sample_size),
+        min_inliers=int(min_inliers),
+        min_points=int(min_points),
+        rank_tol=float(rank_tol),
+        min_cheirality_ratio=float(min_cheirality_ratio),
+        eps=float(eps),
+        refit=bool(refit),
+        refine_nonlinear=bool(refine_nonlinear),
+        refine_max_iters=int(refine_max_iters),
+        refine_damping=float(refine_damping),
+        refine_step_tol=float(refine_step_tol),
+        refine_improvement_tol=float(refine_improvement_tol),
+    )
+    if canonical_pose_proxy is not None:
+        canonical_R, canonical_t = _copy_pose_blocks(canonical_pose_proxy[0], canonical_pose_proxy[1])
     seed_out["last_accepted_pose"] = {
         "kf": int(current_kf),
         "R": accepted_R,
@@ -965,7 +1205,9 @@ def process_frame_against_seed(
         "localisation_only": bool(localisation_only_rescue_frame),
     }
     if int(current_kf) >= 0:
-        store_current_pose(seed_out, int(current_kf), pose_out["R"], pose_out["t"])
+        store_current_pose(seed_out, int(current_kf), canonical_R, canonical_t)
+        if canonical_pose_proxy is not None:
+            canonical_pose_proxy_stats["canonical_pose_proxy_storage_replaced"] = True
 
     if not bool(enable_local_ba):
         local_ba_stats = local_bundle_adjustment_not_run_stats("disabled")
@@ -1025,6 +1267,7 @@ def process_frame_against_seed(
         "n_new_added": int(map_stats.get("n_added", 0)),
         "seed_landmarks_after": int(len(seed_out.get("landmarks", []))),
         "localisation_only_rescue_frame": bool(localisation_only_rescue_frame),
+        **canonical_pose_proxy_stats,
         **_local_ba_summary_stats(local_ba_stats),
         "guarded_support_refresh_triggered": bool(guarded_support_refresh_stats.get("triggered", False)),
         "guarded_support_refresh_reason": guarded_support_refresh_stats.get("reason", None),

@@ -15,6 +15,15 @@ STANDARD_FRAME_STAT_FIELDS = (
     "rescue_attempted",
     "rescue_succeeded",
     "localisation_only_rescue_frame",
+    "canonical_pose_proxy_residual_shape_trigger_fired",
+    "canonical_pose_proxy_trigger_residual_median_px",
+    "canonical_pose_proxy_num_seeds_tried",
+    "canonical_pose_proxy_selected",
+    "canonical_pose_proxy_selected_strict_8px_inliers",
+    "canonical_pose_proxy_selected_residual_median_px",
+    "canonical_pose_proxy_storage_replaced",
+    "canonical_pose_proxy_failed_fallback",
+    "canonical_pose_proxy_reason",
     "support_refresh_triggered",
     "local_ba_attempted",
     "local_ba_skipped",
@@ -89,6 +98,25 @@ def standard_frame_stats(
         "rescue_attempted": bool(stats.get("pnp_support_rescue_attempted", stats.get("rescue_attempted", False))),
         "rescue_succeeded": bool(stats.get("pnp_support_rescue_succeeded", stats.get("rescue_succeeded", False))),
         "localisation_only_rescue_frame": bool(stats.get("localisation_only_rescue_frame", False)),
+        "canonical_pose_proxy_residual_shape_trigger_fired": bool(
+            stats.get("canonical_pose_proxy_residual_shape_trigger_fired", False)
+        ),
+        "canonical_pose_proxy_trigger_residual_median_px": stats.get(
+            "canonical_pose_proxy_trigger_residual_median_px",
+            None,
+        ),
+        "canonical_pose_proxy_num_seeds_tried": int(stats.get("canonical_pose_proxy_num_seeds_tried", 0)),
+        "canonical_pose_proxy_selected": bool(stats.get("canonical_pose_proxy_selected", False)),
+        "canonical_pose_proxy_selected_strict_8px_inliers": int(
+            stats.get("canonical_pose_proxy_selected_strict_8px_inliers", 0)
+        ),
+        "canonical_pose_proxy_selected_residual_median_px": stats.get(
+            "canonical_pose_proxy_selected_residual_median_px",
+            None,
+        ),
+        "canonical_pose_proxy_storage_replaced": bool(stats.get("canonical_pose_proxy_storage_replaced", False)),
+        "canonical_pose_proxy_failed_fallback": bool(stats.get("canonical_pose_proxy_failed_fallback", False)),
+        "canonical_pose_proxy_reason": stats.get("canonical_pose_proxy_reason", None),
         "support_refresh_triggered": bool(stats.get("guarded_support_refresh_triggered", stats.get("support_refresh_triggered", False))),
         "local_ba_attempted": bool(stats.get("local_ba_attempted", False)),
         "local_ba_skipped": bool(stats.get("local_ba_skipped", False)),

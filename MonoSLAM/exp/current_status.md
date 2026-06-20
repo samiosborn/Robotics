@@ -681,10 +681,66 @@ Classification: **`40 px re-solve is stable and promising`**
 
 Qualifying condition: combine with a 8px-inlier-count selection criterion (best of 3–5 seeds); apply only when the rescue-residual-shape gate flags the accepted pose as bad (accepted inlier median > ~8px on the accepted support). Do not apply unconditionally.
 
+## Gated 40 px shadow integration test (2026-06-20)
+
+Script: `scripts/diag_40px_shadow_integration.py`
+
+Diagnostic-only sequence replay:
+- ETH3D `cables_2_mono`: 40 tracked frames
+- KITTI sequence 00: 30 tracked frames
+- trigger: accepted rescue inlier residual median > 8 px
+- shadow path: 5 seeds, 5000 trials each, 40 px RANSAC on the full rescue correspondence set
+- selection: highest strict 8 px inlier count on the full correspondence set, then lower full-set residual median
+- no pipeline pose, refresh, canonical pose, observation append, or seed state was changed
+
+ETH3D result:
+- baseline replay remained unchanged: 17 / 40 ok, first failure at frame 19, 9 / 9 rescue refreshes
+- successful rescue frames considered: 8, 10, 12, 13, 14, 15, 16, 17, 18
+- trigger fired only on bad canonical-pose frames 12 and 16
+- known useful / neutral frames stayed below gate:
+  - frame 17 accepted-support median 4.05 px
+  - frame 18 accepted-support median 5.97 px
+
+ETH3D triggered-frame comparison:
+
+| frame | accepted median / p90 | shadow median / p90 | strict 8 px | seeds | local verdict | history estimate |
+|-------|------------------------|---------------------|-------------|-------|---------------|------------------|
+| 12 | 15.25 / 20.28 px | 2.13 / 4.95 px | 0 / 45 -> 45 / 45 | 5 / 5 | better | 95.9% sq-error reduction on 40 stored observations; above-8 reduced by 40 |
+| 16 | 11.39 / 20.68 px | 3.75 / 7.84 px | 6 / 28 -> 25 / 28 | 5 / 5 | better | 84.7% sq-error reduction on 24 stored observations; above-8 reduced by 16 |
+
+ETH3D downstream reuse estimate:
+- frame 12 accepted support was reused as inlier support in frames 13, 14, and 15
+- frame 16 accepted support was reused as inlier support in frames 17 and 18, and remained pose-eligible at failed frame 19
+- the flagged poses are therefore not disposable; they are load-bearing support frames where canonical-pose quality matters
+
+KITTI result:
+- baseline replay remained unchanged: 16 / 30 ok, first failure at frame 19, 5 successful rescues, 2 refreshes
+- successful rescue frames considered: 14, 16, 17, 18, 20
+- trigger fired only on frame 18
+- known useful frames stayed below gate:
+  - frame 14 accepted-support median 1.93 px
+  - frame 17 accepted-support median 5.03 px
+- neutral frame 20 also stayed below gate at 2.06 px
+
+KITTI triggered-frame comparison:
+
+| frame | accepted median / p90 | shadow median / p90 | strict 8 px | seeds | local verdict | history estimate |
+|-------|------------------------|---------------------|-------------|-------|---------------|------------------|
+| 18 | 17.38 / 23.87 px | 4.06 / 18.35 px | 2 / 58 -> 48 / 58 | 3 / 5 | better | 90.0% sq-error reduction on 49 stored observations; above-8 reduced by 43 |
+
+KITTI downstream reuse estimate:
+- frame 18 support is pose-eligible at frames 19, 20, and 21
+- it is accepted as inlier support at frame 20 (39 reused inliers)
+- this makes the frame-18 proxy useful for canonical-history quality even though its refresh is blocked by the current guard
+
+Classification: **`gated 40 px re-solve is promising and broadly safe`**
+
+The sequence-level diagnostic did not reveal the main feared failure mode. The residual gate did not fire on known useful rescues, while every triggered frame was locally much better under the selected 40 px proxy. The result is still diagnostic-only; no production behaviour has been changed.
+
 ## Current next step
-Implement a gated multi-seed 40px re-solve for canonical pose storage:
-1. Run 40px RANSAC (3–5 seeds, 5000 trials each) when the rescue-accepted inlier median exceeds the gate threshold (~8px)
-2. Select the result with the highest 8px inlier count on the full correspondence set
-3. If the selected result has ≥ min threshold (e.g., ≥8) 8px inliers, use it as the canonical pose; otherwise fall back to the accepted rescue pose
-4. Keep the 20px rescue pose for the refresh decision (untouched)
-5. Test on the full ETH3D and KITTI sequences before patching production
+If making a production change next, keep it narrow:
+1. run the residual-shape gate only after an accepted rescue
+2. run the 40 px multi-seed re-solve on the full rescue correspondence set only when the gate fires
+3. store the selected proxy pose only as the canonical pose for that rescue frame
+4. keep refresh, observation append, and rescue acceptance behaviour unchanged
+5. rerun the same ETH3D and KITTI horizons plus existing tests
