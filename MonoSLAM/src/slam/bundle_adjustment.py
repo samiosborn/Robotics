@@ -7,8 +7,10 @@ from typing import Any
 import numpy as np
 
 from core.checks import check_int_gt0, check_matrix_3x3, check_positive, check_vector_3
+from geometry.camera import camera_centre
 from geometry.lie import hat
 from geometry.pose import apply_left_pose_increment_wc
+from geometry.rotation import axis_angle_to_rotmat
 from slam.keyframe_state import get_active_keyframe_kf, get_keyframe_store, get_pose_for_kf, set_pose_for_kf
 from slam.landmark_state import build_landmark_id_index, get_landmarks, iter_landmark_observations
 
@@ -21,9 +23,14 @@ class _LocalBAProblem:
     landmark_ids: list[int]
     observations: list[tuple[int, int, np.ndarray]]
     pose_col_by_kf: dict[int, int]
+    pose_dof_by_kf: dict[int, int]
     landmark_col_by_id: dict[int, int]
     n_vars: int
     n_residuals: int
+    gauge_kf: int | None
+    gauge_n: np.ndarray | None
+    gauge_U: np.ndarray | None
+    gauge_b0: float | None
 
 
 # Build a complete stats dictionary for one local BA call
@@ -110,6 +117,48 @@ def _project_one(K: np.ndarray, R: np.ndarray, t: np.ndarray, X_w: np.ndarray, *
         return None, None
 
     return xy, X_c
+
+
+# Complete a unit direction to an orthonormal basis of its orthogonal complement
+def _orthogonal_complement_basis(n: np.ndarray) -> np.ndarray:
+    n_col = np.asarray(n, dtype=np.float64).reshape(3, 1)
+    U_full, _, _ = np.linalg.svd(n_col)
+    return np.asarray(U_full[:, 1:3], dtype=np.float64)
+
+
+# Build the fixed one-scalar-DOF gauge basis removing monocular scale:
+# n is the anchor-to-gauge-camera direction at problem setup, b0 its length,
+# and U spans the 2D plane orthogonal to n in which the gauge camera stays free
+def _build_gauge_basis(C_anchor: np.ndarray, C_gauge: np.ndarray, *, eps: float):
+    diff = np.asarray(C_gauge, dtype=np.float64).reshape(3) - np.asarray(C_anchor, dtype=np.float64).reshape(3)
+    b0 = float(np.linalg.norm(diff))
+    if b0 <= float(eps):
+        return None
+    n = diff / b0
+    U = _orthogonal_complement_basis(n)
+    return n, U, b0
+
+
+# Apply a gauge-constrained increment to the second camera: 2 translational DOF
+# confined exactly to the fixed plane orthogonal to the gauge direction, plus the
+# usual unconstrained left-multiplicative rotation update
+def _apply_gauge_camera_increment(R: np.ndarray, t: np.ndarray, U: np.ndarray, delta: np.ndarray, *, eps: float):
+    alpha = np.asarray(delta[:2], dtype=np.float64).reshape(2)
+    omega = np.asarray(delta[2:], dtype=np.float64).reshape(3)
+
+    theta = float(np.linalg.norm(omega))
+    if theta <= float(eps):
+        dR = np.eye(3, dtype=np.float64) + hat(omega)
+    else:
+        axis = omega / theta
+        dR = axis_angle_to_rotmat(axis, theta)
+
+    R_new = dR @ R
+    C = camera_centre(R, t)
+    C_new = C + U @ alpha
+    t_new = -R_new @ C_new
+
+    return np.asarray(R_new, dtype=np.float64), np.asarray(t_new, dtype=np.float64).reshape(3)
 
 
 # Gather active and recent connected keyframes
@@ -225,11 +274,31 @@ def _build_problem(
 
     anchor_kf = int(kf_ids[0])
     pose_var_kfs = [int(kf) for kf in kf_ids if int(kf) != int(anchor_kf)]
+
+    # Remove exactly the one-scalar monocular scale gauge by confining the
+    # anchor-nearest optimised camera's translation to the plane orthogonal to
+    # its initial direction from the anchor; see _build_gauge_basis
+    gauge_kf: int | None = None
+    gauge_n: np.ndarray | None = None
+    gauge_U: np.ndarray | None = None
+    gauge_b0: float | None = None
+    if len(pose_var_kfs) > 0:
+        gauge_kf = int(pose_var_kfs[0])
+        C_anchor = camera_centre(R_by_kf[anchor_kf], t_by_kf[anchor_kf])
+        C_gauge = camera_centre(R_by_kf[gauge_kf], t_by_kf[gauge_kf])
+        gauge_basis = _build_gauge_basis(C_anchor, C_gauge, eps=float(eps))
+        if gauge_basis is None:
+            return None, _skip_stats("degenerate_gauge_baseline", stats=stats)
+        gauge_n, gauge_U, gauge_b0 = gauge_basis
+
     pose_col_by_kf: dict[int, int] = {}
+    pose_dof_by_kf: dict[int, int] = {}
     col = 0
     for kf in pose_var_kfs:
+        dof = 5 if int(kf) == gauge_kf else 6
         pose_col_by_kf[int(kf)] = int(col)
-        col += 6
+        pose_dof_by_kf[int(kf)] = int(dof)
+        col += dof
 
     landmark_col_by_id: dict[int, int] = {}
     for lm_id in landmark_ids:
@@ -265,9 +334,14 @@ def _build_problem(
         landmark_ids=[int(lm_id) for lm_id in landmark_ids],
         observations=observations,
         pose_col_by_kf=pose_col_by_kf,
+        pose_dof_by_kf=pose_dof_by_kf,
         landmark_col_by_id=landmark_col_by_id,
         n_vars=int(n_vars),
         n_residuals=int(n_residuals),
+        gauge_kf=gauge_kf,
+        gauge_n=gauge_n,
+        gauge_U=gauge_U,
+        gauge_b0=gauge_b0,
     )
     return problem, stats
 
@@ -309,8 +383,14 @@ def _apply_delta(
 
     for kf in problem.pose_var_kfs:
         col = int(problem.pose_col_by_kf[int(kf)])
-        d_pose = np.asarray(delta[col : col + 6], dtype=np.float64).reshape(6)
-        R_i, t_i = apply_left_pose_increment_wc(R_new[int(kf)], t_new[int(kf)], d_pose, eps=float(eps))
+        dof = int(problem.pose_dof_by_kf[int(kf)])
+        d_pose = np.asarray(delta[col : col + dof], dtype=np.float64).reshape(dof)
+        if problem.gauge_kf is not None and int(kf) == int(problem.gauge_kf):
+            R_i, t_i = _apply_gauge_camera_increment(
+                R_new[int(kf)], t_new[int(kf)], problem.gauge_U, d_pose, eps=float(eps)
+            )
+        else:
+            R_i, t_i = apply_left_pose_increment_wc(R_new[int(kf)], t_new[int(kf)], d_pose, eps=float(eps))
         R_new[int(kf)] = np.asarray(R_i, dtype=np.float64)
         t_new[int(kf)] = np.asarray(t_i, dtype=np.float64).reshape(3)
 
@@ -369,8 +449,12 @@ def _evaluate_problem(
 
         if int(kf) in problem.pose_col_by_kf:
             pose_col = int(problem.pose_col_by_kf[int(kf)])
-            J_pose = np.hstack([np.eye(3, dtype=np.float64), -hat(X_c)])
-            J[row : row + 2, pose_col : pose_col + 6] = -J_proj @ J_pose
+            pose_dof = int(problem.pose_dof_by_kf[int(kf)])
+            if problem.gauge_kf is not None and int(kf) == int(problem.gauge_kf):
+                J_pose = np.hstack([-R @ problem.gauge_U, -hat(X_c)])
+            else:
+                J_pose = np.hstack([np.eye(3, dtype=np.float64), -hat(X_c)])
+            J[row : row + 2, pose_col : pose_col + pose_dof] = -J_proj @ J_pose
 
         lm_col = int(problem.landmark_col_by_id[int(lm_id)])
         J[row : row + 2, lm_col : lm_col + 3] = -J_proj @ R
