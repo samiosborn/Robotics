@@ -5,32 +5,27 @@ MonoSLAM is a monocular SLAM research codebase.
 The current focus is frontend robustness: rescue-pose quality, downstream geometry integrity, and dataset-boundary hygiene ready for a second dataset.
 
 ## Trusted baseline
-- BA-enabled pipeline with pose-eligible promotion guard and earlier rescued-support refresh
+- BA-enabled pipeline with pose-eligible promotion guard, earlier rescued-support refresh, and a gated multi-seed 40 px canonical-pose proxy for bad rescue poses
 - Stays healthy through frame 18; first failure at frame 19
-- 40-frame stats: ok=17/failed=23, promoted=2,4,6, rescues=10/9, BA=3/3
-- 71 tests pass
+- 22-frame stats (post canonical-pose-proxy patch): ETH3D ok=17/22, rescue=10/9, refresh=9; KITTI ok=16/22, rescue=11/5, refresh=2
+- 81 tests pass
 
 ## Current first failure
-- Frame 19: `pnp_ransac_failed` on 22 live correspondences, rescue also fails
+- Frame 19: `pnp_ransac_failed` on live correspondences, rescue also fails
 - Active keyframe: frame 18 (refreshed basis)
-- All 22 correspondences are 2D-coherent (displacement consistency median 2.34 px)
-- Every fixed-threshold replay (3/5/8/12 px) produces no inliers from 22 correspondences
 - Failure classification: coherent 2D tracks attached to a geometrically incompatible 3D support set
 
-## Leading interpretation
-- Canonical rescue poses at frames 12 and 16 are sharp temporal outliers
-- Frame 16 lies behind the frame-15-to-17 camera-centre chord; rotation-path excess 9.94 deg
-- Frame 16 alone contributes 25 % of the 340-observation squared error and 31 % of residuals above 8 px
-- Frames 12 and 16 together account for 73 % of residuals above 8 px in the live set
-- A time-weighted frame-15-to-17 pose interpolation at frame 16 reduces its squared error by 71 %
-- Rescue refresh is beneficial for support continuity; suppressing frame 16 refresh worsens pipeline survival
-- Frame-16 accepted rescue pose is the main current outlier to understand
+## Resolved: frame-16 / frame-12 canonical-pose quality
+- The earlier leading interpretation (canonical rescue poses at frames 12 and 16 were sharp temporal outliers) was confirmed and fixed
+- Production now runs a gated 40 px multi-seed re-solve on the rescue correspondence set whenever accepted-inlier residual median exceeds 8 px, and stores the best proxy pose in place of the raw rescue pose
+- ETH3D frames 12 and 16 and KITTI frame 18 now trigger and select materially better canonical poses (see `exp/experiment_log.md`, "2026-06-20 - Canonical-pose proxy production patch")
+- This did not change the frame-19 short-horizon failure — classified `result inconclusive` for that specific downstream survival question, but kept as a genuine canonical-pose-quality improvement
 
 ## Current open question
-Why does the frame-16 20 px localisation-only rescue accept a pose far worse than the local frame-15-to-17 temporal interpolation on the same later-live landmarks?
+Frame 19 still fails after the canonical-pose-proxy patch. The bad-support-set question that caused frame 19 to fail is now a separate, open question from the (resolved) frame-16 pose-quality question.
 
 ## Best next step
-Audit frame-16 rescue candidate generation and acceptance stages against the local temporal reference.
+Re-audit the frame-19 support set now that upstream canonical poses (12, 16, 18) are proxy-corrected — the original frame-19 diagnosis predates that fix and may no longer describe the current failure mode accurately.
 
 ## Important files
 Production:
@@ -46,10 +41,10 @@ Datasets:
 - `src/datasets/eth3d.py`
 
 Diagnostics and runners:
-- `scripts/diag_pnp_eth3d.py`
-- `scripts/diag_frame16_pose_quality.py`
-- `scripts/demo_frontend_eth3d.py`
-- `scripts/frontend_eth3d_common.py`
+- `scripts/diagnostics/diag_pnp_eth3d.py`
+- `scripts/diagnostics/diag_pnp_kitti.py`
+- `scripts/demos/demo_frontend_eth3d.py`
+- `scripts/frontend_common.py`
 - `scripts/frontend_reporting.py`
 - `scripts/jsonl_io.py`
 

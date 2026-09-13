@@ -1,4 +1,4 @@
-# scripts/frontend_eth3d_common.py
+# scripts/frontend_common.py
 from __future__ import annotations
 
 import argparse

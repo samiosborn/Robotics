@@ -1,13 +1,16 @@
-# scripts/diag_pnp.py
+# scripts/diagnostics/diag_pnp.py
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
-from frontend_eth3d_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from frontend_common import ROOT, add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args, apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_pil_greyscale as _load_pil_greyscale, load_runtime_cfg as _load_runtime_cfg
 from frontend_reporting import format_frame_scorecard as _format_frame_scorecard, frame_scorecard_row as _frame_scorecard_row, standard_frame_stats as _standard_frame_stats
 from jsonl_io import append_jsonl as _append_jsonl, reset_jsonl as _reset_jsonl
 

@@ -79,7 +79,7 @@ If inconclusive:
 For structural or production changes, prefer this validation pattern unless the task requires more:
 - `uv run python -m py_compile ...`
 - `uv run python -m pytest tests/slam -q`
-- `PYTHONPATH=. uv run python scripts/demo_frontend_eth3d.py`
+- `PYTHONPATH=. uv run python scripts/demos/demo_frontend_eth3d.py`
 - one focused ETH3D diagnostic run
 
 ## Current caution

@@ -1,12 +1,15 @@
-# scripts/diag_landmark_quality.py
+# scripts/diagnostics/diag_landmark_quality.py
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from frontend_eth3d_common import ROOT, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_runtime_cfg as _load_runtime_cfg
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from frontend_common import ROOT, frontend_kwargs_from_cfg as _frontend_kwargs_from_cfg, load_runtime_cfg as _load_runtime_cfg
 from core.checks import check_dir, check_int_ge0
 from datasets.eth3d import load_eth3d_sequence
 from geometry.camera import reprojection_errors_sq, world_to_camera_points

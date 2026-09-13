@@ -1,4 +1,4 @@
-# scripts/demo_track_two_frames.py
+# scripts/demos/demo_match_two_frames.py
 
 import argparse
 from pathlib import Path
@@ -7,7 +7,7 @@ import sys
 import numpy as np
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
@@ -47,7 +47,7 @@ if __name__ == "__main__":
     parser.add_argument("image1", type=str)
 
     # Config path
-    parser.add_argument("--cfg", type=str, default=str(ROOT / "src" / "config" / "features.yaml"))
+    parser.add_argument("--cfg", type=str, default=str(ROOT / "configs" / "features.yaml"))
 
     # Output directory and base name
     parser.add_argument("--out_dir", type=str, default=str(ROOT / "out"))

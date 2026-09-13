@@ -1,3 +1,67 @@
 # .gitignore
+# Self-contained: this repo may be split out of its current monorepo,
+# so do not rely on any parent .gitignore.
+
+# OS-specific
+.DS_Store
+Thumbs.db
+__MACOSX/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+*.log
+
+# Test / build caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Environments (uv / venv)
+.venv/
+env/
+venv/
+__pypackages__/
+.env
+*.env
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# AI agent tool config (local only)
+.claude/
 .codex
+
+# LaTeX build artefacts
+*.aux
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.bbl
+*.blg
+*.nav
+*.snm
+*.vrb
+*.lof
+*.lot
+*.pdfsync
+*_minted*
 *.pdf
+
+# Generated runtime output
+out/
+
+# Third-party datasets (see data/README.md for setup)
+data/eth3d/
+data/kitti_odometry/

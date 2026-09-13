@@ -1,4 +1,4 @@
-# scripts/demo_fundamental_8point.py
+# scripts/demos/demo_fundamental_8point.py
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,7 @@ import sys
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 

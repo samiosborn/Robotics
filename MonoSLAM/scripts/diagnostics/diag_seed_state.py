@@ -1,13 +1,16 @@
-# scripts/diag_seed_state.py
+# scripts/diagnostics/diag_seed_state.py
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from frontend_eth3d_common import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from frontend_common import (
     ROOT,
     add_pnp_threshold_stability_args as _add_pnp_threshold_stability_args,
     apply_pnp_threshold_stability_cli_overrides as _apply_pnp_threshold_stability_cli_overrides,

@@ -1,11 +1,11 @@
-# scripts/run_runsac_8_point.py
+# scripts/demos/demo_fundamental_ransac_8point.py
 import argparse
 from pathlib import Path
 import sys
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 

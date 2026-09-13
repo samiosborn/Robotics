@@ -1,8 +1,13 @@
-# scripts/diag_pnp_eth3d.py
+# scripts/diagnostics/diag_pnp_eth3d.py
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from diag_pnp import main as run_diag_pnp
-from frontend_eth3d_common import ROOT
+from frontend_common import ROOT
 
 
 def main() -> None:
