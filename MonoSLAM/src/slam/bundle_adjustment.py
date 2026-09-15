@@ -10,7 +10,6 @@ from core.checks import check_int_gt0, check_matrix_3x3, check_positive, check_v
 from geometry.camera import camera_centre
 from geometry.lie import hat
 from geometry.pose import apply_left_pose_increment_wc
-from geometry.rotation import axis_angle_to_rotmat
 from slam.keyframe_state import get_active_keyframe_kf, get_keyframe_store, get_pose_for_kf, set_pose_for_kf
 from slam.landmark_state import build_landmark_id_index, get_landmarks, iter_landmark_observations
 
@@ -146,19 +145,13 @@ def _apply_gauge_camera_increment(R: np.ndarray, t: np.ndarray, U: np.ndarray, d
     alpha = np.asarray(delta[:2], dtype=np.float64).reshape(2)
     omega = np.asarray(delta[2:], dtype=np.float64).reshape(3)
 
-    theta = float(np.linalg.norm(omega))
-    if theta <= float(eps):
-        dR = np.eye(3, dtype=np.float64) + hat(omega)
-    else:
-        axis = omega / theta
-        dR = axis_angle_to_rotmat(axis, theta)
-
-    R_new = dR @ R
     C = camera_centre(R, t)
     C_new = C + U @ alpha
-    t_new = -R_new @ C_new
+    t_at_new_centre = -R @ C_new
+    rotation_delta = np.zeros((6,), dtype=np.float64)
+    rotation_delta[3:] = omega
 
-    return np.asarray(R_new, dtype=np.float64), np.asarray(t_new, dtype=np.float64).reshape(3)
+    return apply_left_pose_increment_wc(R, t_at_new_centre, rotation_delta, eps=float(eps))
 
 
 # Gather active and recent connected keyframes

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from geometry.camera import camera_centre
+from geometry.lie import hat
 from geometry.rotation import angle_between_rotmats, axis_angle_to_rotmat
 from slam.bundle_adjustment import (
     _apply_delta,
@@ -12,6 +13,7 @@ from slam.bundle_adjustment import (
     _evaluate_problem,
     _initial_landmark_state,
     _initial_pose_state,
+    _project_one,
     run_local_bundle_adjustment,
 )
 from slam.invariants import audit_seed_invariants
@@ -207,6 +209,69 @@ def _best_fit_scale(C_by_kf, X_by_id, C_a, C_true_by_kf, X_true_by_id):
     return num / den
 
 
+# Build the pre-fix Jacobian with six variables for every optimised pose
+def _unconstrained_jacobian(K, problem, R_by_kf, t_by_kf, X_by_id):
+    pose_col_by_kf = {}
+    col = 0
+    for kf in problem.pose_var_kfs:
+        pose_col_by_kf[kf] = col
+        col += 6
+
+    landmark_col_by_id = {}
+    for lm_id in problem.landmark_ids:
+        landmark_col_by_id[lm_id] = col
+        col += 3
+
+    J = np.zeros((problem.n_residuals, col), dtype=np.float64)
+    fx = float(K[0, 0])
+    fy = float(K[1, 1])
+
+    for i, (lm_id, kf, _) in enumerate(problem.observations):
+        R = R_by_kf[kf]
+        _, X_c = _project_one(K, R, t_by_kf[kf], X_by_id[lm_id], eps=1e-12)
+        X, Y, Z = (float(value) for value in X_c)
+        J_proj = np.asarray(
+            [
+                [fx / Z, 0.0, -fx * X / (Z ** 2)],
+                [0.0, fy / Z, -fy * Y / (Z ** 2)],
+            ],
+            dtype=np.float64,
+        )
+        row = 2 * i
+        if kf in pose_col_by_kf:
+            pose_col = pose_col_by_kf[kf]
+            J_pose = np.hstack([np.eye(3, dtype=np.float64), -hat(X_c)])
+            J[row : row + 2, pose_col : pose_col + 6] = -J_proj @ J_pose
+        landmark_col = landmark_col_by_id[lm_id]
+        J[row : row + 2, landmark_col : landmark_col + 3] = -J_proj @ R
+
+    return J, pose_col_by_kf, landmark_col_by_id
+
+
+# Select the unique member of the true scale orbit satisfying the fixed gauge
+def _gauge_selected_truth(problem, C_true_by_kf, X_true_by_id):
+    C_a = C_true_by_kf[problem.anchor_kf]
+    true_projection = float(problem.gauge_n @ (C_true_by_kf[problem.gauge_kf] - C_a))
+    scale = float(problem.gauge_b0 / true_projection)
+    C_target = {kf: C_a + scale * (C - C_a) for kf, C in C_true_by_kf.items()}
+    X_target = {lm_id: C_a + scale * (X - C_a) for lm_id, X in X_true_by_id.items()}
+    return scale, C_target, X_target
+
+
+# Measure camera-centre and landmark errors against a specified state
+def _state_errors(C_by_kf, X_by_id, C_target_by_kf, X_target_by_id):
+    pose_errors = {
+        kf: float(np.linalg.norm(C_by_kf[kf] - C_target_by_kf[kf]))
+        for kf in C_by_kf
+        if kf in C_target_by_kf and kf != 0
+    }
+    landmark_errors = np.asarray(
+        [float(np.linalg.norm(X - X_target_by_id[lm_id])) for lm_id, X in X_by_id.items()],
+        dtype=np.float64,
+    )
+    return pose_errors, landmark_errors
+
+
 # Local BA reduces reprojection error and preserves canonical state ownership
 def test_local_bundle_adjustment_refines_small_keyframe_window():
     K, seed = _local_ba_seed()
@@ -227,17 +292,27 @@ def test_local_bundle_adjustment_refines_small_keyframe_window():
     assert audit_seed_invariants(seed)["errors"] == []
 
 
-# Test A: exact ground-truth initialisation must be an (approximate) fixed point.
-# Residual is already at the floating-point noise floor, so the gradient is ~0 and
-# LM must not move the state materially, regardless of the unresolved scale gauge
-# (a zero gradient has no preferred direction along the null space either)
+# Test G: exact ground-truth initialisation must remain a fixed point
 def test_ba_exact_init_is_a_fixed_point():
     K, poses_true, points_true = _scene_ground_truth()
     seed = _build_ba_seed(K, poses_true, points_true, active_kf=2)
 
+    problem, _ = _build_problem(
+        K,
+        seed,
+        max_keyframes=3,
+        min_keyframes=2,
+        min_landmarks=6,
+        min_observations=12,
+        eps=1e-12,
+    )
+
     R0 = {kf: get_pose_for_kf(seed, kf)[0].copy() for kf in range(3)}
     t0 = {kf: get_pose_for_kf(seed, kf)[1].copy() for kf in range(3)}
     X0 = {lm["id"]: lm["X_w"].copy() for lm in seed["landmarks"]}
+    C_anchor = camera_centre(R0[problem.anchor_kf], t0[problem.anchor_kf])
+    C_gauge = camera_centre(R0[problem.gauge_kf], t0[problem.gauge_kf])
+    gauge_before = float(problem.gauge_n @ (C_gauge - C_anchor))
 
     stats = run_local_bundle_adjustment(K, seed, max_iters=10)
 
@@ -260,13 +335,18 @@ def test_ba_exact_init_is_a_fixed_point():
     np.testing.assert_allclose(R_anchor, R0[0])
     np.testing.assert_allclose(t_anchor, t0[0])
 
-    # Test G: the hard gauge scalar must be exactly preserved at the fixed point too
-    problem, _ = _build_problem(K, seed, max_keyframes=3, min_keyframes=2, min_landmarks=6, min_observations=12, eps=1e-12)
-    C_anchor = camera_centre(R_anchor, t_anchor)
     R_g, t_g = get_pose_for_kf(seed, problem.gauge_kf)
-    C_gauge = camera_centre(R_g, t_g)
-    gauge_value = float(np.dot(problem.gauge_n, C_gauge - C_anchor))
-    np.testing.assert_allclose(gauge_value, problem.gauge_b0, atol=1e-9)
+    gauge_after = float(problem.gauge_n @ (camera_centre(R_g, t_g) - C_anchor))
+    initial_rmse = float(np.sqrt(stats["initial_cost"] / len(problem.observations)))
+    final_rmse = float(np.sqrt(stats["final_cost"] / len(problem.observations)))
+
+    print(f"\n[Test G] reprojection RMSE initial/final: {initial_rmse:.3e} / {final_rmse:.3e}")
+    print(f"[Test G] max translation/rotation/landmark movement: "
+          f"{max_pose_translation_change:.3e} / {max_pose_rotation_change:.3e} / {max_landmark_change:.3e}")
+    print(f"[Test G] gauge scalar before/after: {gauge_before:.16e} / {gauge_after:.16e}")
+
+    np.testing.assert_allclose(gauge_before, problem.gauge_b0, atol=1e-12)
+    np.testing.assert_allclose(gauge_after, problem.gauge_b0, atol=1e-12)
 
 
 # Test E: the gauge fix must remove exactly one scalar parameter, not zero and not
@@ -293,9 +373,7 @@ def test_ba_gauge_reduces_variable_count_by_exactly_one():
     np.testing.assert_allclose(problem.gauge_U.T @ problem.gauge_n, np.zeros(2), atol=1e-12)
 
 
-# Test F: with the gauge fixed, the undamped Jacobian must be genuinely full
-# rank - the ~1e-13 scale singular value from before the fix must be gone, not
-# merely hidden by LM damping (this test never constructs H_lm at all)
+# Test F: compare the undamped Jacobian before and after removing one variable
 def test_ba_full_rank_without_damping():
     K, poses_true, points_true = _scene_ground_truth()
     pose_noise, rot_noise, point_noise = _noisy_test_perturbations()
@@ -311,27 +389,27 @@ def test_ba_full_rank_without_damping():
         _, _, J, reason = _evaluate_problem(K, problem, R_by_kf, t_by_kf, X_by_id, build_jacobian=True, eps=1e-12)
         assert reason is None
 
+        J_old, _, _ = _unconstrained_jacobian(K, problem, R_by_kf, t_by_kf, X_by_id)
+        S_old = np.linalg.svd(J_old, compute_uv=False)
         S = np.linalg.svd(J, compute_uv=False)
+        old_rank = int(np.sum(S_old > 1e-8 * S_old[0]))
         rank = int(np.sum(S > 1e-8 * S[0]))
-        print(f"\n[Test F/{label}] n_vars={problem.n_vars}  rank={rank}  smallest_sv={S[-1]:.6e}  "
-              f"second_smallest={S[-2]:.6e}  condition={S[0] / S[-1]:.3e}")
 
+        print(f"\n[Test F/{label}] before: n_vars={J_old.shape[1]} rank={old_rank} "
+              f"smallest={S_old[-1]:.6e} next={S_old[-2]:.6e} "
+              f"condition={S_old[0] / S_old[-1]:.3e} "
+              f"effective_condition={S_old[0] / S_old[-2]:.3e}")
+        print(f"[Test F/{label}] after:  n_vars={problem.n_vars} rank={rank} "
+              f"smallest={S[-1]:.6e} next={S[-2]:.6e} condition={S[0] / S[-1]:.3e}")
+
+        assert J_old.shape[1] == problem.n_vars + 1
+        assert old_rank == J_old.shape[1] - 1
         assert rank == problem.n_vars
         assert S[-1] > 1e-4
 
 
-# Test H: noisy initialisation must converge, and the scale-ALIGNED state must
-# match ground truth almost exactly - proving there is no bug beyond the gauge
-# choice itself. Raw (unaligned) error is reported too, but is NOT expected to
-# collapse to the aligned level for this noise: the hard gauge ties the whole
-# reconstruction's scale AND orientation to the initial gauge camera's own
-# baseline direction n, which here carries both radial and directional noise
-# (translation noise on kf 1 is not purely radial). The reconstruction can only
-# be as accurate as that one fixed reference measurement - see
-# test_ba_gauge_reference_accuracy_determines_raw_recovery for the case where
-# that reference is accurate, which shows raw error collapsing accordingly.
-# This is a property of any hard gauge choice, not a defect in this one.
-def test_ba_noisy_init_converges_up_to_scale_gauge():
+# Test H: noisy initialisation must recover the fixed-slice truth directly
+def test_ba_noisy_init_recovers_fixed_gauge_representative():
     K, poses_true, points_true = _scene_ground_truth()
     pose_noise, rot_noise, point_noise = _noisy_test_perturbations()
     seed = _build_ba_seed(
@@ -355,11 +433,18 @@ def test_ba_noisy_init_converges_up_to_scale_gauge():
     X0 = {lm["id"]: lm["X_w"].copy() for lm in seed["landmarks"]}
 
     problem = _build_problem(K, seed, max_keyframes=3, min_keyframes=2, min_landmarks=6, min_observations=12, eps=1e-12)[0]
+    gauge_scale, C_target, X_target = _gauge_selected_truth(problem, C_true_by_kf, X_true_by_id)
     gauge_b0_initial = problem.gauge_b0
 
-    stats = run_local_bundle_adjustment(K, seed, max_iters=100)
+    stats = run_local_bundle_adjustment(
+        K,
+        seed,
+        max_iters=100,
+        improvement_tol=1e-12,
+        step_tol=1e-10,
+    )
     assert stats["succeeded"] is True
-    assert stats["final_cost"] < 1e-3
+    assert stats["final_cost"] < 1e-16
 
     R1 = {kf: get_pose_for_kf(seed, kf)[0].copy() for kf in range(3)}
     t1 = {kf: get_pose_for_kf(seed, kf)[1].copy() for kf in range(3)}
@@ -370,56 +455,65 @@ def test_ba_noisy_init_converges_up_to_scale_gauge():
     np.testing.assert_allclose(t1[0], t0[0])
     C_a = C1[0]
 
-    # the fixed gauge scalar must be exactly preserved through the whole run
     gauge_value_final = float(np.dot(problem.gauge_n, C1[problem.gauge_kf] - C_a))
-    np.testing.assert_allclose(gauge_value_final, gauge_b0_initial, atol=1e-9)
+    np.testing.assert_allclose(gauge_value_final, gauge_b0_initial, atol=1e-12)
 
-    def _pose_position_errors(C_by_kf, s):
-        raw = {}
-        aligned = {}
-        for kf in (1, 2):
-            raw[kf] = float(np.linalg.norm(C_by_kf[kf] - C_true_by_kf[kf]))
-            aligned[kf] = float(np.linalg.norm((C_a + s * (C_by_kf[kf] - C_a)) - C_true_by_kf[kf]))
-        return raw, aligned
-
-    def _landmark_errors(X_by_id, s):
-        raw = []
-        aligned = []
-        for lm_id, X in X_by_id.items():
-            raw.append(float(np.linalg.norm(X - X_true_by_id[lm_id])))
-            aligned.append(float(np.linalg.norm((C_a + s * (X - C_a)) - X_true_by_id[lm_id])))
-        return np.asarray(raw), np.asarray(aligned)
-
-    s0 = _best_fit_scale(C0, X0, C_a, C_true_by_kf, X_true_by_id)
-    s1 = _best_fit_scale(C1, X1, C_a, C_true_by_kf, X_true_by_id)
+    metric_align_initial = _best_fit_scale(C0, X0, C_a, C_true_by_kf, X_true_by_id)
+    metric_align_final = _best_fit_scale(C1, X1, C_a, C_true_by_kf, X_true_by_id)
+    gauge_align_final = _best_fit_scale(C1, X1, C_a, C_target, X_target)
 
     rot_err0 = {kf: float(angle_between_rotmats(R0[kf], R_true_by_kf[kf])) for kf in (1, 2)}
     rot_err1 = {kf: float(angle_between_rotmats(R1[kf], R_true_by_kf[kf])) for kf in (1, 2)}
 
-    pose_raw0, pose_aligned0 = _pose_position_errors(C0, s0)
-    pose_raw1, pose_aligned1 = _pose_position_errors(C1, s1)
-    lm_raw0, lm_aligned0 = _landmark_errors(X0, s0)
-    lm_raw1, lm_aligned1 = _landmark_errors(X1, s1)
+    pose_initial, lm_initial = _state_errors(C0, X0, C_target, X_target)
+    pose_raw, lm_raw = _state_errors(C1, X1, C_target, X_target)
+    C_gauge_aligned = {kf: C_a + gauge_align_final * (C - C_a) for kf, C in C1.items()}
+    X_gauge_aligned = {lm_id: C_a + gauge_align_final * (X - C_a) for lm_id, X in X1.items()}
+    pose_aligned, lm_aligned = _state_errors(C_gauge_aligned, X_gauge_aligned, C_target, X_target)
+    pose_metric_raw, lm_metric_raw = _state_errors(C1, X1, C_true_by_kf, X_true_by_id)
+    C_metric_aligned = {kf: C_a + metric_align_final * (C - C_a) for kf, C in C1.items()}
+    X_metric_aligned = {lm_id: C_a + metric_align_final * (X - C_a) for lm_id, X in X1.items()}
+    pose_metric_aligned, lm_metric_aligned = _state_errors(
+        C_metric_aligned,
+        X_metric_aligned,
+        C_true_by_kf,
+        X_true_by_id,
+    )
 
-    print("\n[Test H] cost initial/final:", stats["initial_cost"], stats["final_cost"])
-    print("[Test H] scale s* initial/final:", s0, s1)
-    print("[Test H] rotation error (deg) initial:", {k: np.degrees(v) for k, v in rot_err0.items()})
-    print("[Test H] rotation error (deg) final:  ", {k: np.degrees(v) for k, v in rot_err1.items()})
-    print("[Test H] pose position error RAW initial/final:    ", pose_raw0, pose_raw1)
-    print("[Test H] pose position error ALIGNED initial/final:", pose_aligned0, pose_aligned1)
-    print("[Test H] landmark error RAW median/p90/max initial:    ", np.median(lm_raw0), np.percentile(lm_raw0, 90), np.max(lm_raw0))
-    print("[Test H] landmark error RAW median/p90/max final:      ", np.median(lm_raw1), np.percentile(lm_raw1, 90), np.max(lm_raw1))
-    print("[Test H] landmark error ALIGNED median/p90/max initial:", np.median(lm_aligned0), np.percentile(lm_aligned0, 90), np.max(lm_aligned0))
-    print("[Test H] landmark error ALIGNED median/p90/max final:  ", np.median(lm_aligned1), np.percentile(lm_aligned1, 90), np.max(lm_aligned1))
+    initial_rmse = float(np.sqrt(stats["initial_cost"] / len(problem.observations)))
+    final_rmse = float(np.sqrt(stats["final_cost"] / len(problem.observations)))
+    print(f"\n[Test H] reprojection RMSE initial/final: {initial_rmse:.6e} / {final_rmse:.6e}")
+    print(f"[Test H] fixed-slice scale: {gauge_scale:.12f}")
+    print(f"[Test H] post-hoc scale to metric truth initial/final: "
+          f"{metric_align_initial:.12f} / {metric_align_final:.12f}")
+    print(f"[Test H] post-hoc scale within fixed slice: {gauge_align_final:.12f}")
+    print("[Test H] rotation error initial/final (deg):",
+          {kf: np.degrees(value) for kf, value in rot_err0.items()},
+          {kf: np.degrees(value) for kf, value in rot_err1.items()})
+    print("[Test H] fixed-slice camera error initial/final/aligned:", pose_initial, pose_raw, pose_aligned)
+    print("[Test H] fixed-slice landmark initial median/p90/max:",
+          np.median(lm_initial), np.percentile(lm_initial, 90), np.max(lm_initial))
+    print("[Test H] fixed-slice landmark final raw median/p90/max:",
+          np.median(lm_raw), np.percentile(lm_raw, 90), np.max(lm_raw))
+    print("[Test H] fixed-slice landmark final aligned median/p90/max:",
+          np.median(lm_aligned), np.percentile(lm_aligned, 90), np.max(lm_aligned))
+    print("[Test H] metric-truth camera error raw/aligned:", pose_metric_raw, pose_metric_aligned)
+    print("[Test H] metric-truth landmark raw median/p90/max:",
+          np.median(lm_metric_raw), np.percentile(lm_metric_raw, 90), np.max(lm_metric_raw))
+    print("[Test H] metric-truth landmark aligned median/p90/max:",
+          np.median(lm_metric_aligned), np.percentile(lm_metric_aligned, 90), np.max(lm_metric_aligned))
 
-    # rotation is not affected by the scale gauge; it must converge cleanly on its own
-    assert max(rot_err1.values()) < 1.0
-    assert max(rot_err1.values()) < 0.1 * max(rot_err0.values())
+    assert max(rot_err1.values()) < 1e-6
+    assert max(rot_err1.values()) < 1e-4 * max(rot_err0.values())
+    assert max(pose_raw.values()) < 1e-8
+    assert float(np.max(lm_raw)) < 1e-6
+    assert abs(gauge_align_final - 1.0) < 1e-8
+    assert float(np.max(lm_aligned)) < 1e-6
 
-    # scale-aligned pose/landmark error must collapse close to zero -
-    # this is the check that there is no bug beyond the gauge-reference accuracy
-    assert max(pose_aligned1.values()) < 0.05
-    assert float(np.max(lm_aligned1)) < 0.05
+    # This fixture's noisy baseline does not encode the metric truth scale
+    assert abs(gauge_scale - 1.0) > 0.1
+    assert float(np.median(lm_metric_raw)) > 0.5
+    assert float(np.max(lm_metric_aligned)) < 1e-6
 
     # no landmark may end up behind any camera after optimisation
     for lm in seed["landmarks"]:
@@ -488,7 +582,8 @@ def test_ba_gauge_scalar_invariant_across_updates():
         C_g = camera_centre(R_by_kf[problem.gauge_kf], t_by_kf[problem.gauge_kf])
         return float(np.dot(problem.gauge_n, C_g - C_a))
 
-    np.testing.assert_allclose(_gauge_value(R_by_kf, t_by_kf), problem.gauge_b0, atol=1e-9)
+    gauge_initial = _gauge_value(R_by_kf, t_by_kf)
+    np.testing.assert_allclose(gauge_initial, problem.gauge_b0, atol=1e-12)
 
     # a large, deliberately bad delta (the kind of trial LM would reject) must
     # still land exactly on the constraint plane - the constraint is structural,
@@ -502,14 +597,18 @@ def test_ba_gauge_scalar_invariant_across_updates():
     bad_delta[gauge_col : gauge_col + 5] = np.asarray([3.0, -4.0, 0.5, -0.3, 0.2])
 
     R_prop, t_prop, _ = _apply_delta(problem, R_by_kf, t_by_kf, X_by_id, bad_delta, eps=1e-12)
-    np.testing.assert_allclose(_gauge_value(R_prop, t_prop), problem.gauge_b0, atol=1e-9)
+    gauge_rejected = _gauge_value(R_prop, t_prop)
+    np.testing.assert_allclose(gauge_rejected, problem.gauge_b0, atol=1e-12)
 
-    # and after a full accepted optimisation run, on the canonical written-back state
     stats = run_local_bundle_adjustment(K, seed, max_iters=100)
     assert stats["succeeded"] is True
     R_final = {kf: get_pose_for_kf(seed, kf)[0] for kf in problem.kf_ids}
     t_final = {kf: get_pose_for_kf(seed, kf)[1] for kf in problem.kf_ids}
-    np.testing.assert_allclose(_gauge_value(R_final, t_final), problem.gauge_b0, atol=1e-9)
+    gauge_final = _gauge_value(R_final, t_final)
+    np.testing.assert_allclose(gauge_final, problem.gauge_b0, atol=1e-12)
+
+    print(f"\n[Test I] gauge target/initial/rejected/final: {problem.gauge_b0:.16e} / "
+          f"{gauge_initial:.16e} / {gauge_rejected:.16e} / {gauge_final:.16e}")
 
 
 # Test C / Test J: finite-difference the actual residual function against the
@@ -556,6 +655,21 @@ def test_ba_jacobian_matches_finite_differences():
 
     gauge_col = problem.pose_col_by_kf[problem.gauge_kf]
 
+    def _block_for_column(col):
+        for kf in problem.pose_var_kfs:
+            start = problem.pose_col_by_kf[kf]
+            dof = problem.pose_dof_by_kf[kf]
+            if start <= col < start + dof:
+                offset = col - start
+                split = 2 if kf == problem.gauge_kf else 3
+                kind = "translation" if offset < split else "rotation"
+                return f"pose[{kf}].{kind}"
+        for lm_id in problem.landmark_ids:
+            start = problem.landmark_col_by_id[lm_id]
+            if start <= col < start + 3:
+                return f"landmark[{lm_id}]"
+        raise AssertionError(f"unmapped Jacobian column {col}")
+
     best_abs_err = None
     best_rel_err = None
     best_gauge_block_err = None
@@ -565,7 +679,10 @@ def test_ba_jacobian_matches_finite_differences():
         max_abs_err = float(np.max(abs_err))
         max_rel_err = float(np.max(abs_err / np.maximum(np.abs(J_analytic), 1e-6)))
         gauge_block_err = float(np.max(abs_err[:, gauge_col : gauge_col + 5]))
-        print(f"[Test C/J] eps={eps:.0e}  max_abs_err={max_abs_err:.3e}  max_rel_err={max_rel_err:.3e}  gauge_block_err={gauge_block_err:.3e}")
+        worst_row, worst_col = np.unravel_index(int(np.argmax(abs_err)), abs_err.shape)
+        worst_block = _block_for_column(int(worst_col))
+        print(f"[Test C/J] eps={eps:.0e} max_abs={max_abs_err:.3e} max_rel={max_rel_err:.3e} "
+              f"gauge_block={gauge_block_err:.3e} worst={worst_block} row={worst_row}")
         best_abs_err = max_abs_err if best_abs_err is None else min(best_abs_err, max_abs_err)
         best_rel_err = max_rel_err if best_rel_err is None else min(best_rel_err, max_rel_err)
         best_gauge_block_err = gauge_block_err if best_gauge_block_err is None else min(best_gauge_block_err, gauge_block_err)
@@ -575,12 +692,7 @@ def test_ba_jacobian_matches_finite_differences():
     assert best_gauge_block_err < 1e-5
 
 
-# Test K: the OLD (pre-gauge-fix) monocular scale generator must no longer be
-# a null direction of J. We take the old 3-DOF translation generator for the
-# gauge camera, project it onto the 2-DOF alpha subspace that actually exists
-# now (U^T @ rho_old), and show J no longer annihilates it - proving the old
-# symmetry is broken, not merely hidden. n itself must not lie in the free
-# alpha subspace (U^T @ n == 0 by construction), which is what breaks it.
+# Test K: the old scale generator is null before reduction and excluded after it
 def test_ba_old_scale_generator_no_longer_null():
     K, poses_true, points_true = _scene_ground_truth()
     pose_noise, rot_noise, point_noise = _noisy_test_perturbations()
@@ -595,36 +707,69 @@ def test_ba_old_scale_generator_no_longer_null():
         R_by_kf, t_by_kf = _initial_pose_state(seed, problem.kf_ids)
         X_by_id = _initial_landmark_state(seed, problem.landmark_ids)
 
-        _, _, J, reason = _evaluate_problem(K, problem, R_by_kf, t_by_kf, X_by_id, build_jacobian=True, eps=1e-12)
+        _, _, J, reason = _evaluate_problem(
+            K,
+            problem,
+            R_by_kf,
+            t_by_kf,
+            X_by_id,
+            build_jacobian=True,
+            eps=1e-12,
+        )
         assert reason is None
 
-        # n must not lie in the free (U-spanned) subspace - this is what actually
-        # removes the scale direction from the parameterisation, by construction
         np.testing.assert_allclose(problem.gauge_U.T @ problem.gauge_n, np.zeros(2), atol=1e-9)
 
         C_a = camera_centre(R_by_kf[problem.anchor_kf], t_by_kf[problem.anchor_kf])
-        v_old = np.zeros(problem.n_vars, dtype=np.float64)
+        J_old, old_pose_cols, old_landmark_cols = _unconstrained_jacobian(
+            K,
+            problem,
+            R_by_kf,
+            t_by_kf,
+            X_by_id,
+        )
+        v_old = np.zeros(J_old.shape[1], dtype=np.float64)
+        v_projected = np.zeros(problem.n_vars, dtype=np.float64)
+
         for kf in problem.pose_var_kfs:
-            col = problem.pose_col_by_kf[kf]
             C_j = camera_centre(R_by_kf[kf], t_by_kf[kf])
-            rho_old = -R_by_kf[kf] @ (C_j - C_a)
+            dC_old = C_j - C_a
+            rho_old = -R_by_kf[kf] @ dC_old
+            old_col = old_pose_cols[kf]
+            v_old[old_col : old_col + 3] = rho_old
+
+            reduced_col = problem.pose_col_by_kf[kf]
             if kf == problem.gauge_kf:
-                v_old[col : col + 2] = problem.gauge_U.T @ rho_old
+                v_projected[reduced_col : reduced_col + 2] = problem.gauge_U.T @ dC_old
             else:
-                v_old[col : col + 3] = rho_old
+                v_projected[reduced_col : reduced_col + 3] = rho_old
+
         for lm_id in problem.landmark_ids:
-            col = problem.landmark_col_by_id[lm_id]
-            v_old[col : col + 3] = X_by_id[lm_id] - C_a
+            dX_old = X_by_id[lm_id] - C_a
+            old_col = old_landmark_cols[lm_id]
+            reduced_col = problem.landmark_col_by_id[lm_id]
+            v_old[old_col : old_col + 3] = dX_old
+            v_projected[reduced_col : reduced_col + 3] = dX_old
+
         v_old_unit = v_old / np.linalg.norm(v_old)
+        v_projected_unit = v_projected / np.linalg.norm(v_projected)
 
-        Jv_old_norm = float(np.linalg.norm(J @ v_old_unit))
+        old_response = float(np.linalg.norm(J_old @ v_old_unit))
+        projected_response = float(np.linalg.norm(J @ v_projected_unit))
+        C_gauge = camera_centre(R_by_kf[problem.gauge_kf], t_by_kf[problem.gauge_kf])
+        constraint_rate = float(problem.gauge_n @ (C_gauge - C_a))
+        S_old = np.linalg.svd(J_old, compute_uv=False)
         S = np.linalg.svd(J, compute_uv=False)
-        print(f"\n[Test K/{label}] ||J @ old_scale_direction|| = {Jv_old_norm:.4f}  (was ~1e-15 before the fix)")
-        print(f"[Test K/{label}] smallest singular value of J = {S[-1]:.6e}  (was ~1e-13 before the fix)")
 
-        # the old symmetry direction is now a genuine, strongly-responded-to
-        # direction of J, not an approximate or exact null vector
-        assert Jv_old_norm > 0.1
+        print(f"\n[Test K/{label}] old full ||Jv||={old_response:.6e} "
+              f"constraint_rate={constraint_rate:.6e} smallest_sv={S_old[-1]:.6e}")
+        print(f"[Test K/{label}] reduced projection ||Jv||={projected_response:.6e} "
+              f"smallest_sv={S[-1]:.6e}")
+
+        assert old_response < 1e-10
+        np.testing.assert_allclose(constraint_rate, problem.gauge_b0, atol=1e-12)
+        assert abs(constraint_rate) > 1e-4
+        assert projected_response > 0.1
         assert S[-1] > 1e-4
 
 
@@ -728,12 +873,7 @@ def test_ba_zero_accepted_steps_leaves_canonical_state_untouched():
         np.testing.assert_array_equal(lm["X_w"], X_before[lm["id"]])
 
 
-# Phase 5D: with the gauge fixed, the converged physical solution must no
-# longer depend materially on the LM initial damping. Before the fix, a single
-# step's scale-direction fraction ranged from +61.7% to -52.1% across this same
-# lambda sweep (Phase 4). This test protects the actual success criterion of
-# the gauge patch: image evidence plus the fixed constraint determine the
-# answer, not the damping schedule.
+# Phase 5: the converged fixed-slice solution must not depend on initial damping
 def test_ba_gauge_removes_damping_dependence():
     K, poses_true, points_true = _scene_ground_truth()
     pose_noise, rot_noise, point_noise = _noisy_test_perturbations()
@@ -742,20 +882,24 @@ def test_ba_gauge_removes_damping_dependence():
     C_true_by_kf = {kf: camera_centre(R_true_by_kf[kf], t_true_by_kf[kf]) for kf in range(3)}
     X_true_by_id = {i: points_true[i].copy() for i in range(points_true.shape[0])}
 
-    pose_err_by_lambda = {}
-    lm_median_err_by_lambda = {}
-    gauge_value_by_lambda = {}
+    result_by_damping = {}
 
     for damping in (1e-4, 1e-3, 1e-2):
         seed = _build_ba_seed(
             K, poses_true, points_true, pose_noise_by_kf=pose_noise, rot_noise_by_kf=rot_noise, point_noise=point_noise, active_kf=2
         )
-        # capture the gauge basis BEFORE optimisation - it must be fixed at
-        # problem setup, not recomputed from the (lambda-dependent) final state
         problem, _ = _build_problem(K, seed, max_keyframes=3, min_keyframes=2, min_landmarks=6, min_observations=12, eps=1e-12)
         gauge_kf, gauge_n, gauge_b0 = problem.gauge_kf, problem.gauge_n, problem.gauge_b0
+        gauge_scale, C_target, X_target = _gauge_selected_truth(problem, C_true_by_kf, X_true_by_id)
 
-        stats = run_local_bundle_adjustment(K, seed, max_iters=100, initial_damping=damping)
+        stats = run_local_bundle_adjustment(
+            K,
+            seed,
+            max_iters=100,
+            initial_damping=damping,
+            improvement_tol=1e-12,
+            step_tol=1e-10,
+        )
         assert stats["succeeded"] is True
 
         R1 = {kf: get_pose_for_kf(seed, kf)[0].copy() for kf in range(3)}
@@ -763,24 +907,41 @@ def test_ba_gauge_removes_damping_dependence():
         C1 = {kf: camera_centre(R1[kf], t1[kf]) for kf in range(3)}
         X1 = {lm["id"]: lm["X_w"].copy() for lm in seed["landmarks"]}
 
-        gauge_value_by_lambda[damping] = (float(np.dot(gauge_n, C1[gauge_kf] - C1[0])), gauge_b0)
-        pose_err_by_lambda[damping] = float(np.linalg.norm(C1[1] - C_true_by_kf[1]))
-        lm_errs = np.asarray([float(np.linalg.norm(X - X_true_by_id[i])) for i, X in X1.items()])
-        lm_median_err_by_lambda[damping] = float(np.median(lm_errs))
+        pose_errors, landmark_errors = _state_errors(C1, X1, C_target, X_target)
+        scale_to_metric = _best_fit_scale(C1, X1, C1[0], C_true_by_kf, X_true_by_id)
+        state_vector = np.concatenate(
+            [
+                *(C1[kf] for kf in (1, 2)),
+                *(X1[lm_id] for lm_id in sorted(X1)),
+            ]
+        )
+        result_by_damping[damping] = {
+            "rmse": float(np.sqrt(stats["final_cost"] / len(problem.observations))),
+            "pose_max": max(pose_errors.values()),
+            "landmark_median": float(np.median(landmark_errors)),
+            "landmark_p90": float(np.percentile(landmark_errors, 90)),
+            "landmark_max": float(np.max(landmark_errors)),
+            "gauge": float(gauge_n @ (C1[gauge_kf] - C1[0])),
+            "gauge_target": gauge_b0,
+            "recovered_scale": float(1.0 / scale_to_metric),
+            "target_scale": gauge_scale,
+            "state": state_vector,
+        }
 
-    print("\n[Test 5D] pose(kf1) raw error by lambda:", pose_err_by_lambda)
-    print("[Test 5D] landmark median raw error by lambda:", lm_median_err_by_lambda)
-    print("[Test 5D] gauge scalar by lambda:", gauge_value_by_lambda)
+    print("\n[Test lambda] damping rmse pose_max lm_median lm_p90 lm_max gauge recovered_scale")
+    for damping, result in result_by_damping.items():
+        print(f"[Test lambda] {damping:.0e} {result['rmse']:.3e} {result['pose_max']:.3e} "
+              f"{result['landmark_median']:.3e} {result['landmark_p90']:.3e} "
+              f"{result['landmark_max']:.3e} {result['gauge']:.16e} "
+              f"{result['recovered_scale']:.12f}")
 
-    # the gauge scalar achieved by the optimiser must exactly match the fixed
-    # b0 captured at problem setup, regardless of lambda
-    for damping, (achieved, b0) in gauge_value_by_lambda.items():
-        np.testing.assert_allclose(achieved, b0, atol=1e-9)
+    for result in result_by_damping.values():
+        np.testing.assert_allclose(result["gauge"], result["gauge_target"], atol=1e-12)
+        np.testing.assert_allclose(result["recovered_scale"], result["target_scale"], atol=1e-7)
+        assert result["pose_max"] < 1e-8
+        assert result["landmark_max"] < 1e-6
 
-    # the recovered physical geometry must vary only mildly with lambda - a
-    # world apart from the pre-fix sign-flipping, >100-percentage-point swing
-    pose_vals = list(pose_err_by_lambda.values())
-    assert (max(pose_vals) - min(pose_vals)) / np.mean(pose_vals) < 0.01
-
-    lm_vals = list(lm_median_err_by_lambda.values())
-    assert (max(lm_vals) - min(lm_vals)) / np.mean(lm_vals) < 0.05
+    states = np.vstack([result["state"] for result in result_by_damping.values()])
+    max_state_spread = float(np.max(np.ptp(states, axis=0)))
+    print(f"[Test lambda] maximum coordinate spread across damping values: {max_state_spread:.3e}")
+    assert max_state_spread < 1e-6
