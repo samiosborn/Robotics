@@ -16,12 +16,24 @@
 - diagnostic-only selected rescue-refresh suppression replay
 - diagnostic-only frame-16 accepted-pose quality audit
 
+## Current downstream BA interpretation (2026-09-15, `21dc675`)
+
+- controlled ETH3D `cables_2_mono` comparison over attempted frames 2–41 changed only `enable_local_ba`
+- BA off: 13 / 40 accepted, first failure frame 15, last accepted frame 14, promotions 2 / 3 / 7
+- BA on: 16 / 40 accepted, first failure frame 18, last accepted frame 17, promotions 2 / 3 / 4
+- on the common continuous trajectory prefix through frame 14, BA improved Sim(3)-aligned camera-centre RMSE from 0.0867 m to 0.0416 m and consecutive translational RPE RMSE from 0.1187 m to 0.0473 m
+- over the 13 commonly accepted frontend frames, BA-on raised median PnP inliers by 39 and was better on 10 / 13 frames; median canonical-history reprojection error fell by 2.16 px and p90 by 5.05 px
+- immediately before each run's first failure, active PnP-capable support was 21 landmarks without BA versus 23 with BA; the BA-on map had 369 globally PnP-capable landmarks out of 373 versus 348 / 542 without BA
+- BA-on preserved cheirality and finite geometry, and delayed failure despite building a smaller map
+- the production `[1,2,3]` BA event remains conditioning-sensitive: pre-BA parallax p25 / median / p90 was 0.900° / 0.985° / 1.101°, and the maximum camera update was 2.20 times its initial anchor distance
+- verdict: BA clearly helps this downstream ETH3D run overall, but weak-window deformation remains a measured risk; no admission gate is justified from this single controlled comparison
+
 ## Reverted or failed experiments
 - proactive rescued-basis retracking before late support collapse
 - low-cardinality multi-seed retry in second-stage seeded 40 px rescue
 - other narrow support-refresh timing variants that did not improve behaviour enough to keep
 
-## Current long-run behaviour
+## Previous pre-hard-gauge long-run behaviour
 - BA-enabled pipeline with promotion guard and earlier rescued-support refresh now stays healthy through frame 18
 - first current failure is frame 19
 - long-run summary at 40 tracked frames:
@@ -31,7 +43,7 @@
   - support refresh triggered frames: 8, 10, 12, 13, 14, 15, 16, 17, 18
   - BA attempted / succeeded: 3 / 3
 
-## Current first failure
+## Previous pre-hard-gauge first failure
 - frame 19
 - active keyframe: 18 refreshed basis
 - track inliers: 616
@@ -43,7 +55,7 @@
 - pipeline result: `pnp_ransac_failed`
 - rescue attempted / succeeded: true / false
 
-## Current interpretation
+## Previous pre-hard-gauge interpretation
 - frame 19 live-pipeline diagnostics are now trustworthy
 - live diagnostics use the refreshed frame-18 active basis, not the stale promoted-keyframe reference
 - fixed live-bundle replay at frame 19 confirms:

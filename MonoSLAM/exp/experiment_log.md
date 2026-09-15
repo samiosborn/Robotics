@@ -1669,3 +1669,32 @@ Result
 Decision
 - kept as a narrow canonical-pose storage patch
 - classification: `result inconclusive`
+
+---
+
+## 2026-09-15 — Controlled ETH3D frontend comparison: local BA off versus on
+
+Method
+
+- commit `21dc675`; clean 12 / 92 test baseline
+- maintained ETH3D `diag_pnp` replay on `cables_2_mono`, attempted frames 2–41, fixed production configuration and seeds
+- sole semantic arm difference: `enable_local_ba=False` versus current production BA defaults; temporary `/tmp` observer recorded canonical poses, map health, and BA update statistics
+- BA-on result reproduced in a separate uninstrumented replay
+
+Result
+
+- BA off / on: accepted 13 / 16, first failure 15 / 18, last accepted 14 / 17, rejects 27 / 24, successful rescues 6 / 7
+- promoted keyframes differed naturally: off 2 / 3 / 7; on 2 / 3 / 4
+- on the common continuous prefix through frame 14, BA-on changed Sim(3)-aligned camera-centre RMSE 0.0867 → 0.0416 m and consecutive translational RPE RMSE 0.1187 → 0.0473 m
+- paired common accepted frames: median BA-on minus BA-off PnP correspondences +11, PnP inliers +39, bbox coverage +0.0313, canonical reprojection median −2.16 px, canonical reprojection p90 −5.05 px
+- final/pre-failure map: BA off had 542 landmarks, 348 globally PnP-capable, observation-count median 4, reprojection median / p90 3.09 / 8.50 px; BA on had 373, 369, 7, and 1.22 / 4.64 px
+- both maps retained finite landmarks and zero cheirality violations
+- first downstream difference followed frame-2 BA: frame 3 used the same 282 raw mapped correspondences but BA-on had 259 versus 275 inliers; after weak-window BA on `[1,2,3]`, frame 4 had 227 / 229 inliers versus 147 / 244 without BA and the keyframe histories first diverged
+- the `[1,2,3]` event had parallax p25 / median / p90 0.900° / 0.985° / 1.101° and a maximum camera-centre update 2.20 times its initial anchor distance; the healthy `[2,3,4]` event reproduced 1.055 → 0.697 px RMSE with a 0.118 maximum fractional pose update
+- current BA-on first failure is frame 18 at 0 / 23 PnP inliers; frame 19 also fails in both arms
+
+Decision
+
+- classification: `BA clearly helps` this ETH3D frontend run overall
+- keep BA enabled
+- make no production change or BA admission gate from this single comparison; weak-window conditioning remains the next causal measurement target if broader validation exposes regressions
