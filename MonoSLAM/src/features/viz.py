@@ -24,6 +24,7 @@ def draw_matches(
     draw_inliers_only: bool = False,
     inlier_mask: np.ndarray | None = None,
     r: int = 3,
+    colour: tuple[int, int, int] | None = None,
 ) -> None:
     out_path = Path(out_path)
     A = imgA.convert("RGB")
@@ -74,9 +75,9 @@ def draw_matches(
         y0 = float(kpsA[i, 1])
         x1 = float(kpsB[j, 0]) + float(WA)
         y1 = float(kpsB[j, 1])
-        draw.ellipse((x0 - rr, y0 - rr, x0 + rr, y0 + rr))
-        draw.ellipse((x1 - rr, y1 - rr, x1 + rr, y1 + rr))
-        draw.line((x0, y0, x1, y1), width=1)
+        draw.ellipse((x0 - rr, y0 - rr, x0 + rr, y0 + rr), outline=colour)
+        draw.ellipse((x1 - rr, y1 - rr, x1 + rr, y1 + rr), outline=colour)
+        draw.line((x0, y0, x1, y1), fill=colour, width=1)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(str(out_path))
