@@ -1,4 +1,4 @@
-# config/bootstrap.yaml
+# configs/bootstrap.yaml
 
 ransac:
   seed: 0

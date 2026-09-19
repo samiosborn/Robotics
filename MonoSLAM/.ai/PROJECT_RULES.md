@@ -79,10 +79,10 @@ If inconclusive:
 For structural or production changes, prefer this validation pattern unless the task requires more:
 - `uv run python -m py_compile ...`
 - `uv run python -m pytest tests/slam -q`
-- `PYTHONPATH=. uv run python scripts/demos/demo_frontend_eth3d.py`
+- `uv run python scripts/demos/demo_frontend_eth3d.py`
 - one focused ETH3D diagnostic run
 
 ## Current caution
-Do not widen BA casually.
-Current evidence points first to rescue-pose quality — specifically the frame-16 accepted rescue pose — not automatic need for stronger BA.
+Do not widen BA casually or add a BA admission gate without new evidence.
+The last controlled comparison found local BA helps overall, with weak-window conditioning as a measured risk.
 Do not suppress rescue refresh; it supports downstream support continuity.

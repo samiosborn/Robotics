@@ -1,31 +1,31 @@
 # Agent brief
 
 ## Project
-MonoSLAM is a monocular SLAM research codebase.
-The current focus is frontend robustness: rescue-pose quality, downstream geometry integrity, and dataset-boundary hygiene ready for a second dataset.
+slam_from_scratch (Python distribution `MonoSLAM`) is a from-scratch monocular SLAM research codebase.
+The current focus is frontend robustness: rescue-pose quality, downstream geometry integrity, and dataset-boundary hygiene.
 
 ## Trusted baseline
 - BA-enabled pipeline with pose-eligible promotion guard, earlier rescued-support refresh, and a gated multi-seed 40 px canonical-pose proxy for bad rescue poses
-- Stays healthy through frame 18; first failure at frame 19
-- 22-frame stats (post canonical-pose-proxy patch): ETH3D ok=17/22, rescue=10/9, refresh=9; KITTI ok=16/22, rescue=11/5, refresh=2
-- 81 tests pass
+- Local BA uses a hard monocular scale gauge (baseline of 2026-09-15)
+- ETH3D `cables_2_mono`, attempted frames 2–41: 16 accepted, last accepted frame 17, first failure frame 18
+- 92 tests pass
+- Details: `exp/current_status.md`; history: `exp/experiment_log.md`
 
 ## Current first failure
-- Frame 19: `pnp_ransac_failed` on live correspondences, rescue also fails
-- Active keyframe: frame 18 (refreshed basis)
-- Failure classification: coherent 2D tracks attached to a geometrically incompatible 3D support set
+- Frame 18: `pnp_ransac_failed`, 0 of 23 PnP inliers in the BA-on baseline
+- Earlier frame-19 diagnoses in the notes predate the BA gauge fix and may not describe the current failure
 
-## Resolved: frame-16 / frame-12 canonical-pose quality
-- The earlier leading interpretation (canonical rescue poses at frames 12 and 16 were sharp temporal outliers) was confirmed and fixed
-- Production now runs a gated 40 px multi-seed re-solve on the rescue correspondence set whenever accepted-inlier residual median exceeds 8 px, and stores the best proxy pose in place of the raw rescue pose
-- ETH3D frames 12 and 16 and KITTI frame 18 now trigger and select materially better canonical poses (see `exp/experiment_log.md`, "2026-06-20 - Canonical-pose proxy production patch")
-- This did not change the frame-19 short-horizon failure — classified `result inconclusive` for that specific downstream survival question, but kept as a genuine canonical-pose-quality improvement
+## Resolved: canonical-pose quality at frames 12 and 16
+- Canonical rescue poses at ETH3D frames 12 and 16 were temporal outliers, now corrected
+- Production runs a gated 40 px multi-seed re-solve on the rescue correspondence set whenever the accepted-inlier residual median exceeds 8 px, and stores the best proxy pose in place of the raw rescue pose
+- See `exp/experiment_log.md`, "2026-06-20 - Canonical-pose proxy production patch"
 
-## Current open question
-Frame 19 still fails after the canonical-pose-proxy patch. The bad-support-set question that caused frame 19 to fail is now a separate, open question from the (resolved) frame-16 pose-quality question.
+## Open questions
+- Cause of the first failure under the BA-on baseline; the earlier frame-19 classification was coherent 2D tracks attached to a geometrically incompatible 3D support set
+- Weak-window BA conditioning: the `[1,2,3]` BA event is conditioning-sensitive. It is the next causal measurement target if broader validation exposes regressions; no BA admission gate is justified yet
 
 ## Best next step
-Re-audit the frame-19 support set now that upstream canonical poses (12, 16, 18) are proxy-corrected — the original frame-19 diagnosis predates that fix and may no longer describe the current failure mode accurately.
+Re-audit the first-failure support set under the current BA-on baseline before proposing any production change.
 
 ## Important files
 Production:
@@ -41,6 +41,7 @@ Datasets:
 - `src/datasets/eth3d.py`
 
 Diagnostics and runners:
+- `scripts/diagnostics/diag_pnp.py`
 - `scripts/diagnostics/diag_pnp_eth3d.py`
 - `scripts/diagnostics/diag_pnp_kitti.py`
 - `scripts/demos/demo_frontend_eth3d.py`
@@ -60,7 +61,6 @@ Default to:
 - update notes after meaningful runs
 
 Do not assume the next fix is BA widening or rescue threshold relaxation.
-The current frontier is understanding and correcting the frame-16 accepted rescue pose.
 
 ## Dataset-boundary state
 - `src/slam/` is production, mostly dataset-agnostic

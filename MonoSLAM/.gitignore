@@ -1,29 +1,26 @@
-# .gitignore
-# Self-contained: this repo may be split out of its current monorepo,
-# so do not rely on any parent .gitignore.
+# Self-contained: does not rely on any parent .gitignore.
 
-# OS-specific
+# OS
 .DS_Store
 Thumbs.db
 __MACOSX/
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
 *.egg
+build/
+dist/
 *.log
 
-# Test / build caches
+# Caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-build/
-dist/
+.ipynb_checkpoints/
 
-# Environments (uv / venv)
+# Environments
 .venv/
 env/
 venv/
@@ -31,17 +28,18 @@ __pypackages__/
 .env
 *.env
 
-# Editors / IDEs
+# Editors
 .vscode/
 .idea/
 *.sublime-workspace
 *.sublime-project
 
-# AI agent tool config (local only)
+# Local AI tool configuration
+.agents/
 .claude/
 .codex
 
-# LaTeX build artefacts
+# LaTeX build artefacts (sources are tracked, PDFs are not)
 *.aux
 *.out
 *.toc
@@ -59,9 +57,12 @@ __pypackages__/
 *_minted*
 *.pdf
 
-# Generated runtime output
+# Generated output
 out/
 
-# Third-party datasets (see data/README.md for setup)
+# External datasets (see data/README.md). data/two_view/ holds small tracked examples.
 data/eth3d/
 data/kitti_odometry/
+
+# Keep data/ trackable when nested in a repository that ignores data/
+!/data/

@@ -1,4 +1,4 @@
-# src/slam/two_view.py
+# src/slam/two_view_consensus.py
 from __future__ import annotations
 
 import numpy as np

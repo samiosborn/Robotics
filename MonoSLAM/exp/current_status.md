@@ -1,5 +1,10 @@
 # Current trusted baseline
 
+Notes on paths and commits
+- Script paths in entries dated before 2026-09-13 use the earlier flat `scripts/` layout. Maintained scripts now live in `scripts/demos/` and `scripts/diagnostics/`.
+- One-off investigation scripts cited in older entries have been removed. Recover them from history, for example `git log --diff-filter=D --name-only -- scripts/`.
+- Commit hashes cited here come from the history before this repository was extracted and do not resolve in it. Match them by date and message.
+
 ## Kept changes
 - monotonic viable-consensus selection
 - stronger second-stage 20 px rescue search budget
@@ -10,7 +15,7 @@
 - earlier rescued-support refresh
 - minimal local bundle adjustment on promoted non-rescue keyframes
 - canonical pose agreement enforced in keyframe reads
-- live-pipeline threshold diagnostics in `scripts/diag_pnp_eth3d.py`
+- live-pipeline threshold diagnostics in `scripts/diagnostics/diag_pnp_eth3d.py`
 - live-pipeline local displacement-consistency diagnostics
 - live-pipeline refreshed-basis assignment diagnostics
 - diagnostic-only selected rescue-refresh suppression replay

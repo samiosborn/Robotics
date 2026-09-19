@@ -1,5 +1,10 @@
 # MonoSLAM experiment log
 
+Notes on paths and commits
+- Script paths in entries dated before 2026-09-13 use the earlier flat `scripts/` layout. Maintained scripts now live in `scripts/demos/` and `scripts/diagnostics/`.
+- One-off investigation scripts cited in older entries have been removed. Recover them from history, for example `git log --diff-filter=D --name-only -- scripts/`.
+- Commit hashes cited here come from the history before this repository was extracted and do not resolve in it. Match them by date and message.
+
 ## 2026-06-12 — Seed mutation cleanup for support-basis helpers
 
 Base state
